@@ -8,7 +8,7 @@ const accents = ["border-l-emerald-600", "border-l-teal-500", "border-l-orange-4
 export function ViralDashboard() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [error, setError] = useState("");
-  useEffect(() => { fetch("/api/v1/dashboard").then(async (response) => { if (!response.ok) throw new Error("Không thể tải dữ liệu tổng quan."); setDashboard((await response.json() as { data: Dashboard }).data); }).catch((caught: unknown) => setError(caught instanceof Error ? caught.message : "Không thể tải dashboard.")); }, []);
+  useEffect(() => { fetch("/api/v1/dashboard").then(async (response) => { if (response.status === 401) { window.location.href = "/login"; return; } if (!response.ok) throw new Error("Không thể tải dữ liệu tổng quan."); setDashboard((await response.json() as { data: Dashboard }).data); }).catch((caught: unknown) => setError(caught instanceof Error ? caught.message : "Không thể tải dashboard.")); }, []);
   const videos = dashboard?.videos ?? [];
   const ranking = useMemo(() => [...(dashboard?.videos ?? [])].sort((a, b) => b.score - a.score).slice(0, 5), [dashboard]);
   const maxScore = Math.max(100, ...ranking.map((video) => video.score));

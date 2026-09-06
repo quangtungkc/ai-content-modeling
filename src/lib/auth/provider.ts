@@ -1,5 +1,6 @@
 import type { AuthProvider, AuthSession } from "./types";
 import { getEnv } from "@/lib/env";
+import { getDatabaseSession } from "./session";
 
 /** Replace with the selected session provider without changing application services. */
 export class UnconfiguredAuthProvider implements AuthProvider {
@@ -10,7 +11,11 @@ export class UnconfiguredAuthProvider implements AuthProvider {
   }
 }
 
-export const authProvider: AuthProvider = new UnconfiguredAuthProvider();
+export class DatabaseAuthProvider implements AuthProvider {
+  async getSession(): Promise<AuthSession | null> { return getDatabaseSession(); }
+}
+
+export const authProvider: AuthProvider = new DatabaseAuthProvider();
 
 export async function getRequiredSession(): Promise<AuthSession> {
   const session = await authProvider.getSession();

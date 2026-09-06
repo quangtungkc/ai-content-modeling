@@ -81,6 +81,14 @@ npx prisma migrate dev --name ai-connections
 
 API key chỉ được giải mã ở server; database lưu ciphertext và 4 ký tự cuối để masking.
 
+## Authentication
+
+MVP dùng email/mật khẩu với session database và cookie `HttpOnly`. Sau khi cấu hình PostgreSQL, chạy migration để thêm bảng session và password hash:
+
+```bash
+npx prisma migrate dev --name authentication
+```
+
 ## Windows Desktop App
 
 Desktop client dùng Tauri và luôn kết nối tới backend web. Khi phát triển cục bộ, chạy `npm run desktop:dev`. Khi build installer, mở **Developer PowerShell for Visual Studio**, đặt URL production trước khi build:
