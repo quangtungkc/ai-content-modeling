@@ -1,0 +1,11 @@
+node_modules/
+.next/
+out/
+coverage/
+src-tauri/target/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+*.log
+prisma/*.db

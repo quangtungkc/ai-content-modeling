@@ -1,0 +1,456 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RecordStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum IdeaStatus {
+  DRAFT
+  APPROVED
+  REJECTED
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum AssetStatus {
+  UPLOADED
+  APPROVED
+  NEEDS_REVISION
+  APPROVED_ANYWAY
+}
+
+enum ValidationResult {
+  APPROVED
+  NEEDS_REVISION
+}
+
+enum GenerationStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  APPROVED
+}
+
+enum GenerationJobStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum DailyReportStatus {
+  PREPARING
+  READY
+  PUBLISHED
+  FAILED
+}
+
+enum UsageMetric {
+  AI_CALL
+  AI_INPUT_TOKENS
+  AI_OUTPUT_TOKENS
+  GEMINI_VIDEO_ANALYSIS
+  VEO_GENERATION
+  STORAGE_BYTES
+  COMPETITOR_REQUEST
+}
+
+enum SceneVersionStatus {
+  GENERATING
+  READY
+  APPROVED
+  FAILED
+}
+
+enum ReviewStatus {
+  PENDING
+  APPLIED
+  IGNORED
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  channels  Channel[]
+  aiConnections AIConnection[]
+  usageEvents UsageEvent[]
+}
+
+model AIConnection {
+  id           String   @id @default(cuid())
+  userId       String
+  provider     String
+  kind         String
+  label        String?
+  encryptedKey String
+  keyLast4     String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  revokedAt    DateTime?
+  user         User     @relation(fields: [userId], references: [id])
+  @@unique([userId, provider, kind])
+  @@index([userId, revokedAt])
+}
+
+model Channel {
+  id                    String       @id @default(cuid())
+  userId                String
+  name                  String
+  platform              String
+  topic                 String
+  subTopic              String?
+  targetCountry         String
+  language              String
+  audience              String
+  contentStyle          String
+  visualStyle           String
+  videoDurationSec      Int?
+  hasDialogue           Boolean      @default(false)
+  creativeInstructions  String?
+  mustKeep              String[]
+  mustAvoid             String[]
+  timezone              String
+  status                RecordStatus @default(ACTIVE)
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+  user                  User         @relation(fields: [userId], references: [id])
+  competitors           Competitor[]
+  reports               DailyReport[]
+  projects              ContentProject[]
+  usageEvents           UsageEvent[]
+  @@index([userId, status])
+}
+
+model Competitor {
+  id            String       @id @default(cuid())
+  channelId     String
+  platform      String
+  url           String
+  externalId    String
+  handle        String
+  normalizedUrl String
+  displayName   String?
+  avatar        String?
+  status        RecordStatus @default(ACTIVE)
+  lastSyncedAt  DateTime?
+  syncError     String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  channel       Channel      @relation(fields: [channelId], references: [id])
+  videos        CompetitorVideo[]
+  baselines     CompetitorBaseline[]
+  @@unique([channelId, normalizedUrl])
+}
+
+model CompetitorVideo {
+  id            String           @id @default(cuid())
+  competitorId  String
+  externalId    String
+  url           String
+  title         String?
+  caption       String?
+  thumbnailUrl  String?
+  publishedAt   DateTime?
+  duration      Int?
+  firstSeenAt   DateTime         @default(now())
+  lastSeenAt    DateTime         @default(now())
+  competitor    Competitor       @relation(fields: [competitorId], references: [id])
+  snapshots     VideoMetricSnapshot[]
+  analyses      SourceAnalysis[]
+  reportItems   ReportItem[]
+  @@unique([competitorId, externalId])
+}
+
+model VideoMetricSnapshot {
+  id           String     @id @default(cuid())
+  videoId      String
+  capturedAt   DateTime
+  views        Int        @default(0)
+  likes        Int        @default(0)
+  comments     Int        @default(0)
+  shares       Int        @default(0)
+  rawMetrics   Json?
+  video        CompetitorVideo @relation(fields: [videoId], references: [id])
+  @@unique([videoId, capturedAt])
+  @@index([videoId, capturedAt(sort: Desc)])
+}
+
+model CompetitorBaseline {
+  id             String     @id @default(cuid())
+  competitorId   String
+  windowDays     Int
+  sampleSize     Int
+  viewsP50       Float
+  viewsP75       Float
+  viewsP90       Float
+  engagementRate Float
+  calculatedAt   DateTime   @default(now())
+  competitor     Competitor @relation(fields: [competitorId], references: [id])
+  @@unique([competitorId, windowDays, calculatedAt])
+}
+
+model DailyReport {
+  id          String       @id @default(cuid())
+  channelId   String
+  localDate   DateTime
+  periodStart DateTime
+  periodEnd   DateTime
+  timezone    String
+  status      DailyReportStatus @default(PREPARING)
+  generatedAt DateTime?
+  publishedAt DateTime?
+  channel     Channel      @relation(fields: [channelId], references: [id])
+  items       ReportItem[]
+  @@unique([channelId, localDate])
+}
+
+model InAppNotification {
+  id        String   @id @default(cuid())
+  userId    String
+  channelId String
+  reportId  String
+  type      String
+  title     String
+  message   String
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+  @@index([userId, readAt, createdAt(sort: Desc)])
+}
+
+model ReportItem {
+  id                  String      @id @default(cuid())
+  reportId            String
+  sourceVideoId       String
+  viralScore          Float
+  relativePerformance Float
+  analysisSummary     String?
+  modelingMechanism   String?
+  rank                Int
+  report              DailyReport @relation(fields: [reportId], references: [id])
+  sourceVideo         CompetitorVideo @relation(fields: [sourceVideoId], references: [id])
+  @@unique([reportId, sourceVideoId])
+}
+
+model SourceAnalysis {
+  id                    String     @id @default(cuid())
+  sourceVideoId         String
+  version               Int
+  provider              String
+  schemaVersion         String
+  content               Json
+  rawOutput             Json?
+  createdAt             DateTime   @default(now())
+  sourceVideo           CompetitorVideo @relation(fields: [sourceVideoId], references: [id])
+  ideas                 ModelingIdea[]
+  @@unique([sourceVideoId, version])
+}
+
+model ModelingIdea {
+  id              String        @id @default(cuid())
+  sourceVideoId   String
+  analysisId      String
+  title           String
+  content         Json
+  status          IdeaStatus    @default(DRAFT)
+  saved           Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  analysis        SourceAnalysis @relation(fields: [analysisId], references: [id])
+  project         ContentProject?
+}
+
+model ContentProject {
+  id             String             @id @default(cuid())
+  channelId      String
+  ideaId         String             @unique
+  status         String
+  deconstruction Json?
+  artDirection   Json?
+  characterDesign Json?
+  backgroundDesign Json?
+  storyboard      Json?
+  safetyReview   Json?
+  productionPrompts Json?
+  createdBy      String
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  channel        Channel            @relation(fields: [channelId], references: [id])
+  idea           ModelingIdea      @relation(fields: [ideaId], references: [id])
+  scenes         StoryboardScene[]
+  assets         Asset[]
+  reviews        ProjectReview[]
+  usageEvents    UsageEvent[]
+}
+
+model UsageEvent {
+  idempotencyKey String      @id
+  userId         String
+  channelId      String?
+  projectId      String?
+  metric         UsageMetric
+  quantity       Float       @default(1)
+  inputTokens    Int?
+  outputTokens   Int?
+  bytes          BigInt?
+  usageDate      DateTime
+  metadata       Json?
+  createdAt      DateTime    @default(now())
+  user           User        @relation(fields: [userId], references: [id])
+  channel        Channel?    @relation(fields: [channelId], references: [id])
+  project        ContentProject? @relation(fields: [projectId], references: [id])
+  @@index([userId, usageDate])
+  @@index([userId, metric, usageDate])
+  @@index([channelId, usageDate])
+  @@index([projectId, usageDate])
+}
+
+model ProjectReview {
+  id                String       @id @default(cuid())
+  projectId         String
+  version           Int
+  provider          String
+  status            ReviewStatus @default(PENDING)
+  issues            Json
+  originalSnapshot  Json
+  decisionNote      String?
+  selectedIssueIds  Json?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  project           ContentProject @relation(fields: [projectId], references: [id])
+  @@unique([projectId, version])
+}
+
+model StoryboardScene {
+  id             String           @id @default(cuid())
+  projectId      String
+  sceneNumber    Int
+  visualBlock    String
+  actionBlock    String
+  audioBlock     String
+  englishPrompt  String?
+  promptProvider String?
+  status         String
+  project        ContentProject   @relation(fields: [projectId], references: [id])
+  assets         SceneAsset[]
+  generations    VideoGeneration[]
+  generationJobs VideoGenerationJob[]
+  versions       SceneGenerationVersion[]
+  @@unique([projectId, sceneNumber])
+}
+
+model Asset {
+  id          String          @id @default(cuid())
+  projectId   String
+  type        String
+  name        String
+  storageKey  String
+  characterId String?
+  backgroundId String?
+  sceneIds    String[]        @default([])
+  version     Int             @default(1)
+  mimeType    String
+  checksum    String
+  metadata    Json?
+  status      AssetStatus     @default(UPLOADED)
+  project     ContentProject  @relation(fields: [projectId], references: [id])
+  validations AssetValidation[]
+  scenes      SceneAsset[]
+  @@unique([projectId, name, version])
+  @@index([projectId, type, status])
+}
+
+model AssetValidation {
+  id        String           @id @default(cuid())
+  assetId   String
+  result    ValidationResult
+  issues    Json?
+  provider  String
+  version   Int
+  createdAt DateTime         @default(now())
+  asset     Asset            @relation(fields: [assetId], references: [id])
+  @@unique([assetId, version])
+}
+
+model SceneAsset {
+  sceneId String
+  assetId String
+  scene   StoryboardScene @relation(fields: [sceneId], references: [id])
+  asset   Asset           @relation(fields: [assetId], references: [id])
+  @@id([sceneId, assetId])
+}
+
+model VideoGeneration {
+  id             String           @id @default(cuid())
+  sceneId        String
+  provider       String
+  version        Int
+  promptSnapshot String
+  assetSnapshot  Json
+  externalJobId  String?
+  status         GenerationStatus @default(QUEUED)
+  previewUrl     String?
+  error          String?
+  createdBy      String
+  createdAt      DateTime         @default(now())
+  scene          StoryboardScene  @relation(fields: [sceneId], references: [id])
+  @@unique([sceneId, version])
+}
+
+model VideoGenerationJob {
+  id                   String             @id @default(cuid())
+  sceneId              String
+  provider             String
+  status               GenerationJobStatus @default(QUEUED)
+  externalOperationId  String?
+  prompt               String
+  error                String?
+  startedAt            DateTime?
+  completedAt          DateTime?
+  resultUrl            String?
+  createdAt            DateTime           @default(now())
+  scene                StoryboardScene    @relation(fields: [sceneId], references: [id])
+  version              SceneGenerationVersion?
+  @@index([sceneId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+}
+
+model SceneGenerationVersion {
+  id              String             @id @default(cuid())
+  sceneId         String
+  version         Int
+  generationJobId String             @unique
+  prompt          String
+  provider        String
+  status          SceneVersionStatus @default(GENERATING)
+  previewUrl      String?
+  matchScore      Int?
+  storyboardMatch Int?
+  characterMatch  Int?
+  backgroundMatch Int?
+  actionMatch     Int?
+  cameraMatch     Int?
+  reviewNotes     Json?
+  createdAt       DateTime           @default(now())
+  reviewedAt      DateTime?
+  scene           StoryboardScene    @relation(fields: [sceneId], references: [id])
+  generationJob   VideoGenerationJob @relation(fields: [generationJobId], references: [id])
+  @@unique([sceneId, version])
+  @@index([sceneId, createdAt(sort: Desc)])
+}
