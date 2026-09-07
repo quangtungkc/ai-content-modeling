@@ -187,18 +187,27 @@ export function ChannelManager() {
   }, []);
   const [editing, setEditing] = useState<Channel | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [formError, setFormError] = useState("");
 
   function openCreate() {
+    setFormError("");
     setEditing({ id: crypto.randomUUID(), ...emptyChannel });
     setIsCreating(true);
   }
   function openEdit(channel: Channel) {
+    setFormError("");
     setEditing({ ...channel });
     setIsCreating(false);
   }
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!editing?.name.trim()) return;
+    const duration = editing.videoDuration ? Number(editing.videoDuration) : undefined;
+    if (editing.videoDuration && (!Number.isInteger(duration) || duration! <= 0)) {
+      setFormError("Thời lượng video phải là một số giây dương, ví dụ: 30.");
+      return;
+    }
+    setFormError("");
     try {
       const response = await fetch(
         isCreating ? "/api/v1/channels" : `/api/v1/channels/${editing.id}`,
@@ -208,8 +217,11 @@ export function ChannelManager() {
           body: JSON.stringify(toPayload(editing)),
         },
       );
-      if (!response.ok) throw new Error("Không thể lưu Channel.");
       const body = (await response.json()) as { data: Record<string, unknown> };
+      if (!response.ok) {
+        const failed = body as { error?: { message?: string } };
+        throw new Error(failed.error?.message ?? "Không thể lưu kênh.");
+      }
       const saved = toUiChannel(body.data);
       setChannels((current) =>
         isCreating
@@ -219,9 +231,9 @@ export function ChannelManager() {
       setEditing(null);
       setNotice("");
     } catch (error) {
-      setNotice(
-        error instanceof Error ? error.message : "Không thể lưu Channel.",
-      );
+      const message = error instanceof Error ? error.message : "Không thể lưu kênh.";
+      setFormError(message);
+      setNotice(message);
     }
   }
   async function remove(channel: Channel) {
@@ -323,6 +335,7 @@ export function ChannelManager() {
         <ChannelModal
           channel={editing}
           title={isCreating ? "Tạo kênh mới" : "Chỉnh sửa kênh"}
+          error={formError}
           onChange={setEditing}
           onClose={() => setEditing(null)}
           onSave={save}
@@ -358,12 +371,14 @@ export function ChannelManager() {
 function ChannelModal({
   channel,
   title,
+  error,
   onChange,
   onClose,
   onSave,
 }: {
   channel: Channel;
   title: string;
+  error: string;
   onChange: (channel: Channel) => void;
   onClose: () => void;
   onSave: (event: FormEvent<HTMLFormElement>) => void;
@@ -395,6 +410,9 @@ function ChannelModal({
             <label key={key} className="text-sm text-slate-300">
               {label}
               <input
+                type={key === "videoDuration" ? "number" : "text"}
+                min={key === "videoDuration" ? 1 : undefined}
+                step={key === "videoDuration" ? 1 : undefined}
                 required={
                   key === "name" || key === "platform" || key === "topic"
                 }
@@ -408,6 +426,7 @@ function ChannelModal({
             </label>
           ))}
         </div>
+        <div className="mt-3 flex flex-wrap gap-2"><span className="text-xs text-slate-400">Chọn nhanh thời lượng:</span>{[15, 30, 60, 180].map((seconds) => <button type="button" key={seconds} onClick={() => onChange({ ...channel, videoDuration: String(seconds) })} className="rounded border border-white/15 px-2 py-1 text-xs text-cyan-300 hover:bg-white/10">{seconds} giây</button>)}</div>
         <label className="mt-4 flex items-center gap-3 text-sm text-slate-300">
           <input
             type="checkbox"
@@ -431,6 +450,7 @@ function ChannelModal({
             className="mt-1.5 w-full resize-y rounded-lg border border-white/10 bg-slate-950 px-3 py-2.5 text-sm text-white outline-none placeholder:text-slate-600 focus:border-cyan-400"
           />
         </label>
+        {error && <p role="alert" className="mt-4 rounded-lg border border-rose-400/30 bg-rose-400/10 px-3 py-2 text-sm text-rose-200">{error}</p>}
         <div className="mt-6 flex justify-end gap-3">
           <button
             type="button"
