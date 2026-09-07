@@ -23,12 +23,23 @@ export async function GET(request: Request) {
     const tokenResponse = await fetch(tokenUrl);
     const tokenBody = await tokenResponse.json() as { access_token?: string };
     if (!tokenResponse.ok || !tokenBody.access_token) return redirect("token_failed");
-    const pagesUrl = new URL(`https://graph.facebook.com/${version}/me/accounts`);
-    pagesUrl.search = new URLSearchParams({ fields: "id,name,access_token", access_token: tokenBody.access_token }).toString();
-    const pagesResponse = await fetch(pagesUrl);
-    const pagesBody = await pagesResponse.json() as { data?: Array<{ id: string; name: string; access_token?: string }> };
-    const selectedToken = pagesBody.data?.[0]?.access_token ?? tokenBody.access_token;
-    const label = pagesBody.data?.[0] ? `Facebook Page: ${pagesBody.data[0].name}` : "Facebook account";
+    let selectedToken = tokenBody.access_token;
+    let label = "Facebook account";
+    try {
+      const pagesUrl = new URL(`https://graph.facebook.com/${version}/me/accounts`);
+      pagesUrl.search = new URLSearchParams({ fields: "id,name,access_token", access_token: tokenBody.access_token }).toString();
+      const pagesResponse = await fetch(pagesUrl);
+      if (pagesResponse.ok) {
+        const pagesBody = await pagesResponse.json() as { data?: Array<{ id: string; name: string; access_token?: string }> };
+        const page = pagesBody.data?.[0];
+        if (page) {
+          selectedToken = page.access_token ?? selectedToken;
+          label = `Facebook Page: ${page.name}`;
+        }
+      }
+    } catch (error) {
+      console.warn("Facebook Page lookup failed; saving account token", error instanceof Error ? error.message : "Unknown error");
+    }
     await db.aIConnection.upsert({ where: { userId_provider_kind: { userId, provider: "FACEBOOK", kind: "PLATFORM" } }, create: { userId, provider: "FACEBOOK", kind: "PLATFORM", label, encryptedKey: encryptSecret(selectedToken), keyLast4: selectedToken.slice(-4) }, update: { label, encryptedKey: encryptSecret(selectedToken), keyLast4: selectedToken.slice(-4), revokedAt: null } });
     const response = redirect("connected");
     response.headers.append("Set-Cookie", `${FACEBOOK_STATE_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
