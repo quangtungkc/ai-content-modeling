@@ -1,5 +1,5 @@
 import Redis from "ioredis";
-import { getEnv } from "@/lib/env";
+import { getRequiredRedisUrl } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import { RedisJobQueue } from "@/lib/jobs/queue";
 import { syncChannelVideos } from "@/modules/videos/sync-service";
@@ -7,8 +7,7 @@ import { runGenerationJob } from "@/modules/generation/job-service";
 import type { VeoRequest } from "@/services/video-generation/types";
 import { prepareDailyReport, publishDailyReport } from "@/modules/reports/service";
 
-const env = getEnv();
-const redis = new Redis(env.REDIS_URL);
+const redis = new Redis(getRequiredRedisUrl());
 const queue = new RedisJobQueue(redis);
 
 async function handleJob(name: string, payload: Record<string, unknown>) {

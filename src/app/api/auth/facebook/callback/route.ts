@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { db } from "@/lib/db";
 import { encryptSecret } from "@/lib/secrets";
-import { FACEBOOK_STATE_COOKIE, verifyFacebookState } from "@/lib/auth/facebook-oauth";
+import { FACEBOOK_STATE_COOKIE, facebookRedirectUri, verifyFacebookState } from "@/lib/auth/facebook-oauth";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -17,7 +17,7 @@ export async function GET(request: Request) {
   if (!appId || !appSecret) return redirect("missing_credentials");
   try {
     const version = process.env.META_GRAPH_VERSION ?? "v24.0";
-    const redirectUri = new URL("/api/auth/facebook/callback", request.url).toString();
+    const redirectUri = facebookRedirectUri(request);
     const tokenUrl = new URL(`https://graph.facebook.com/${version}/oauth/access_token`);
     tokenUrl.search = new URLSearchParams({ client_id: appId, client_secret: appSecret, redirect_uri: redirectUri, code }).toString();
     const tokenResponse = await fetch(tokenUrl);

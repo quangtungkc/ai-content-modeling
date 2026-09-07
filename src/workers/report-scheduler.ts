@@ -1,12 +1,11 @@
 import Redis from "ioredis";
-import { getEnv } from "@/lib/env";
+import { getRequiredRedisUrl } from "@/lib/env";
 import { db } from "@/lib/db";
 import { RedisJobQueue } from "@/lib/jobs/queue";
 import { getLocalClock } from "@/modules/reports/time";
 import { getDailyReportJobs } from "./report-scheduler-policy";
 
-const env = getEnv();
-const redis = new Redis(env.REDIS_URL);
+const redis = new Redis(getRequiredRedisUrl());
 const queue = new RedisJobQueue(redis);
 async function tick() {
   const channels = await db.channel.findMany({ where: { status: "ACTIVE" }, select: { id: true, timezone: true } });

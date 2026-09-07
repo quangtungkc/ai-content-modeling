@@ -28,4 +28,12 @@ export function facebookStateCookie(value: string) {
   return `${stateCookie}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600`;
 }
 
+export function facebookRedirectUri(request: Request) {
+  const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+  const forwardedProto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const host = forwardedHost ?? request.headers.get("host");
+  if (host) return `${forwardedProto ?? new URL(request.url).protocol.replace(":", "")}://${host}/api/auth/facebook/callback`;
+  return new URL("/api/auth/facebook/callback", request.url).toString();
+}
+
 export { stateCookie as FACEBOOK_STATE_COOKIE };

@@ -1,11 +1,10 @@
 import Redis from "ioredis";
-import { getEnv } from "@/lib/env";
+import { getRequiredRedisUrl } from "@/lib/env";
 import { db } from "@/lib/db";
 import { logger } from "@/lib/logger";
 import { RedisJobQueue } from "@/lib/jobs/queue";
 
-const env = getEnv();
-const redis = new Redis(env.REDIS_URL);
+const redis = new Redis(getRequiredRedisUrl());
 const queue = new RedisJobQueue(redis);
 const intervalMs = 2 * 60 * 60 * 1000;
 
