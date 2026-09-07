@@ -21,6 +21,14 @@ type Dashboard = {
   }>;
 };
 type ChannelOption = { id: string; name: string };
+type SyncProgress = {
+  syncId: string;
+  status: "running" | "succeeded" | "failed";
+  total: number;
+  processed: number;
+  failed: number;
+  error?: string | null;
+};
 const accents = [
   "border-l-emerald-600",
   "border-l-teal-500",
@@ -34,6 +42,7 @@ export function ViralDashboard() {
   const [isLoading, setIsLoading] = useState(true);
   const [message, setMessage] = useState("");
   const [isSyncing, setIsSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const [channels, setChannels] = useState<ChannelOption[]>([]);
   const [periodHours, setPeriodHours] = useState("24");
   const [channelId, setChannelId] = useState("");
@@ -75,6 +84,39 @@ export function ViralDashboard() {
       setChannels(body.data);
     });
   }, []);
+  useEffect(() => {
+    if (!syncProgress?.syncId || syncProgress.status !== "running") return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/v1/sync/${syncProgress.syncId}`, { cache: "no-store" });
+        const body = await response.json() as { data?: SyncProgress; error?: { message?: string } };
+        if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể đọc tiến trình đồng bộ.");
+        if (cancelled) return;
+        setSyncProgress(body.data);
+        if (body.data.status === "running") {
+          timer = setTimeout(() => void poll(), 1000);
+        } else {
+          setIsSyncing(false);
+          setMessage(body.data.status === "succeeded"
+            ? `Đã đồng bộ xong ${body.data.processed}/${body.data.total} đối thủ${body.data.failed ? `, lỗi ${body.data.failed}` : ""}.`
+            : body.data.error ?? "Đồng bộ không hoàn tất.");
+          setAppliedFilters((current) => ({ ...current }));
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setIsSyncing(false);
+          setError(caught instanceof Error ? caught.message : "Không thể đọc tiến trình đồng bộ.");
+        }
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [syncProgress?.syncId, syncProgress?.status]);
   const videos = useMemo(() => {
     const cutoff = Date.now() - Number(appliedFilters.periodHours) * 3_600_000;
     return (dashboard?.videos ?? []).filter((video) => new Date(video.publishedAt).getTime() >= cutoff && video.currentViews >= Number(appliedFilters.minimumViews));
@@ -89,16 +131,19 @@ export function ViralDashboard() {
   const maxScore = Math.max(100, ...ranking.map((video) => video.score));
   async function handleSync() {
     setIsSyncing(true);
+    setSyncProgress(null);
+    setError("");
     setMessage("");
     try {
       const response = await fetch("/api/v1/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(channelId ? { channelId } : {}) });
-      const body = await response.json() as { data?: { channels?: number; message?: string }; error?: { message?: string } };
+      const body = await response.json() as { data?: { syncId?: string; channels?: number; total?: number; message?: string }; error?: { message?: string } };
       if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể bắt đầu đồng bộ dữ liệu.");
-      setMessage(`${body.data.message ?? "Đã bắt đầu đồng bộ."} Có ${body.data.channels ?? 0} kênh được xử lý. Vui lòng tải lại sau ít phút.`);
+      if (!body.data.syncId) throw new Error("Máy chủ chưa trả về mã tiến trình đồng bộ.");
+      setSyncProgress({ syncId: body.data.syncId, status: "running", total: body.data.total ?? 0, processed: 0, failed: 0 });
+      setMessage(`${body.data.message ?? "Đã bắt đầu đồng bộ."} Đang theo dõi ${body.data.total ?? 0} đối thủ.`);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Không thể bắt đầu đồng bộ dữ liệu.");
-    } finally {
       setIsSyncing(false);
+      setError(caught instanceof Error ? caught.message : "Không thể bắt đầu đồng bộ dữ liệu.");
     }
   }
   const kpis: Array<[string, string | number, string]> = [
@@ -156,7 +201,13 @@ export function ViralDashboard() {
             {isLoading ? "Đang tải..." : "Áp dụng"}
           </button>
         </div>
-        {message && !isLoading && <p aria-live="polite" className="mt-3 text-sm font-semibold text-[#07865f]">{message}</p>}
+        {syncProgress?.status === "running" && (
+          <div aria-live="polite" className="mt-3 rounded-lg bg-[#eef8f5] px-3 py-2 text-sm font-semibold text-[#07865f]">
+            Đang xử lý đối thủ: {syncProgress.processed}/{syncProgress.total}
+            {syncProgress.failed ? ` · lỗi ${syncProgress.failed}` : ""}
+          </div>
+        )}
+        {message && !isLoading && syncProgress?.status !== "running" && <p aria-live="polite" className="mt-3 text-sm font-semibold text-[#07865f]">{message}</p>}
         <p className="mt-3 text-xs leading-5 text-[#6883aa]"><strong>Mức tín hiệu</strong> lọc video theo lượt xem hiện tại: từ 50.000 hoặc từ 100.000 lượt xem. Điểm lan truyền vẫn được giữ trong bảng để so sánh mức vượt chuẩn của từng video.</p>
       </section>
       <section className="mt-7 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">

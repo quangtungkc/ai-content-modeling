@@ -6,8 +6,9 @@ import type Redis from "ioredis";
 import { UsageMetric } from "@prisma/client";
 import { recordUsage } from "@/modules/usage/service";
 import { decryptSecret } from "@/lib/secrets";
+import { markCompetitorProcessed } from "./sync-progress";
 
-export async function syncChannelVideos(channelId: string, redis: Redis) {
+export async function syncChannelVideos(channelId: string, redis: Redis, syncId?: string) {
   const competitors = await db.competitor.findMany({ where: { channelId, status: "ACTIVE" }, include: { channel: { select: { userId: true } } } });
   const hasFacebook = competitors.some((competitor) => typeof competitor.platform === "string" && competitor.platform.toLowerCase() === "facebook");
   const facebookConnection = hasFacebook && competitors[0] ? await db.aIConnection.findUnique({ where: { userId_provider_kind: { userId: competitors[0].channel.userId, provider: "FACEBOOK", kind: "PLATFORM" } } }) : null;
@@ -16,6 +17,7 @@ export async function syncChannelVideos(channelId: string, redis: Redis) {
   let syncedCompetitors = 0;
   let syncedVideos = 0;
   for (const competitor of competitors) {
+    let failed = false;
     try {
       const provider = getCompetitorProvider(competitor.url, facebookToken);
       if (!(await limiter.take(provider.platform, 60, 60))) throw new Error(`Rate limit reached for ${provider.platform}`);
@@ -34,10 +36,12 @@ export async function syncChannelVideos(channelId: string, redis: Redis) {
       await db.competitor.update({ where: { id: competitor.id }, data: { lastSyncedAt: new Date(), syncError: null } });
       syncedCompetitors += 1;
     } catch (error) {
+      failed = true;
       const message = error instanceof Error ? error.message : "Unknown competitor sync failure";
       await db.competitor.update({ where: { id: competitor.id }, data: { syncError: message } });
       logger.error("Competitor sync failed", { channelId, competitorId: competitor.id, message });
     }
+    if (syncId) await markCompetitorProcessed(redis, syncId, failed);
   }
   return { channelId, competitors: syncedCompetitors, videos: syncedVideos };
 }
