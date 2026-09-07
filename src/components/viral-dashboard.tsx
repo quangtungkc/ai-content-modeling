@@ -21,7 +21,7 @@ type Dashboard = {
   }>;
 };
 type ChannelOption = { id: string; name: string };
-type CompetitorOption = { id: string; handle: string; displayName: string | null; platform: string };
+type CompetitorOption = { id: string; handle: string; displayName: string | null; platform: string; url: string };
 type SyncProgress = {
   syncId: string;
   status: "running" | "succeeded" | "failed";
@@ -35,6 +35,12 @@ type DesktopUpdater = {
   download: () => Promise<unknown>;
   install: () => Promise<unknown>;
   on: (event: string, listener: (payload?: { version?: string; percent?: number; message?: string }) => void) => () => void;
+};
+type FacebookScanItem = { url: string; caption: string; publishedAt: string | null; views: number | null; likes: number | null; comments: number | null; shares: number | null };
+type FacebookScanResult = { competitorId: string; sourceUrl: string; needsLogin: boolean; items: FacebookScanItem[]; error?: string };
+type DesktopFacebook = {
+  open: () => Promise<{ status: string }>;
+  scan: (entries: Array<{ id: string; url: string }>) => Promise<FacebookScanResult[]>;
 };
 const accents = [
   "border-l-emerald-600",
@@ -62,6 +68,7 @@ export function ViralDashboard() {
   const [manualCompetitors, setManualCompetitors] = useState<CompetitorOption[]>([]);
   const [manualError, setManualError] = useState("");
   const [isSavingManual, setIsSavingManual] = useState(false);
+  const [isBrowserScanning, setIsBrowserScanning] = useState(false);
   const [manualVideo, setManualVideo] = useState({ competitorId: "", url: "", publishedAt: new Date().toISOString().slice(0, 16), views: "", likes: "0", comments: "0", shares: "0", caption: "" });
   useEffect(() => {
     const controller = new AbortController();
@@ -207,6 +214,71 @@ export function ViralDashboard() {
     if (result.status === "dev") setUpdateStatus("Chức năng cập nhật chỉ chạy trong bản cài Electron.");
     if (result.status === "error") setUpdateStatus(result.message ?? "Không thể kiểm tra cập nhật.");
   }
+  async function openFacebookBrowser() {
+    const browser = (window as Window & { desktopFacebook?: DesktopFacebook }).desktopFacebook;
+    if (!browser) {
+      setError("Chức năng này chỉ chạy trong ứng dụng cài trên máy.");
+      return;
+    }
+    await browser.open();
+    setMessage("Cửa sổ Facebook đã mở. Đăng nhập xong, quay lại app và bấm Quét thử 3 đối thủ.");
+  }
+  async function scanFacebookTrial() {
+    const browser = (window as Window & { desktopFacebook?: DesktopFacebook }).desktopFacebook;
+    const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
+    if (!browser) {
+      setError("Chức năng này chỉ chạy trong ứng dụng cài trên máy.");
+      return;
+    }
+    if (!selectedChannelId) {
+      setError("Hãy chọn Channel trước khi quét đối thủ.");
+      return;
+    }
+    setIsBrowserScanning(true);
+    setError("");
+    setMessage("Đang mở và quét 3 Trang Facebook đầu tiên...");
+    try {
+      const competitorsResponse = await fetch(`/api/v1/channels/${selectedChannelId}/competitors`);
+      const competitorsBody = await competitorsResponse.json() as { data?: CompetitorOption[]; error?: { message?: string } };
+      const facebookCompetitors = (competitorsBody.data ?? []).filter((competitor) => competitor.platform.toLowerCase() === "facebook").slice(0, 3);
+      if (!competitorsResponse.ok || !facebookCompetitors.length) throw new Error(competitorsBody.error?.message ?? "Channel chưa có đối thủ Facebook để quét.");
+      const results = await browser.scan(facebookCompetitors.map(({ id, url }) => ({ id, url })));
+      if (results.some((result) => result.needsLogin)) {
+        setMessage("Facebook yêu cầu đăng nhập. Đăng nhập trong cửa sổ Facebook rồi bấm Quét thử 3 đối thủ lần nữa.");
+        return;
+      }
+      let stored = 0;
+      let skipped = 0;
+      for (const result of results) {
+        for (const item of result.items) {
+          if (!item.publishedAt || item.views === null) { skipped += 1; continue; }
+          const response = await fetch(`/api/v1/competitors/${result.competitorId}/manual-video`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              url: item.url,
+              caption: item.caption,
+              publishedAt: item.publishedAt,
+              views: item.views,
+              likes: item.likes ?? 0,
+              comments: item.comments ?? 0,
+              shares: item.shares ?? 0,
+            }),
+          });
+          if (response.ok) stored += 1;
+          else skipped += 1;
+        }
+      }
+      setAppliedFilters((current) => ({ ...current }));
+      setMessage(stored
+        ? `Đã quét và lưu ${stored} video từ 3 đối thủ. ${skipped ? `${skipped} mục chưa đủ số liệu nên bỏ qua.` : ""}`
+        : "Chưa tìm thấy video có đủ thời gian đăng và lượt xem. Mở Trang trong cửa sổ Facebook, cuộn đến bài viết rồi quét lại.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Không thể quét Facebook.");
+    } finally {
+      setIsBrowserScanning(false);
+    }
+  }
   function openManualEntry() {
     const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
     if (!selectedChannelId) {
@@ -292,6 +364,12 @@ export function ViralDashboard() {
           </a>
           <button onClick={openManualEntry} className="rounded-lg border border-[#d7e2f1] bg-white px-4 py-3 text-sm font-bold text-[#0b3262] shadow-sm">
             Nhập dữ liệu
+          </button>
+          <button onClick={() => void openFacebookBrowser()} className="rounded-lg border border-[#d7e2f1] bg-white px-4 py-3 text-sm font-bold text-[#0b3262] shadow-sm">
+            Mở Facebook
+          </button>
+          <button onClick={() => void scanFacebookTrial()} disabled={isBrowserScanning} className="rounded-lg border border-[#d7e2f1] bg-white px-4 py-3 text-sm font-bold text-[#0b3262] shadow-sm disabled:cursor-wait disabled:opacity-60">
+            {isBrowserScanning ? "Đang quét..." : "Quét thử 3"}
           </button>
           <button onClick={() => void handleSync()} disabled={isSyncing} className="rounded-lg bg-[#07865f] px-4 py-3 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60">
             {isSyncing ? "Đang xếp hàng..." : "↻ Đồng bộ dữ liệu"}

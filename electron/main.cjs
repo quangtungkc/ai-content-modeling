@@ -12,6 +12,7 @@ const APP_URL = process.env.DESKTOP_APP_URL || (app.isPackaged ? `http://127.0.0
 let mainWindow;
 let serverProcess;
 let workerProcess;
+let facebookWindow;
 
 function notifyUpdate(event, payload = {}) {
   mainWindow?.webContents.send(`desktop-update:${event}`, payload);
@@ -102,6 +103,95 @@ ipcMain.handle("desktop-update:download", async () => {
 });
 ipcMain.handle("desktop-update:install", () => {
   autoUpdater.quitAndInstall();
+});
+
+function createFacebookWindow() {
+  if (facebookWindow && !facebookWindow.isDestroyed()) {
+    facebookWindow.show();
+    facebookWindow.focus();
+    return facebookWindow;
+  }
+  facebookWindow = new BrowserWindow({
+    width: 1200,
+    height: 850,
+    title: "Facebook — Modeling AI",
+    autoHideMenuBar: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      partition: "persist:modeling-ai-facebook",
+    },
+  });
+  facebookWindow.on("closed", () => { facebookWindow = undefined; });
+  void facebookWindow.loadURL("https://www.facebook.com/");
+  return facebookWindow;
+}
+
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function scanFacebookPages(entries) {
+  const browser = createFacebookWindow();
+  const results = [];
+  for (const entry of entries.slice(0, 3)) {
+    try {
+      await browser.loadURL(entry.url);
+      await delay(3000);
+      const page = await browser.webContents.executeJavaScript(`
+        (() => {
+          const currentUrl = window.location.href;
+          if (currentUrl.includes("/login") || document.body.innerText.includes("Log in to Facebook")) {
+            return { needsLogin: true, items: [] };
+          }
+          const compactNumber = (value) => {
+            if (!value) return null;
+            const match = value.match(/([0-9][0-9.,\\s]*)([KMB])?/i);
+            if (!match) return null;
+            const raw = match[1].replace(/\\s/g, "");
+            const number = match[2] ? Number.parseFloat(raw.replace(",", ".")) : Number(raw.replace(/[.,]/g, ""));
+            if (!Number.isFinite(number)) return null;
+            const multiplier = match[2] === "K" ? 1_000 : match[2] === "M" ? 1_000_000 : match[2] === "B" ? 1_000_000_000 : 1;
+            return Math.round(number * multiplier);
+          };
+          const relativeDate = (text) => {
+            const match = text.match(/\\b(\\d+)\\s*(h|giờ|m|phút|d|ngày)\\b/i);
+            if (!match) return null;
+            const amount = Number(match[1]);
+            const unit = match[2].toLowerCase();
+            const minutes = unit === "m" || unit === "phút" ? amount : unit === "h" || unit === "giờ" ? amount * 60 : amount * 1440;
+            return new Date(Date.now() - minutes * 60_000).toISOString();
+          };
+          const found = new Map();
+          for (const anchor of document.querySelectorAll("a[href]")) {
+            const href = anchor.href;
+            if (!/\\/(reel|videos|posts)\\//.test(href) && !/watch\\/?\\?v=/.test(href)) continue;
+            if (found.has(href)) continue;
+            const article = anchor.closest('[role="article"]');
+            const text = (article?.innerText || anchor.innerText || "").trim();
+            if (!text) continue;
+            const views = compactNumber(text.match(/([0-9][0-9.,\\s]*[KMB]?)\\s*(?:views|lượt xem)/i)?.[1]);
+            const likes = compactNumber(text.match(/([0-9][0-9.,\\s]*[KMB]?)\\s*(?:reactions|likes|lượt thích)/i)?.[1]);
+            const comments = compactNumber(text.match(/([0-9][0-9.,\\s]*[KMB]?)\\s*(?:comments|bình luận)/i)?.[1]);
+            const shares = compactNumber(text.match(/([0-9][0-9.,\\s]*[KMB]?)\\s*(?:shares|lượt chia sẻ)/i)?.[1]);
+            found.set(href, { url: href, caption: text.slice(0, 1000), publishedAt: relativeDate(text), views, likes, comments, shares });
+          }
+          return { needsLogin: false, items: [...found.values()].slice(0, 10) };
+        })()
+      `, true);
+      results.push({ competitorId: entry.id, sourceUrl: entry.url, ...page });
+    } catch (error) {
+      results.push({ competitorId: entry.id, sourceUrl: entry.url, needsLogin: false, items: [], error: error instanceof Error ? error.message : "Không thể mở Trang Facebook." });
+    }
+  }
+  return results;
+}
+
+ipcMain.handle("facebook-browser:open", () => {
+  createFacebookWindow();
+  return { status: "opened" };
+});
+ipcMain.handle("facebook-browser:scan", async (_event, entries) => {
+  if (!Array.isArray(entries)) throw new Error("Danh sách đối thủ không hợp lệ.");
+  return scanFacebookPages(entries.filter((entry) => entry && typeof entry.id === "string" && typeof entry.url === "string"));
 });
 
 function createWindow() {

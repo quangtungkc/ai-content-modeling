@@ -12,3 +12,8 @@ contextBridge.exposeInMainWorld("desktopUpdater", {
     return () => ipcRenderer.removeListener(channel, handler);
   },
 });
+
+contextBridge.exposeInMainWorld("desktopFacebook", {
+  open: () => ipcRenderer.invoke("facebook-browser:open"),
+  scan: (entries) => ipcRenderer.invoke("facebook-browser:scan", entries),
+});
