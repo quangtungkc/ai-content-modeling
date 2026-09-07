@@ -39,11 +39,12 @@ export function ViralDashboard() {
   const [minimumViews, setMinimumViews] = useState("50000");
   const [appliedFilters, setAppliedFilters] = useState({ periodHours: "24", channelId: "", minimumViews: "50000" });
   useEffect(() => {
+    const controller = new AbortController();
     setIsLoading(true);
     setError("");
     const query = new URLSearchParams({ periodHours: appliedFilters.periodHours });
     if (appliedFilters.channelId) query.set("channelId", appliedFilters.channelId);
-    fetch(`/api/v1/dashboard?${query.toString()}`)
+    fetch(`/api/v1/dashboard?${query.toString()}`, { signal: controller.signal })
       .then(async (response) => {
         if (response.status === 401) {
           window.location.href = "/login";
@@ -57,14 +58,14 @@ export function ViralDashboard() {
           throw new Error(body.error?.message ?? "Không thể tải dữ liệu tổng quan.");
         }
         setDashboard(body.data);
+        setError("");
         setMessage("Đã áp dụng bộ lọc.");
       })
       .catch((caught: unknown) =>
-        setError(
-          caught instanceof Error ? caught.message : "Không thể tải dashboard.",
-        ),
+        { if (caught instanceof DOMException && caught.name === "AbortError") return; setError(caught instanceof Error ? caught.message : "Không thể tải dashboard."); },
       )
-      .finally(() => setIsLoading(false));
+      .finally(() => { if (!controller.signal.aborted) setIsLoading(false); });
+    return () => controller.abort();
   }, [appliedFilters]);
   useEffect(() => {
     fetch("/api/v1/channels").then(async (response) => {
