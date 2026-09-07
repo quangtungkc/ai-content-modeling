@@ -15,7 +15,12 @@ export class DatabaseAuthProvider implements AuthProvider {
   async getSession(): Promise<AuthSession | null> { return getDatabaseSession(); }
 }
 
-export const authProvider: AuthProvider = new DatabaseAuthProvider();
+// Local development opens the seeded workspace without requiring browser login.
+// Production always uses persisted database sessions.
+export const authProvider: AuthProvider =
+  process.env.NODE_ENV === "development"
+    ? new UnconfiguredAuthProvider()
+    : new DatabaseAuthProvider();
 
 export async function getRequiredSession(): Promise<AuthSession> {
   const session = await authProvider.getSession();

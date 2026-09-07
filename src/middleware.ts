@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
 const SESSION_COOKIE = "ai_content_modeling_session";
 
 export function middleware(request: NextRequest) {
+  if (process.env.NODE_ENV === "development") return NextResponse.next();
   if (request.cookies.has(SESSION_COOKIE)) return NextResponse.next();
   return NextResponse.redirect(new URL("/login", request.url));
 }
