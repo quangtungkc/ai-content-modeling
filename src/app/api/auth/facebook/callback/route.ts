@@ -34,7 +34,10 @@ export async function GET(request: Request) {
     response.headers.append("Set-Cookie", `${FACEBOOK_STATE_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
     return response;
   } catch (error) {
-    console.error("Facebook OAuth callback failed", error instanceof Error ? error.message : "Unknown error");
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("Facebook OAuth callback failed", message);
+    if (message.includes("CREDENTIAL_ENCRYPTION_KEY")) return redirect("invalid_encryption_key");
+    if (message.includes("Prisma")) return redirect("database_failed");
     return redirect("failed");
   }
 }
