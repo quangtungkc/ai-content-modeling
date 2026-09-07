@@ -57,6 +57,20 @@ npm run db:seed
 npm run dev
 ```
 
+## Local services với Docker
+
+Khi dùng app trên máy này, Docker Compose cung cấp PostgreSQL và Redis độc lập:
+
+```bash
+docker compose up -d
+```
+
+- PostgreSQL: `localhost:5433`
+- Redis: `localhost:6379`
+- Dừng services: `docker compose stop`
+
+Lần khởi tạo đầu tiên cần chạy `npx prisma migrate dev --name init` và `npm run db:seed` với `DATABASE_URL` trỏ tới PostgreSQL local. Docker volumes được giữ lại khi dừng services.
+
 Chạy background processes ở hai terminal riêng:
 
 ```bash

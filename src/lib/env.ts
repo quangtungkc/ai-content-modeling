@@ -14,6 +14,7 @@ export function getEnv() {
     DATABASE_URL: process.env.DATABASE_URL,
     REDIS_URL: process.env.REDIS_URL,
     AUTH_SECRET: process.env.AUTH_SECRET,
+    CREDENTIAL_ENCRYPTION_KEY: process.env.CREDENTIAL_ENCRYPTION_KEY,
     AI_PROVIDER: process.env.AI_PROVIDER,
     NODE_ENV: process.env.NODE_ENV,
   });
