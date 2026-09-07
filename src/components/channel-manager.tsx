@@ -47,57 +47,6 @@ const emptyChannel: Omit<Channel, "id"> = {
   timezone: "UTC",
 };
 
-const sampleChannels: Channel[] = [
-  {
-    id: "funny-animals",
-    name: "Funny Animals",
-    platform: "TikTok",
-    topic: "Comedy",
-    subTopic: "Animal comedy",
-    targetCountry: "US",
-    language: "English",
-    audience: "General audience",
-    contentStyle: "Short-form comedy",
-    visualStyle: "3D stylized comedy",
-    videoDuration: "30",
-    hasDialogue: false,
-    creativeInstructions: "Keep the humor visual and easy to understand.",
-    timezone: "America/New_York",
-  },
-  {
-    id: "science-lab",
-    name: "Science Lab",
-    platform: "YouTube",
-    topic: "Education",
-    subTopic: "Popular science",
-    targetCountry: "Germany",
-    language: "German",
-    audience: "Curious learners",
-    contentStyle: "Educational explainers",
-    visualStyle: "Documentary",
-    videoDuration: "180",
-    hasDialogue: true,
-    creativeInstructions: "Explain complex ideas with clear visual examples.",
-    timezone: "Europe/Berlin",
-  },
-  {
-    id: "kids-stories",
-    name: "Kids Stories",
-    platform: "TikTok",
-    topic: "Kids",
-    subTopic: "Bedtime stories",
-    targetCountry: "Vietnam",
-    language: "Vietnamese",
-    audience: "Children and parents",
-    contentStyle: "Narrative stories",
-    visualStyle: "2D colorful animation",
-    videoDuration: "60",
-    hasDialogue: true,
-    creativeInstructions: "Use gentle language and positive endings.",
-    timezone: "Asia/Ho_Chi_Minh",
-  },
-];
-
 const fields: Array<
   [keyof Omit<Channel, "id" | "hasDialogue">, string, string]
 > = [
@@ -161,7 +110,8 @@ function toUiCompetitor(value: Record<string, unknown>): Competitor {
 }
 
 export function ChannelManager() {
-  const [channels, setChannels] = useState(sampleChannels);
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const [notice, setNotice] = useState("");
   const [selected, setSelected] = useState<Channel | null>(null);
   const [competitorChannel, setCompetitorChannel] = useState<Channel | null>(
@@ -183,7 +133,8 @@ export function ChannelManager() {
         setNotice(
           error instanceof Error ? error.message : "Không thể tải Channel.",
         ),
-      );
+      )
+      .finally(() => setIsLoading(false));
   }, []);
   const [editing, setEditing] = useState<Channel | null>(null);
   const [isCreating, setIsCreating] = useState(false);
@@ -278,6 +229,11 @@ export function ChannelManager() {
           {notice}
         </div>
       )}
+      {isLoading ? (
+        <div className="mt-8 rounded-xl border border-dashed border-[#cbd9ea] bg-white p-10 text-center text-sm text-[#6883aa]">
+          Đang tải danh sách kênh...
+        </div>
+      ) : (
       <div className="mt-8 grid gap-4 lg:grid-cols-3">
         {channels.map((channel) => (
           <article
@@ -331,6 +287,7 @@ export function ChannelManager() {
           </div>
         )}
       </div>
+      )}
       {editing && (
         <ChannelModal
           channel={editing}
