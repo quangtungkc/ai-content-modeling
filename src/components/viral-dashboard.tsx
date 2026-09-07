@@ -33,6 +33,7 @@ export function ViralDashboard() {
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [message, setMessage] = useState("");
+  const [isSyncing, setIsSyncing] = useState(false);
   const [channels, setChannels] = useState<ChannelOption[]>([]);
   const [periodHours, setPeriodHours] = useState("24");
   const [channelId, setChannelId] = useState("");
@@ -86,6 +87,20 @@ export function ViralDashboard() {
     [videos],
   );
   const maxScore = Math.max(100, ...ranking.map((video) => video.score));
+  async function handleSync() {
+    setIsSyncing(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/v1/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(channelId ? { channelId } : {}) });
+      const body = await response.json() as { data?: { channels?: number; message?: string }; error?: { message?: string } };
+      if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể bắt đầu đồng bộ dữ liệu.");
+      setMessage(`${body.data.message ?? "Đã bắt đầu đồng bộ."} Có ${body.data.channels ?? 0} kênh được xử lý. Vui lòng tải lại sau ít phút.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Không thể bắt đầu đồng bộ dữ liệu.");
+    } finally {
+      setIsSyncing(false);
+    }
+  }
   const kpis: Array<[string, string | number, string]> = [
     [
       "Đối thủ đang theo dõi",
@@ -122,8 +137,8 @@ export function ViralDashboard() {
           >
             Quản lý Channel
           </a>
-          <button className="rounded-lg bg-[#07865f] px-4 py-3 text-sm font-bold text-white">
-            ↻ Đồng bộ dữ liệu
+          <button onClick={() => void handleSync()} disabled={isSyncing} className="rounded-lg bg-[#07865f] px-4 py-3 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60">
+            {isSyncing ? "Đang xếp hàng..." : "↻ Đồng bộ dữ liệu"}
           </button>
         </div>
       </header>

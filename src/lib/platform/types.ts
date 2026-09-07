@@ -1,4 +1,4 @@
-export type Platform = "tiktok";
+export type Platform = "tiktok" | "facebook";
 
 export type CompetitorChannel = {
   platform: Platform;

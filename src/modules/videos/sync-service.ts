@@ -5,15 +5,19 @@ import { RedisRateLimiter } from "@/lib/jobs/rate-limit";
 import type Redis from "ioredis";
 import { UsageMetric } from "@prisma/client";
 import { recordUsage } from "@/modules/usage/service";
+import { decryptSecret } from "@/lib/secrets";
 
 export async function syncChannelVideos(channelId: string, redis: Redis) {
   const competitors = await db.competitor.findMany({ where: { channelId, status: "ACTIVE" }, include: { channel: { select: { userId: true } } } });
+  const hasFacebook = competitors.some((competitor) => typeof competitor.platform === "string" && competitor.platform.toLowerCase() === "facebook");
+  const facebookConnection = hasFacebook && competitors[0] ? await db.aIConnection.findUnique({ where: { userId_provider_kind: { userId: competitors[0].channel.userId, provider: "FACEBOOK", kind: "PLATFORM" } } }) : null;
+  const facebookToken = facebookConnection && !facebookConnection.revokedAt ? decryptSecret(facebookConnection.encryptedKey) : undefined;
   const limiter = new RedisRateLimiter(redis);
   let syncedCompetitors = 0;
   let syncedVideos = 0;
   for (const competitor of competitors) {
     try {
-      const provider = getCompetitorProvider(competitor.url);
+      const provider = getCompetitorProvider(competitor.url, facebookToken);
       if (!(await limiter.take(provider.platform, 60, 60))) throw new Error(`Rate limit reached for ${provider.platform}`);
       const channel = await provider.resolveChannel(competitor.url);
       void recordUsage({ userId: competitor.channel.userId, channelId, metric: UsageMetric.COMPETITOR_REQUEST, idempotencyKey: `competitor:resolve:${competitor.id}:${Date.now()}` });
