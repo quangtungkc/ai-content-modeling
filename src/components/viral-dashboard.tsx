@@ -29,6 +29,12 @@ type SyncProgress = {
   failed: number;
   error?: string | null;
 };
+type DesktopUpdater = {
+  check: () => Promise<{ status: string; message?: string }>;
+  download: () => Promise<unknown>;
+  install: () => Promise<unknown>;
+  on: (event: string, listener: (payload?: { version?: string; percent?: number; message?: string }) => void) => () => void;
+};
 const accents = [
   "border-l-emerald-600",
   "border-l-teal-500",
@@ -43,6 +49,8 @@ export function ViralDashboard() {
   const [message, setMessage] = useState("");
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
+  const [updateStatus, setUpdateStatus] = useState("");
+  const [updateReady, setUpdateReady] = useState(false);
   const [channels, setChannels] = useState<ChannelOption[]>([]);
   const [periodHours, setPeriodHours] = useState("24");
   const [channelId, setChannelId] = useState("");
@@ -83,6 +91,24 @@ export function ViralDashboard() {
       const body = await response.json() as { data: ChannelOption[] };
       setChannels(body.data);
     });
+  }, []);
+  useEffect(() => {
+    const updater = (window as Window & { desktopUpdater?: DesktopUpdater }).desktopUpdater;
+    if (!updater) return;
+    const cleanups = [
+      updater.on("available", (payload) => {
+        setUpdateStatus(`Có bản ${payload?.version ?? "mới"}. Đang tải xuống...`);
+        void updater.download();
+      }),
+      updater.on("progress", (payload) => setUpdateStatus(`Đang tải bản cập nhật: ${payload?.percent ?? 0}%`)),
+      updater.on("downloaded", () => {
+        setUpdateReady(true);
+        setUpdateStatus("Đã tải xong bản cập nhật. Bấm lại để cài đặt.");
+      }),
+      updater.on("not-available", () => setUpdateStatus("Bạn đang dùng phiên bản mới nhất.")),
+      updater.on("error", (payload) => setUpdateStatus(payload?.message ?? "Không thể kiểm tra cập nhật.")),
+    ];
+    return () => cleanups.forEach((cleanup) => cleanup());
   }, []);
   useEffect(() => {
     if (!syncProgress?.syncId || syncProgress.status !== "running") return;
@@ -146,6 +172,22 @@ export function ViralDashboard() {
       setError(caught instanceof Error ? caught.message : "Không thể bắt đầu đồng bộ dữ liệu.");
     }
   }
+  async function handleSoftwareUpdate() {
+    const updater = (window as Window & { desktopUpdater?: DesktopUpdater }).desktopUpdater;
+    if (updateReady && updater) {
+      await updater.install();
+      return;
+    }
+    if (!updater) {
+      window.open("https://github.com/quangtungkc/ai-content-modeling/releases/latest", "_blank", "noopener,noreferrer");
+      setUpdateStatus("Đã mở trang tải bản cập nhật.");
+      return;
+    }
+    setUpdateStatus("Đang kiểm tra cập nhật...");
+    const result = await updater.check();
+    if (result.status === "dev") setUpdateStatus("Chức năng cập nhật chỉ chạy trong bản cài Electron.");
+    if (result.status === "error") setUpdateStatus(result.message ?? "Không thể kiểm tra cập nhật.");
+  }
   const kpis: Array<[string, string | number, string]> = [
     [
       "Đối thủ đang theo dõi",
@@ -176,6 +218,9 @@ export function ViralDashboard() {
           </p>
         </div>
         <div className="flex gap-3">
+          <button onClick={() => void handleSoftwareUpdate()} className="rounded-lg border border-[#d7e2f1] bg-white px-4 py-3 text-sm font-bold text-[#0b3262] shadow-sm">
+            {updateReady ? "Cài bản cập nhật" : "Cập nhật phần mềm"}
+          </button>
           <a
             href="/channels"
             className="rounded-lg border border-[#d7e2f1] bg-white px-4 py-3 text-sm font-bold text-[#0b3262] shadow-sm"
@@ -187,6 +232,7 @@ export function ViralDashboard() {
           </button>
         </div>
       </header>
+      {updateStatus && <p aria-live="polite" className="mt-3 text-sm font-semibold text-[#0b5799]">{updateStatus}</p>}
       {error && (
         <div className="mt-6 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
           {error}
