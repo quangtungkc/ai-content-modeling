@@ -8,16 +8,29 @@ import { recordUsage } from "@/modules/usage/service";
 import { decryptSecret } from "@/lib/secrets";
 import { markCompetitorProcessed } from "./sync-progress";
 
+async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  async function consume() {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => consume()));
+  return results;
+}
+
 export async function syncChannelVideos(channelId: string, redis: Redis, syncId?: string) {
   const competitors = await db.competitor.findMany({ where: { channelId, status: "ACTIVE" }, include: { channel: { select: { userId: true } } } });
   const hasFacebook = competitors.some((competitor) => typeof competitor.platform === "string" && competitor.platform.toLowerCase() === "facebook");
   const facebookConnection = hasFacebook && competitors[0] ? await db.aIConnection.findUnique({ where: { userId_provider_kind: { userId: competitors[0].channel.userId, provider: "FACEBOOK", kind: "PLATFORM" } } }) : null;
   const facebookToken = facebookConnection && !facebookConnection.revokedAt ? decryptSecret(facebookConnection.encryptedKey) : undefined;
   const limiter = new RedisRateLimiter(redis);
-  let syncedCompetitors = 0;
-  let syncedVideos = 0;
-  for (const competitor of competitors) {
+  const results = await mapWithConcurrency(competitors, 4, async (competitor) => {
     let failed = false;
+    let syncedVideos = 0;
     try {
       const provider = getCompetitorProvider(competitor.url, facebookToken);
       if (!(await limiter.take(provider.platform, 60, 60))) throw new Error(`Rate limit reached for ${provider.platform}`);
@@ -26,15 +39,14 @@ export async function syncChannelVideos(channelId: string, redis: Redis, syncId?
       const videos = await provider.getRecentVideos(channel);
       void recordUsage({ userId: competitor.channel.userId, channelId, metric: UsageMetric.COMPETITOR_REQUEST, quantity: 1, idempotencyKey: `competitor:recent:${competitor.id}:${Date.now()}` });
       const uniqueVideos = [...new Map(videos.map((video) => [video.externalId, video])).values()];
-      for (const video of uniqueVideos) {
+      await mapWithConcurrency(uniqueVideos, 3, async (video) => {
         const storedVideo = await db.competitorVideo.upsert({ where: { competitorId_externalId: { competitorId: competitor.id, externalId: video.externalId } }, create: { competitorId: competitor.id, externalId: video.externalId, url: video.url, caption: video.caption, thumbnailUrl: video.thumbnail, publishedAt: video.publishedAt, duration: video.durationSec }, update: { url: video.url, caption: video.caption, thumbnailUrl: video.thumbnail, publishedAt: video.publishedAt, duration: video.durationSec } });
         const metrics = await provider.getVideoMetrics(video);
         void recordUsage({ userId: competitor.channel.userId, channelId, metric: UsageMetric.COMPETITOR_REQUEST, idempotencyKey: `competitor:metrics:${competitor.id}:${video.externalId}:${Date.now()}` });
         await db.videoMetricSnapshot.upsert({ where: { videoId_capturedAt: { videoId: storedVideo.id, capturedAt: metrics.capturedAt } }, create: { videoId: storedVideo.id, views: metrics.views, likes: metrics.likes, comments: metrics.comments, shares: metrics.shares ?? 0, capturedAt: metrics.capturedAt }, update: { views: metrics.views, likes: metrics.likes, comments: metrics.comments, shares: metrics.shares ?? 0 } });
         syncedVideos += 1;
-      }
+      });
       await db.competitor.update({ where: { id: competitor.id }, data: { lastSyncedAt: new Date(), syncError: null } });
-      syncedCompetitors += 1;
     } catch (error) {
       failed = true;
       const message = error instanceof Error ? error.message : "Unknown competitor sync failure";
@@ -42,6 +54,7 @@ export async function syncChannelVideos(channelId: string, redis: Redis, syncId?
       logger.error("Competitor sync failed", { channelId, competitorId: competitor.id, message });
     }
     if (syncId) await markCompetitorProcessed(redis, syncId, failed);
-  }
-  return { channelId, competitors: syncedCompetitors, videos: syncedVideos };
+    return { failed, videos: syncedVideos };
+  });
+  return { channelId, competitors: results.filter((result) => !result.failed).length, videos: results.reduce((total, result) => total + result.videos, 0) };
 }
