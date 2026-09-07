@@ -47,6 +47,11 @@ export async function GET(request: Request) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     console.error("Facebook OAuth callback failed", message);
+    if (error instanceof Error && error.name === "ZodError") {
+      const field = (error as unknown as { issues?: Array<{ path?: unknown[] }> }).issues?.[0]?.path?.[0];
+      const safeField = typeof field === "string" ? field.toLowerCase().replace(/[^a-z0-9]/g, "_") : "environment";
+      return redirect(`invalid_${safeField}`);
+    }
     if (message.includes("CREDENTIAL_ENCRYPTION_KEY")) return redirect("invalid_encryption_key");
     if (message.includes("Prisma")) return redirect("database_failed");
     const errorType = error instanceof Error ? error.name.toLowerCase().replace(/[^a-z0-9]/g, "_") : "unknown";
