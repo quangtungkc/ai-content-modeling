@@ -18,7 +18,15 @@ export async function addCompetitor(channelId: string, userId: string, input: un
   const { url } = competitorInputSchema.parse(input);
   const normalized = normalizeCompetitorUrl(url);
   const existing = await db.competitor.findUnique({ where: { channelId_normalizedUrl: { channelId, normalizedUrl: normalized.url } } });
-  if (existing) throw new AppError("DUPLICATE_COMPETITOR", "Competitor URL này đã tồn tại trong Channel.", 409);
+  if (existing) {
+    if (existing.status === "INACTIVE") {
+      return db.competitor.update({
+        where: { id: existing.id },
+        data: { ...normalized, status: "ACTIVE" },
+      });
+    }
+    throw new AppError("DUPLICATE_COMPETITOR", "Competitor URL này đã tồn tại trong Channel.", 409);
+  }
   return db.competitor.create({ data: { channelId, ...normalized, normalizedUrl: normalized.url, displayName: normalized.handle, avatar: null } });
 }
 
