@@ -95,6 +95,8 @@ npx prisma migrate dev --name ai-connections
 
 API key chỉ được giải mã ở server; database lưu ciphertext và 4 ký tự cuối để masking.
 
+Facebook OAuth dùng `META_APP_ID`, `META_APP_SECRET` và callback local `http://localhost:3001/api/auth/facebook/callback`. Không đưa App Secret vào client hoặc commit vào repository.
+
 ## Authentication
 
 MVP dùng email/mật khẩu với session database và cookie `HttpOnly`. Sau khi cấu hình PostgreSQL, chạy migration để thêm bảng session và password hash:

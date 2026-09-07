@@ -7,6 +7,9 @@ const envSchema = z.object({
   CREDENTIAL_ENCRYPTION_KEY: z.string().regex(/^[a-fA-F0-9]{64}$/, "CREDENTIAL_ENCRYPTION_KEY phải là 64 ký tự hex."),
   AI_PROVIDER: z.string().default("unconfigured"),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  META_APP_ID: z.string().optional(),
+  META_APP_SECRET: z.string().optional(),
+  META_GRAPH_VERSION: z.string().default("v24.0"),
 });
 
 export function getEnv() {
@@ -17,5 +20,8 @@ export function getEnv() {
     CREDENTIAL_ENCRYPTION_KEY: process.env.CREDENTIAL_ENCRYPTION_KEY,
     AI_PROVIDER: process.env.AI_PROVIDER,
     NODE_ENV: process.env.NODE_ENV,
+    META_APP_ID: process.env.META_APP_ID,
+    META_APP_SECRET: process.env.META_APP_SECRET,
+    META_GRAPH_VERSION: process.env.META_GRAPH_VERSION,
   });
 }
