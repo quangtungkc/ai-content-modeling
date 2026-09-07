@@ -43,14 +43,20 @@ export function ViralDashboard() {
     setError("");
     const query = new URLSearchParams({ periodHours: appliedFilters.periodHours });
     if (appliedFilters.channelId) query.set("channelId", appliedFilters.channelId);
-    fetch(`/api/v1/dashboard${query}`)
+    fetch(`/api/v1/dashboard?${query.toString()}`)
       .then(async (response) => {
         if (response.status === 401) {
           window.location.href = "/login";
           return;
         }
-        if (!response.ok) throw new Error("Không thể tải dữ liệu tổng quan.");
-        setDashboard(((await response.json()) as { data: Dashboard }).data);
+        const body = (await response.json()) as {
+          data?: Dashboard;
+          error?: { message?: string };
+        };
+        if (!response.ok || !body.data) {
+          throw new Error(body.error?.message ?? "Không thể tải dữ liệu tổng quan.");
+        }
+        setDashboard(body.data);
         setMessage("Đã áp dụng bộ lọc.");
       })
       .catch((caught: unknown) =>
