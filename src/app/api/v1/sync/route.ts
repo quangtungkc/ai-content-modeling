@@ -11,8 +11,22 @@ export async function POST(request: Request) {
   try {
     const session = await getRequiredSession();
     const body = await request.json().catch(() => ({})) as { channelId?: string };
-    const channels = await db.channel.findMany({ where: { userId: session.userId, status: "ACTIVE", ...(body.channelId ? { id: body.channelId } : {}) }, select: { id: true } });
+    const channels = await db.channel.findMany({ where: { userId: session.userId, status: "ACTIVE", ...(body.channelId ? { id: body.channelId } : {}) }, select: { id: true, platform: true } });
     if (body.channelId && !channels.length) throw new AppError("CHANNEL_NOT_FOUND", "Không tìm thấy Channel.", 404);
+    const needsFacebook = channels.some((channel) => channel.platform.toLowerCase() === "facebook");
+    if (needsFacebook) {
+      const facebookConnection = await db.aIConnection.findUnique({
+        where: { userId_provider_kind: { userId: session.userId, provider: "FACEBOOK", kind: "PLATFORM" } },
+        select: { revokedAt: true },
+      });
+      if (!facebookConnection || facebookConnection.revokedAt) {
+        throw new AppError(
+          "FACEBOOK_CONNECTION_REQUIRED",
+          "Chưa có Facebook Page Access Token. Vào Cài đặt AI → Facebook, dán token và bấm Lưu kết nối.",
+          409,
+        );
+      }
+    }
     const total = await db.competitor.count({ where: { channelId: { in: channels.map((channel) => channel.id) }, status: "ACTIVE" } });
     const syncId = randomUUID();
     const queue = new LocalJobQueue();

@@ -10,7 +10,17 @@ export async function markCompetitorProcessed(syncId: string, failed = false) {
 
 export async function markSyncChannelComplete(syncId: string) {
   const run = await db.syncRun.update({ where: { id: syncId }, data: { remainingChannels: { decrement: 1 } } });
-  if (run.remainingChannels <= 0) await db.syncRun.update({ where: { id: syncId }, data: { status: "succeeded", completedAt: new Date() } });
+  if (run.remainingChannels <= 0) {
+    const allFailed = run.total > 0 && run.failed >= run.total;
+    await db.syncRun.update({
+      where: { id: syncId },
+      data: {
+        status: allFailed ? "failed" : "succeeded",
+        error: allFailed ? "Không lấy được dữ liệu từ bất kỳ đối thủ nào. Kiểm tra kết nối Facebook và Page Access Token." : null,
+        completedAt: new Date(),
+      },
+    });
+  }
 }
 
 export async function markSyncFailed(syncId: string, error: string) {
