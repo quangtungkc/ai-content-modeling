@@ -31,13 +31,18 @@ const accents = [
 export function ViralDashboard() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(true);
+  const [message, setMessage] = useState("");
   const [channels, setChannels] = useState<ChannelOption[]>([]);
   const [periodHours, setPeriodHours] = useState("24");
   const [channelId, setChannelId] = useState("");
   const [minimumViews, setMinimumViews] = useState("50000");
   const [appliedFilters, setAppliedFilters] = useState({ periodHours: "24", channelId: "", minimumViews: "50000" });
   useEffect(() => {
-    const query = appliedFilters.channelId ? `?channelId=${encodeURIComponent(appliedFilters.channelId)}` : "";
+    setIsLoading(true);
+    setError("");
+    const query = new URLSearchParams({ periodHours: appliedFilters.periodHours });
+    if (appliedFilters.channelId) query.set("channelId", appliedFilters.channelId);
     fetch(`/api/v1/dashboard${query}`)
       .then(async (response) => {
         if (response.status === 401) {
@@ -46,13 +51,15 @@ export function ViralDashboard() {
         }
         if (!response.ok) throw new Error("Không thể tải dữ liệu tổng quan.");
         setDashboard(((await response.json()) as { data: Dashboard }).data);
+        setMessage("Đã áp dụng bộ lọc.");
       })
       .catch((caught: unknown) =>
         setError(
           caught instanceof Error ? caught.message : "Không thể tải dashboard.",
         ),
-      );
-  }, [appliedFilters.channelId]);
+      )
+      .finally(() => setIsLoading(false));
+  }, [appliedFilters]);
   useEffect(() => {
     fetch("/api/v1/channels").then(async (response) => {
       if (!response.ok) return;
@@ -78,7 +85,7 @@ export function ViralDashboard() {
       dashboard?.stats.competitors ?? "—",
       "Nguồn tín hiệu",
     ],
-    ["Video mới", dashboard?.stats.newVideos ?? "—", "Trong 24 giờ"],
+    ["Video mới", dashboard?.stats.newVideos ?? "—", `Trong ${periodLabel(appliedFilters.periodHours)}`],
     ["Video đạt ngưỡng", videos.length, `Từ ${formatViews(Number(appliedFilters.minimumViews))} lượt xem`],
     [
       "Channel hiện tại",
@@ -123,10 +130,11 @@ export function ViralDashboard() {
           <label className="block"><span className="mb-2 block text-sm text-[#6883aa]">Khoảng thời gian</span><select value={periodHours} onChange={(event) => setPeriodHours(event.target.value)} className="w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]"><option value="24">24 giờ gần nhất</option><option value="72">3 ngày gần nhất</option><option value="168">7 ngày gần nhất</option></select></label>
           <label className="block"><span className="mb-2 block text-sm text-[#6883aa]">Kênh</span><select value={channelId} onChange={(event) => setChannelId(event.target.value)} className="w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]"><option value="">Kênh mặc định</option>{channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}</select></label>
           <label className="block"><span className="mb-2 block text-sm text-[#6883aa]">Mức tín hiệu</span><select value={minimumViews} onChange={(event) => setMinimumViews(event.target.value)} className="w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]"><option value="50000">Từ 50.000 lượt xem</option><option value="100000">Từ 100.000 lượt xem</option></select></label>
-          <button onClick={() => setAppliedFilters({ periodHours, channelId, minimumViews })} className="self-end rounded-lg bg-[#07865f] px-6 py-3 text-sm font-bold text-white">
-            Áp dụng
+          <button onClick={() => { setMessage(""); setAppliedFilters({ periodHours, channelId, minimumViews }); }} disabled={isLoading} className="self-end rounded-lg bg-[#07865f] px-6 py-3 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60">
+            {isLoading ? "Đang tải..." : "Áp dụng"}
           </button>
         </div>
+        {message && !isLoading && <p aria-live="polite" className="mt-3 text-sm font-semibold text-[#07865f]">{message}</p>}
         <p className="mt-3 text-xs leading-5 text-[#6883aa]"><strong>Mức tín hiệu</strong> lọc video theo lượt xem hiện tại: từ 50.000 hoặc từ 100.000 lượt xem. Điểm lan truyền vẫn được giữ trong bảng để so sánh mức vượt chuẩn của từng video.</p>
       </section>
       <section className="mt-7 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -324,4 +332,7 @@ function formatAge(value: string) {
     Math.floor((Date.now() - new Date(value).getTime()) / 3_600_000),
   );
   return hours < 1 ? "vừa xong" : `${hours}h trước`;
+}
+function periodLabel(value: string) {
+  return value === "24" ? "24 giờ" : value === "72" ? "3 ngày" : "7 ngày";
 }

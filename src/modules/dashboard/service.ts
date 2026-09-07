@@ -1,9 +1,10 @@
 import { db } from "@/lib/db";
 import { calculateBaselineViews, calculateViralScore } from "@/modules/viral-score";
 
-export async function getViralDashboard(userId: string, channelId?: string) {
+export async function getViralDashboard(userId: string, channelId?: string, periodHours = 24) {
   const periodEnd = new Date();
-  const periodStart = new Date(periodEnd.getTime() - 24 * 60 * 60 * 1000);
+  const safePeriodHours = [24, 72, 168].includes(periodHours) ? periodHours : 24;
+  const periodStart = new Date(periodEnd.getTime() - safePeriodHours * 60 * 60 * 1000);
   const channels = await db.channel.findMany({ where: { userId, status: "ACTIVE", ...(channelId ? { id: channelId } : {}) }, select: { id: true, name: true, timezone: true }, orderBy: { createdAt: "asc" } });
   const selectedChannel = channels[0];
   if (!selectedChannel) return { periodStart, periodEnd, channel: null, stats: { competitors: 0, newVideos: 0, viralVideos: 0 }, videos: [] };
