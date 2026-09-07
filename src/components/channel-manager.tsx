@@ -127,7 +127,28 @@ export function ChannelManager() {
         const body = (await response.json()) as {
           data: Array<Record<string, unknown>>;
         };
-        setChannels(body.data.map(toUiChannel));
+        const loadedChannels = body.data.map(toUiChannel);
+        const competitorEntries = await Promise.all(
+          loadedChannels.map(async (channel) => {
+            try {
+              const competitorResponse = await fetch(
+                `/api/v1/channels/${channel.id}/competitors`,
+              );
+              if (!competitorResponse.ok) return [channel.id, []] as const;
+              const competitorBody = (await competitorResponse.json()) as {
+                data: Array<Record<string, unknown>>;
+              };
+              return [
+                channel.id,
+                competitorBody.data.map(toUiCompetitor),
+              ] as const;
+            } catch {
+              return [channel.id, []] as const;
+            }
+          }),
+        );
+        setChannels(loadedChannels);
+        setCompetitors(Object.fromEntries(competitorEntries));
       })
       .catch((error: unknown) =>
         setNotice(
@@ -209,23 +230,23 @@ export function ChannelManager() {
     <section className="mx-auto max-w-6xl">
       <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
         <div>
-          <p className="text-sm text-cyan-400">KHÔNG GIAN LÀM VIỆC</p>
-          <h2 className="mt-2 text-3xl font-semibold tracking-tight text-white">
+          <p className="text-sm text-[#00a7c9]">KHÔNG GIAN LÀM VIỆC</p>
+          <h2 className="mt-2 text-3xl font-semibold tracking-tight text-[#0b3262]">
             Kênh của tôi
           </h2>
-          <p className="mt-2 text-sm text-slate-400">
+          <p className="mt-2 text-sm text-[#6883aa]">
             Mỗi Channel là một workspace độc lập cho content modeling.
           </p>
         </div>
         <button
           onClick={openCreate}
-          className="rounded-lg bg-cyan-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
+          className="rounded-lg bg-[#05c7e5] px-4 py-2.5 text-sm font-semibold text-[#06315d] transition hover:bg-[#00b8d4]"
         >
           + Tạo kênh mới
         </button>
       </div>
       {notice && (
-        <div className="mt-6 rounded-lg border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-200">
+        <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
           {notice}
         </div>
       )}
@@ -238,43 +259,43 @@ export function ChannelManager() {
         {channels.map((channel) => (
           <article
             key={channel.id}
-            className="group rounded-xl border border-white/10 bg-white/[.04] p-5 transition hover:border-cyan-400/40 hover:bg-white/[.07]"
+            className="group rounded-xl border border-[#d8e3f1] bg-white p-5 shadow-sm transition hover:border-cyan-400/60 hover:shadow-md"
           >
             <div className="flex items-start justify-between gap-3">
               <div>
-                <h3 className="font-semibold text-white">{channel.name}</h3>
-                <p className="mt-1 text-sm text-slate-400">
+                <h3 className="font-semibold text-[#0b3262]">{channel.name}</h3>
+                <p className="mt-1 text-sm text-[#6883aa]">
                   {channel.targetCountry}{" "}
-                  <span className="text-slate-600">•</span> {channel.platform}{" "}
-                  <span className="text-slate-600">•</span> {channel.topic}
+                  <span className="text-[#9ab0c9]">•</span> {channel.platform}{" "}
+                  <span className="text-[#9ab0c9]">•</span> {channel.topic}
                 </p>
               </div>
-              <span className="rounded-full bg-cyan-400/10 px-2 py-1 text-[11px] text-cyan-300">
+              <span className="rounded-full bg-[#dff7f4] px-2 py-1 text-[11px] text-[#078f86]">
                 Đang hoạt động
               </span>
             </div>
-            <div className="mt-6 flex flex-wrap gap-2 border-t border-white/10 pt-4">
+            <div className="mt-6 flex flex-wrap gap-2 border-t border-[#e5edf6] pt-4">
               <button
                 onClick={() => setSelected(channel)}
-                className="rounded-md px-3 py-2 text-xs text-slate-300 hover:bg-white/10 hover:text-white"
+                className="rounded-md px-3 py-2 text-xs text-[#0b5799] hover:bg-[#eef6ff]"
               >
                 Xem
               </button>
               <button
                 onClick={() => openEdit(channel)}
-                className="rounded-md px-3 py-2 text-xs text-slate-300 hover:bg-white/10 hover:text-white"
+                className="rounded-md px-3 py-2 text-xs text-[#0b5799] hover:bg-[#eef6ff]"
               >
                 Sửa
               </button>
               <button
                 onClick={() => setCompetitorChannel(channel)}
-                className="rounded-md px-3 py-2 text-xs text-cyan-300 hover:bg-cyan-400/10"
+                className="rounded-md px-3 py-2 text-xs text-[#008fbd] hover:bg-[#e8faff]"
               >
                 Đối thủ ({competitors[channel.id]?.length ?? 0})
               </button>
               <button
                 onClick={() => remove(channel)}
-                className="ml-auto rounded-md px-3 py-2 text-xs text-rose-300 hover:bg-rose-400/10"
+                className="ml-auto rounded-md px-3 py-2 text-xs text-rose-500 hover:bg-rose-50"
               >
                 Xóa
               </button>
@@ -282,7 +303,7 @@ export function ChannelManager() {
           </article>
         ))}
         {channels.length === 0 && (
-          <div className="rounded-xl border border-dashed border-white/15 p-10 text-center text-sm text-slate-400 lg:col-span-3">
+          <div className="rounded-xl border border-dashed border-[#cbd9ea] bg-white p-10 text-center text-sm text-[#6883aa] lg:col-span-3">
             Chưa có Channel. Tạo Channel đầu tiên để bắt đầu.
           </div>
         )}
