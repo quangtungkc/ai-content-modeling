@@ -33,7 +33,8 @@ export async function GET(request: Request) {
     const response = redirect("connected");
     response.headers.append("Set-Cookie", `${FACEBOOK_STATE_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
     return response;
-  } catch {
+  } catch (error) {
+    console.error("Facebook OAuth callback failed", error instanceof Error ? error.message : "Unknown error");
     return redirect("failed");
   }
 }
