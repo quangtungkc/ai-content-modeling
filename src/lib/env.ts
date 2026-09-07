@@ -15,7 +15,7 @@ const envSchema = z.object({
 export function getEnv() {
   return envSchema.parse({
     DATABASE_URL: process.env.DATABASE_URL,
-    REDIS_URL: process.env.REDIS_URL,
+    REDIS_URL: process.env.REDIS_URL || undefined,
     AUTH_SECRET: process.env.AUTH_SECRET,
     CREDENTIAL_ENCRYPTION_KEY: process.env.CREDENTIAL_ENCRYPTION_KEY,
     AI_PROVIDER: process.env.AI_PROVIDER,
