@@ -5,6 +5,7 @@ import { getRequiredRedisUrl } from "@/lib/env";
 import { AppError, toErrorResponse } from "@/lib/errors";
 import { db } from "@/lib/db";
 import { RedisJobQueue } from "@/lib/jobs/queue";
+import { ZodError } from "zod";
 
 export async function POST(request: Request) {
   const requestId = randomUUID();
@@ -19,7 +20,20 @@ export async function POST(request: Request) {
     const jobs = await Promise.all(channels.map((channel) => queue.enqueue("channel.sync", { channelId: channel.id }, `manual-channel-sync:${channel.id}:${new Date().toISOString().slice(0, 13)}`)));
     return Response.json({ data: { channels: channels.length, jobs: jobs.length, message: "Đã đưa yêu cầu đồng bộ vào hàng đợi." }, requestId }, { status: 202 });
   } catch (error) {
-    return toErrorResponse(error instanceof Error && error.message === "AUTHENTICATION_REQUIRED" ? new AppError("AUTHENTICATION_REQUIRED", "Yêu cầu đăng nhập.", 401) : error, requestId);
+    console.error("Manual sync failed", error instanceof ZodError ? error.issues.map((issue) => issue.path.join(".")).join(",") : error instanceof Error ? error.message : "unknown");
+    const message = error instanceof Error && error.message === "REDIS_URL chưa được cấu hình cho worker nền."
+      ? "Chưa cấu hình máy chủ hàng đợi đồng bộ (REDIS_URL)."
+      : error instanceof Error && /redis|connect|timeout/i.test(error.message)
+        ? "Không kết nối được máy chủ hàng đợi đồng bộ."
+        : error instanceof ZodError
+          ? "Cấu hình máy chủ đồng bộ chưa đầy đủ."
+          : null;
+    const normalized = error instanceof Error && error.message === "AUTHENTICATION_REQUIRED"
+      ? new AppError("AUTHENTICATION_REQUIRED", "Yêu cầu đăng nhập.", 401)
+      : message
+        ? new AppError("SYNC_UNAVAILABLE", message, 503)
+        : error;
+    return toErrorResponse(normalized, requestId);
   } finally {
     await redis?.quit();
   }
