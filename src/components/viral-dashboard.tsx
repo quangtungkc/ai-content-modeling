@@ -20,6 +20,7 @@ type Dashboard = {
     };
   }>;
 };
+type ChannelOption = { id: string; name: string };
 const accents = [
   "border-l-emerald-600",
   "border-l-teal-500",
@@ -30,8 +31,14 @@ const accents = [
 export function ViralDashboard() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [error, setError] = useState("");
+  const [channels, setChannels] = useState<ChannelOption[]>([]);
+  const [periodHours, setPeriodHours] = useState("24");
+  const [channelId, setChannelId] = useState("");
+  const [minimumScore, setMinimumScore] = useState("80");
+  const [appliedFilters, setAppliedFilters] = useState({ periodHours: "24", channelId: "", minimumScore: "80" });
   useEffect(() => {
-    fetch("/api/v1/dashboard")
+    const query = appliedFilters.channelId ? `?channelId=${encodeURIComponent(appliedFilters.channelId)}` : "";
+    fetch(`/api/v1/dashboard${query}`)
       .then(async (response) => {
         if (response.status === 401) {
           window.location.href = "/login";
@@ -45,14 +52,24 @@ export function ViralDashboard() {
           caught instanceof Error ? caught.message : "Không thể tải dashboard.",
         ),
       );
+  }, [appliedFilters.channelId]);
+  useEffect(() => {
+    fetch("/api/v1/channels").then(async (response) => {
+      if (!response.ok) return;
+      const body = await response.json() as { data: ChannelOption[] };
+      setChannels(body.data);
+    });
   }, []);
-  const videos = dashboard?.videos ?? [];
+  const videos = useMemo(() => {
+    const cutoff = Date.now() - Number(appliedFilters.periodHours) * 3_600_000;
+    return (dashboard?.videos ?? []).filter((video) => new Date(video.publishedAt).getTime() >= cutoff && video.score >= Number(appliedFilters.minimumScore));
+  }, [dashboard, appliedFilters]);
   const ranking = useMemo(
     () =>
-      [...(dashboard?.videos ?? [])]
+      [...videos]
         .sort((a, b) => b.score - a.score)
         .slice(0, 5),
-    [dashboard],
+    [videos],
   );
   const maxScore = Math.max(100, ...ranking.map((video) => video.score));
   const kpis: Array<[string, string | number, string]> = [
@@ -62,7 +79,7 @@ export function ViralDashboard() {
       "Nguồn tín hiệu",
     ],
     ["Video mới", dashboard?.stats.newVideos ?? "—", "Trong 24 giờ"],
-    ["Video nổi bật", dashboard?.stats.viralVideos ?? "—", "Điểm lan truyền ≥ 80"],
+    ["Video nổi bật", videos.length, `Điểm lan truyền ≥ ${appliedFilters.minimumScore}`],
     [
       "Channel hiện tại",
       dashboard?.channel?.name ?? "—",
@@ -103,16 +120,14 @@ export function ViralDashboard() {
       )}
       <section className="mt-7 rounded-2xl border border-[#d8e3f1] bg-white p-4 shadow-sm">
         <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_auto]">
-          <Filter label="Khoảng thời gian" value="24 giờ gần nhất" />
-          <Filter
-            label="Channel"
-            value={dashboard?.channel?.name ?? "Tất cả Channel"}
-          />
-          <Filter label="Mức tín hiệu" value="Điểm lan truyền ≥ 80" />
-          <button className="self-end rounded-lg bg-[#07865f] px-6 py-3 text-sm font-bold text-white">
+          <label className="block"><span className="mb-2 block text-sm text-[#6883aa]">Khoảng thời gian</span><select value={periodHours} onChange={(event) => setPeriodHours(event.target.value)} className="w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]"><option value="24">24 giờ gần nhất</option><option value="72">3 ngày gần nhất</option><option value="168">7 ngày gần nhất</option></select></label>
+          <label className="block"><span className="mb-2 block text-sm text-[#6883aa]">Kênh</span><select value={channelId} onChange={(event) => setChannelId(event.target.value)} className="w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]"><option value="">Kênh mặc định</option>{channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}</select></label>
+          <label className="block"><span className="mb-2 block text-sm text-[#6883aa]">Mức tín hiệu</span><select value={minimumScore} onChange={(event) => setMinimumScore(event.target.value)} className="w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]"><option value="60">Từ 60 — đáng theo dõi</option><option value="80">Từ 80 — nổi bật</option><option value="90">Từ 90 — rất nổi bật</option></select></label>
+          <button onClick={() => setAppliedFilters({ periodHours, channelId, minimumScore })} className="self-end rounded-lg bg-[#07865f] px-6 py-3 text-sm font-bold text-white">
             Áp dụng
           </button>
         </div>
+        <p className="mt-3 text-xs leading-5 text-[#6883aa]"><strong>Mức tín hiệu</strong> là Điểm lan truyền 0–100, tính từ mức vượt lượt xem trung vị của chính đối thủ, tốc độ tăng lượt xem và tỷ lệ tương tác. Từ 60: đáng theo dõi; từ 80: video vượt chuẩn rõ rệt; từ 90: ưu tiên phân tích.</p>
       </section>
       <section className="mt-7 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {kpis.map(([label, value, hint], index) => (
@@ -207,7 +222,7 @@ export function ViralDashboard() {
             </p>
           </div>
           <span className="rounded-full bg-[#e8f7f2] px-3 py-1 text-xs font-bold text-[#07865f]">
-            24 giờ gần nhất
+            {appliedFilters.periodHours === "24" ? "24 giờ gần nhất" : `${appliedFilters.periodHours === "72" ? "3" : "7"} ngày gần nhất`}
           </span>
         </div>
         <div className="mt-5 overflow-x-auto">
@@ -294,17 +309,6 @@ export function ViralDashboard() {
         </div>
       </section>
     </section>
-  );
-}
-function Filter({ label, value }: { label: string; value: string }) {
-  return (
-    <label className="block">
-      <span className="mb-2 block text-sm text-[#6883aa]">{label}</span>
-      <div className="flex items-center justify-between rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]">
-        {value}
-        <span className="text-[#7990b0]">⌄</span>
-      </div>
-    </label>
   );
 }
 function formatViews(value: number) {
