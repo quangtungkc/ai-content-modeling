@@ -10,7 +10,7 @@ async function assertChannelOwner(channelId: string, userId: string) {
 
 export async function listCompetitors(channelId: string, userId: string) {
   await assertChannelOwner(channelId, userId);
-  return db.competitor.findMany({ where: { channelId }, orderBy: { createdAt: "asc" } });
+  return db.competitor.findMany({ where: { channelId, status: "ACTIVE" }, orderBy: { createdAt: "asc" } });
 }
 
 export async function addCompetitor(channelId: string, userId: string, input: unknown) {

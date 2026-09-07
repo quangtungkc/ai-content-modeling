@@ -630,14 +630,23 @@ function CompetitorManager({
     );
   }
   async function remove(item: Competitor) {
-    const response = await fetch(`/api/v1/competitors/${item.id}`, {
-      method: "DELETE",
-    });
-    if (!response.ok) {
-      setError("Không thể xóa competitor.");
-      return;
+    try {
+      const response = await fetch(`/api/v1/competitors/${item.id}`, {
+        method: "DELETE",
+      });
+      const body = (await response.json().catch(() => null)) as {
+        error?: { message?: string };
+      } | null;
+      if (!response.ok) {
+        throw new Error(body?.error?.message ?? "Không thể xóa đối thủ.");
+      }
+      onChange(items.filter((current) => current.id !== item.id));
+      setError("");
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "Không thể xóa đối thủ.",
+      );
     }
-    onChange(items.filter((current) => current.id !== item.id));
   }
   return (
     <div className="fixed inset-0 z-20 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm">
