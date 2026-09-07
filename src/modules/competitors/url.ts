@@ -16,6 +16,18 @@ export function normalizeCompetitorUrl(input: string): NormalizedCompetitor {
   if (parsed.protocol !== "https:") throw new AppError("INVALID_COMPETITOR_URL", "Competitor URL phải dùng HTTPS.", 400);
   const rule = rules.find((candidate) => candidate.hosts.has(parsed.hostname.toLowerCase()));
   if (!rule) throw new AppError("UNSUPPORTED_PLATFORM", "Platform này chưa được hỗ trợ trong MVP.", 400);
+  if (rule.platform === "Facebook" && parsed.pathname.toLowerCase() === "/profile.php") {
+    const profileId = parsed.searchParams.get("id");
+    if (!profileId || !/^\d+$/.test(profileId)) {
+      throw new AppError("INVALID_COMPETITOR_URL", "URL Facebook profile.php chưa có ID hợp lệ.", 400);
+    }
+    return {
+      platform: "Facebook",
+      url: `https://www.facebook.com/profile.php?id=${profileId}`,
+      externalId: `profile:${profileId}`,
+      handle: `@profile-${profileId}`,
+    };
+  }
   const handle = parsed.pathname.match(rule.pathPattern)?.[1];
   if (!handle) throw new AppError("INVALID_COMPETITOR_URL", `URL ${rule.platform} chưa có định danh Page/Channel hợp lệ.`, 400);
   const normalizedHandle = handle.toLowerCase();
