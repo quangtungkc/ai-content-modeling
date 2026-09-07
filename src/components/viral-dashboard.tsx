@@ -21,6 +21,7 @@ type Dashboard = {
   }>;
 };
 type ChannelOption = { id: string; name: string };
+type CompetitorOption = { id: string; handle: string; displayName: string | null; platform: string };
 type SyncProgress = {
   syncId: string;
   status: "running" | "succeeded" | "failed";
@@ -56,6 +57,12 @@ export function ViralDashboard() {
   const [channelId, setChannelId] = useState("");
   const [minimumViews, setMinimumViews] = useState("50000");
   const [appliedFilters, setAppliedFilters] = useState({ periodHours: "24", channelId: "", minimumViews: "50000" });
+  const [showManualEntry, setShowManualEntry] = useState(false);
+  const [manualChannelId, setManualChannelId] = useState("");
+  const [manualCompetitors, setManualCompetitors] = useState<CompetitorOption[]>([]);
+  const [manualError, setManualError] = useState("");
+  const [isSavingManual, setIsSavingManual] = useState(false);
+  const [manualVideo, setManualVideo] = useState({ competitorId: "", url: "", publishedAt: new Date().toISOString().slice(0, 16), views: "", likes: "0", comments: "0", shares: "0", caption: "" });
   useEffect(() => {
     const controller = new AbortController();
     setIsLoading(true);
@@ -92,6 +99,18 @@ export function ViralDashboard() {
       setChannels(body.data);
     });
   }, []);
+  useEffect(() => {
+    if (!showManualEntry || !manualChannelId) return;
+    setManualCompetitors([]);
+    setManualVideo((current) => ({ ...current, competitorId: "" }));
+    fetch(`/api/v1/channels/${manualChannelId}/competitors`)
+      .then(async (response) => {
+        const body = await response.json() as { data?: CompetitorOption[]; error?: { message?: string } };
+        if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể tải danh sách đối thủ.");
+        setManualCompetitors(body.data);
+      })
+      .catch((caught: unknown) => setManualError(caught instanceof Error ? caught.message : "Không thể tải danh sách đối thủ."));
+  }, [showManualEntry, manualChannelId]);
   useEffect(() => {
     const updater = (window as Window & { desktopUpdater?: DesktopUpdater }).desktopUpdater;
     if (!updater) return;
@@ -188,6 +207,50 @@ export function ViralDashboard() {
     if (result.status === "dev") setUpdateStatus("Chức năng cập nhật chỉ chạy trong bản cài Electron.");
     if (result.status === "error") setUpdateStatus(result.message ?? "Không thể kiểm tra cập nhật.");
   }
+  function openManualEntry() {
+    const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
+    if (!selectedChannelId) {
+      setError("Hãy tạo hoặc chọn Channel trước khi nhập dữ liệu đối thủ.");
+      return;
+    }
+    setManualError("");
+    setManualChannelId(selectedChannelId);
+    setShowManualEntry(true);
+  }
+  async function saveManualEntry(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!manualVideo.competitorId) {
+      setManualError("Hãy chọn đối thủ.");
+      return;
+    }
+    setIsSavingManual(true);
+    setManualError("");
+    try {
+      const response = await fetch(`/api/v1/competitors/${manualVideo.competitorId}/manual-video`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: manualVideo.url,
+          publishedAt: new Date(manualVideo.publishedAt).toISOString(),
+          views: Number(manualVideo.views),
+          likes: Number(manualVideo.likes),
+          comments: Number(manualVideo.comments),
+          shares: Number(manualVideo.shares),
+          caption: manualVideo.caption || undefined,
+        }),
+      });
+      const body = await response.json() as { error?: { message?: string } };
+      if (!response.ok) throw new Error(body.error?.message ?? "Không thể lưu dữ liệu video.");
+      setShowManualEntry(false);
+      setMessage("Đã lưu video đối thủ. Bảng xếp hạng đã được cập nhật.");
+      setAppliedFilters((current) => ({ ...current }));
+      setManualVideo({ competitorId: "", url: "", publishedAt: new Date().toISOString().slice(0, 16), views: "", likes: "0", comments: "0", shares: "0", caption: "" });
+    } catch (caught) {
+      setManualError(caught instanceof Error ? caught.message : "Không thể lưu dữ liệu video.");
+    } finally {
+      setIsSavingManual(false);
+    }
+  }
   const kpis: Array<[string, string | number, string]> = [
     [
       "Đối thủ đang theo dõi",
@@ -227,11 +290,41 @@ export function ViralDashboard() {
           >
             Quản lý Channel
           </a>
+          <button onClick={openManualEntry} className="rounded-lg border border-[#d7e2f1] bg-white px-4 py-3 text-sm font-bold text-[#0b3262] shadow-sm">
+            Nhập dữ liệu
+          </button>
           <button onClick={() => void handleSync()} disabled={isSyncing} className="rounded-lg bg-[#07865f] px-4 py-3 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60">
             {isSyncing ? "Đang xếp hàng..." : "↻ Đồng bộ dữ liệu"}
           </button>
         </div>
       </header>
+      {showManualEntry && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
+          <form onSubmit={(event) => void saveManualEntry(event)} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-extrabold tracking-[0.16em] text-teal-600">NHẬP THỦ CÔNG</p>
+                <h2 className="mt-1 text-xl font-extrabold text-[#0b3262]">Dữ liệu video đối thủ</h2>
+                <p className="mt-1 text-sm text-[#6883aa]">Dán số liệu đang hiển thị công khai trên Facebook. Không cần chờ Meta duyệt.</p>
+              </div>
+              <button type="button" onClick={() => setShowManualEntry(false)} className="text-xl text-[#6883aa]" aria-label="Đóng">×</button>
+            </div>
+            <div className="mt-5 grid gap-4 sm:grid-cols-2">
+              <label className="block text-sm font-semibold text-[#0b3262]">Channel<select value={manualChannelId} onChange={(event) => setManualChannelId(event.target.value)} className="mt-2 w-full rounded-lg border border-[#cbd9ea] px-3 py-2.5 font-normal"><option value="">Chọn Channel</option>{channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}</select></label>
+              <label className="block text-sm font-semibold text-[#0b3262]">Đối thủ<select required value={manualVideo.competitorId} onChange={(event) => setManualVideo((current) => ({ ...current, competitorId: event.target.value }))} className="mt-2 w-full rounded-lg border border-[#cbd9ea] px-3 py-2.5 font-normal"><option value="">Chọn đối thủ</option>{manualCompetitors.map((competitor) => <option key={competitor.id} value={competitor.id}>{competitor.displayName || competitor.handle} · {competitor.platform}</option>)}</select></label>
+              <label className="block text-sm font-semibold text-[#0b3262] sm:col-span-2">Link bài viết hoặc Reel<input required type="url" value={manualVideo.url} onChange={(event) => setManualVideo((current) => ({ ...current, url: event.target.value }))} placeholder="https://www.facebook.com/reel/..." className="mt-2 w-full rounded-lg border border-[#cbd9ea] px-3 py-2.5 font-normal" /></label>
+              <label className="block text-sm font-semibold text-[#0b3262]">Thời gian đăng<input required type="datetime-local" value={manualVideo.publishedAt} onChange={(event) => setManualVideo((current) => ({ ...current, publishedAt: event.target.value }))} className="mt-2 w-full rounded-lg border border-[#cbd9ea] px-3 py-2.5 font-normal" /></label>
+              <label className="block text-sm font-semibold text-[#0b3262]">Lượt xem<input required min="0" type="number" value={manualVideo.views} onChange={(event) => setManualVideo((current) => ({ ...current, views: event.target.value }))} className="mt-2 w-full rounded-lg border border-[#cbd9ea] px-3 py-2.5 font-normal" /></label>
+              <label className="block text-sm font-semibold text-[#0b3262]">Lượt thích<input min="0" type="number" value={manualVideo.likes} onChange={(event) => setManualVideo((current) => ({ ...current, likes: event.target.value }))} className="mt-2 w-full rounded-lg border border-[#cbd9ea] px-3 py-2.5 font-normal" /></label>
+              <label className="block text-sm font-semibold text-[#0b3262]">Bình luận<input min="0" type="number" value={manualVideo.comments} onChange={(event) => setManualVideo((current) => ({ ...current, comments: event.target.value }))} className="mt-2 w-full rounded-lg border border-[#cbd9ea] px-3 py-2.5 font-normal" /></label>
+              <label className="block text-sm font-semibold text-[#0b3262]">Lượt chia sẻ<input min="0" type="number" value={manualVideo.shares} onChange={(event) => setManualVideo((current) => ({ ...current, shares: event.target.value }))} className="mt-2 w-full rounded-lg border border-[#cbd9ea] px-3 py-2.5 font-normal" /></label>
+              <label className="block text-sm font-semibold text-[#0b3262]">Ghi chú (không bắt buộc)<input value={manualVideo.caption} onChange={(event) => setManualVideo((current) => ({ ...current, caption: event.target.value }))} className="mt-2 w-full rounded-lg border border-[#cbd9ea] px-3 py-2.5 font-normal" /></label>
+            </div>
+            {manualError && <p className="mt-4 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">{manualError}</p>}
+            <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setShowManualEntry(false)} className="rounded-lg border border-[#cbd9ea] px-4 py-2.5 text-sm font-bold text-[#0b3262]">Hủy</button><button disabled={isSavingManual} className="rounded-lg bg-[#07865f] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isSavingManual ? "Đang lưu..." : "Lưu và xếp hạng"}</button></div>
+          </form>
+        </div>
+      )}
       {updateStatus && <p aria-live="polite" className="mt-3 text-sm font-semibold text-[#0b5799]">{updateStatus}</p>}
       {error && (
         <div className="mt-6 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
