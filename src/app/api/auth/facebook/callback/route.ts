@@ -49,6 +49,7 @@ export async function GET(request: Request) {
     console.error("Facebook OAuth callback failed", message);
     if (message.includes("CREDENTIAL_ENCRYPTION_KEY")) return redirect("invalid_encryption_key");
     if (message.includes("Prisma")) return redirect("database_failed");
-    return redirect("failed");
+    const errorType = error instanceof Error ? error.name.toLowerCase().replace(/[^a-z0-9]/g, "_") : "unknown";
+    return redirect(`failed_${errorType}`);
   }
 }
