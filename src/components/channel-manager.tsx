@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 
 type Channel = {
   id: string;
@@ -560,6 +560,8 @@ function CompetitorManager({
 }) {
   const [url, setUrl] = useState("");
   const [error, setError] = useState("");
+  const [bulkMessage, setBulkMessage] = useState("");
+  const [isImporting, setIsImporting] = useState(false);
   useEffect(() => {
     fetch(`/api/v1/channels/${channel.id}/competitors`)
       .then(async (response) => {
@@ -580,29 +582,33 @@ function CompetitorManager({
     // The parent callback is intentionally not a dependency: it is an inline state adapter.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channel.id]);
+  async function createCompetitor(value: string) {
+    const response = await fetch(`/api/v1/channels/${channel.id}/competitors`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: value }) });
+    const body = (await response.json()) as { data?: Record<string, unknown>; error?: { message?: string } };
+    if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể thêm đối thủ.");
+    return toUiCompetitor(body.data);
+  }
   async function addCompetitor(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    try {
-      const response = await fetch(
-        `/api/v1/channels/${channel.id}/competitors`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url }),
-        },
-      );
-      const body = (await response.json()) as {
-        data?: Record<string, unknown>;
-        error?: { message?: string };
-      };
-      if (!response.ok || !body.data)
-        throw new Error(body.error?.message ?? "Không thể thêm competitor.");
-      onChange([...items, toUiCompetitor(body.data)]);
-      setUrl("");
-      setError("");
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "URL không hợp lệ.");
+    try { const created = await createCompetitor(url); onChange([...items, created]); setUrl(""); setError(""); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "URL không hợp lệ."); }
+  }
+  async function importTxt(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".txt")) { setError("Chỉ hỗ trợ file .txt, mỗi dòng một URL."); return; }
+    const links = [...new Set((await file.text()).split(/\r?\n/).map((line) => line.trim()).filter(Boolean))];
+    if (!links.length) { setError("File chưa có URL hợp lệ."); return; }
+    if (links.length > 50) { setError("Mỗi file tối đa 50 URL."); return; }
+    setError(""); setBulkMessage(""); setIsImporting(true);
+    const nextItems = [...items]; const failures: string[] = [];
+    for (const link of links) {
+      try { nextItems.push(await createCompetitor(link)); }
+      catch (caught) { failures.push(`${link}: ${caught instanceof Error ? caught.message : "không hợp lệ"}`); }
     }
+    onChange(nextItems); setIsImporting(false);
+    setBulkMessage(`Đã thêm ${nextItems.length - items.length}/${links.length} URL.${failures.length ? ` Không thêm được: ${failures.join(" | ")}` : ""}`);
   }
   async function toggle(item: Competitor) {
     const status = item.status === "Active" ? "INACTIVE" : "ACTIVE";
@@ -673,7 +679,11 @@ function CompetitorManager({
             Thêm URL đối thủ
           </button>
         </form>
+        <div className="mt-3 rounded-lg border border-dashed border-white/15 bg-white/[.03] p-3">
+          <label className="flex cursor-pointer items-center justify-between gap-3 text-sm text-slate-300"><span><strong className="text-white">Thêm hàng loạt từ file TXT</strong><span className="mt-1 block text-xs text-slate-500">Mỗi dòng một URL, tối đa 50 URL.</span></span><span className="rounded-lg border border-cyan-400/40 px-3 py-2 text-xs font-semibold text-cyan-300">{isImporting ? "Đang thêm..." : "Chọn file .txt"}</span><input type="file" accept=".txt,text/plain" className="sr-only" disabled={isImporting} onChange={(event) => void importTxt(event)} /></label>
+        </div>
         {error && <p className="mt-2 text-sm text-rose-300">{error}</p>}
+        {bulkMessage && <p className="mt-2 break-words text-sm text-emerald-300">{bulkMessage}</p>}
         <div className="mt-6 overflow-hidden rounded-lg border border-white/10">
           <div className="grid grid-cols-[1fr_auto] gap-4 border-b border-white/10 bg-white/[.04] px-4 py-3 text-xs uppercase tracking-wider text-slate-500">
             <span>Đối thủ</span>
