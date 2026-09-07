@@ -1,10 +1,9 @@
 import { db } from "@/lib/db";
 import { AppError } from "@/lib/errors";
-import { RedisJobQueue } from "@/lib/jobs/queue";
+import { LocalJobQueue } from "@/lib/jobs/queue";
 import { compileVeoPrompt } from "@/services/video-generation/prompt-compiler";
 import { veoRequestSchema } from "@/services/video-generation/request-schema";
 import type { VeoRequest } from "@/services/video-generation/types";
-import type Redis from "ioredis";
 import { UsageMetric } from "@prisma/client";
 import { recordUsage } from "@/modules/usage/service";
 
@@ -13,13 +12,13 @@ async function getOwnedScene(sceneId: string, userId: string) {
   if (!scene) throw new AppError("SCENE_NOT_FOUND", "Không tìm thấy scene.", 404);
 }
 
-export async function createGenerationJob(sceneId: string, userId: string, request: VeoRequest, redis: Redis) {
+export async function createGenerationJob(sceneId: string, userId: string, request: VeoRequest) {
   await getOwnedScene(sceneId, userId);
   const parsed = veoRequestSchema.parse({ ...request, sceneId });
   const latest = await db.sceneGenerationVersion.findFirst({ where: { sceneId }, orderBy: { version: "desc" }, select: { version: true } });
   const job = await db.videoGenerationJob.create({ data: { sceneId, provider: "veo", prompt: parsed.prompt } });
   await db.sceneGenerationVersion.create({ data: { sceneId, version: (latest?.version ?? 0) + 1, generationJobId: job.id, prompt: parsed.prompt, provider: "veo" } });
-  const queue = new RedisJobQueue(redis);
+  const queue = new LocalJobQueue();
   await queue.enqueue("video.generate", { jobId: job.id, request: parsed }, `video-generate:${job.id}`);
   return job;
 }

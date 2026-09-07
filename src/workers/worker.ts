@@ -1,18 +1,15 @@
-import Redis from "ioredis";
-import { getRequiredRedisUrl } from "@/lib/env";
 import { logger } from "@/lib/logger";
-import { RedisJobQueue } from "@/lib/jobs/queue";
+import { LocalJobQueue } from "@/lib/jobs/queue";
 import { handleJob } from "@/workers/job-handler";
 
-const redis = new Redis(getRequiredRedisUrl());
-const queue = new RedisJobQueue(redis);
+const queue = new LocalJobQueue();
 
 async function run() {
   logger.info("Background worker started");
   while (true) {
     const job = await queue.claim();
-    if (!job) continue;
-    try { await handleJob(job.name, job.payload, redis); await queue.markSucceeded(job); logger.info("Job succeeded", { jobId: job.jobId, name: job.name }); }
+    if (!job) { await new Promise((resolve) => setTimeout(resolve, 500)); continue; }
+    try { await handleJob(job.name, job.payload); await queue.markSucceeded(job); logger.info("Job succeeded", { jobId: job.jobId, name: job.name }); }
     catch (error) { const message = error instanceof Error ? error.message : "Unknown job failure"; await queue.markFailed(job, message); logger.error("Job failed", { jobId: job.jobId, name: job.name, message, attempt: job.attempts + 1 }); }
   }
 }

@@ -9,3 +9,5 @@ src-tauri/target/
 !.env.example
 *.log
 prisma/*.db
+electron/dist/
+release*/

@@ -13,7 +13,7 @@ describe("video sync integration boundary", () => {
     vi.mocked(db.competitorVideo.upsert).mockResolvedValue({ id: "stored-1" } as never);
     vi.mocked(db.videoMetricSnapshot.upsert).mockResolvedValue({} as never);
     const { syncChannelVideos } = await import("./sync-service");
-    await syncChannelVideos("channel-1", { incr: vi.fn().mockResolvedValue(1), expire: vi.fn() } as never);
+    await syncChannelVideos("channel-1");
     expect(db.competitorVideo.upsert).toHaveBeenCalledTimes(1);
   });
 });

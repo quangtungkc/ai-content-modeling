@@ -1,14 +1,11 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import Redis from "ioredis";
-import { getRequiredRedisUrl } from "@/lib/env";
-import { RedisJobQueue } from "@/lib/jobs/queue";
+import { LocalJobQueue } from "@/lib/jobs/queue";
 import { handleJob } from "@/workers/job-handler";
 
 @Injectable()
 export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WorkerService.name);
-  private readonly redis = new Redis(getRequiredRedisUrl());
-  private readonly queue = new RedisJobQueue(this.redis);
+  private readonly queue = new LocalJobQueue();
   private stopped = false;
 
   async onModuleInit() {
@@ -17,16 +14,15 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleDestroy() {
     this.stopped = true;
-    await this.redis.quit();
   }
 
   private async run() {
     this.logger.log("NestJS background worker started");
     while (!this.stopped) {
       const job = await this.queue.claim();
-      if (!job) continue;
+      if (!job) { await new Promise((resolve) => setTimeout(resolve, 500)); continue; }
       try {
-        await handleJob(job.name, job.payload, this.redis);
+        await handleJob(job.name, job.payload);
         await this.queue.markSucceeded(job);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown job failure";

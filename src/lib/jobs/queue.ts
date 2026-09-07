@@ -1,37 +1,30 @@
-import Redis from "ioredis";
+import { randomUUID } from "node:crypto";
+import { Prisma } from "@prisma/client";
+import { db } from "@/lib/db";
 import type { JobPayload, JobQueue, QueuedJob } from "./types";
 
-export class RedisJobQueue implements JobQueue {
-  constructor(private readonly redis: Redis) {}
-
+export class LocalJobQueue implements JobQueue {
   async enqueue(name: string, payload: JobPayload, idempotencyKey: string) {
-    const jobId = crypto.randomUUID();
-    const existingJobId = await this.redis.get(`job:dedupe:${idempotencyKey}`);
-    if (existingJobId) return { jobId: existingJobId };
-    const claimed = await this.redis.set(`job:dedupe:${idempotencyKey}`, jobId, "EX", 86400, "NX");
-    if (!claimed) return { jobId: (await this.redis.get(`job:dedupe:${idempotencyKey}`)) ?? jobId };
-    await this.redis.hset(`job:${jobId}`, { name, payload: JSON.stringify(payload), idempotencyKey, status: "queued", attempts: 0, maxAttempts: 3 });
-    await this.redis.lpush("jobs:pending", jobId);
-    return { jobId };
+    const existing = await db.backgroundJob.findUnique({ where: { idempotencyKey }, select: { id: true } });
+    if (existing) return { jobId: existing.id };
+    const job = await db.backgroundJob.create({ data: { id: randomUUID(), name, payload: payload as Prisma.InputJsonValue, idempotencyKey }, select: { id: true } });
+    return { jobId: job.id };
   }
 
-  async claim(timeoutSeconds = 30): Promise<QueuedJob | null> {
-    const result = await this.redis.brpoplpush("jobs:pending", "jobs:processing", timeoutSeconds);
-    if (!result) return null;
-    const data = await this.redis.hgetall(`job:${result}`);
-    return { jobId: result, name: data.name, payload: JSON.parse(data.payload) as JobPayload, idempotencyKey: data.idempotencyKey, attempts: Number(data.attempts), maxAttempts: Number(data.maxAttempts) };
+  async claim(): Promise<QueuedJob | null> {
+    const job = await db.backgroundJob.findFirst({ where: { status: "queued" }, orderBy: { createdAt: "asc" } });
+    if (!job) return null;
+    const claimed = await db.backgroundJob.updateMany({ where: { id: job.id, status: "queued" }, data: { status: "running", startedAt: new Date() } });
+    if (!claimed.count) return this.claim();
+    return { jobId: job.id, name: job.name, payload: job.payload as JobPayload, idempotencyKey: job.idempotencyKey, attempts: job.attempts, maxAttempts: job.maxAttempts };
   }
 
   async markSucceeded(job: QueuedJob) {
-    await this.redis.hset(`job:${job.jobId}`, { status: "succeeded", completedAt: new Date().toISOString() });
-    await this.redis.lrem("jobs:processing", 1, job.jobId);
+    await db.backgroundJob.update({ where: { id: job.jobId }, data: { status: "succeeded", completedAt: new Date(), error: null } });
   }
 
   async markFailed(job: QueuedJob, error: string) {
     const attempts = job.attempts + 1;
-    const status = attempts >= job.maxAttempts ? "failed" : "queued";
-    await this.redis.hset(`job:${job.jobId}`, { status, attempts, error, failedAt: new Date().toISOString() });
-    await this.redis.lrem("jobs:processing", 1, job.jobId);
-    if (status === "queued") await this.redis.lpush("jobs:pending", job.jobId);
+    await db.backgroundJob.update({ where: { id: job.jobId }, data: { status: attempts >= job.maxAttempts ? "failed" : "queued", attempts, error, startedAt: null, completedAt: attempts >= job.maxAttempts ? new Date() : null } });
   }
 }

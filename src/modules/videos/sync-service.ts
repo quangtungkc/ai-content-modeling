@@ -1,8 +1,7 @@
 import { db } from "@/lib/db";
 import { logger } from "@/lib/logger";
 import { getCompetitorProvider } from "@/lib/platform";
-import { RedisRateLimiter } from "@/lib/jobs/rate-limit";
-import type Redis from "ioredis";
+import { LocalRateLimiter } from "@/lib/jobs/rate-limit";
 import { UsageMetric } from "@prisma/client";
 import { recordUsage } from "@/modules/usage/service";
 import { decryptSecret } from "@/lib/secrets";
@@ -22,12 +21,12 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item
   return results;
 }
 
-export async function syncChannelVideos(channelId: string, redis: Redis, syncId?: string) {
+export async function syncChannelVideos(channelId: string, syncId?: string) {
   const competitors = await db.competitor.findMany({ where: { channelId, status: "ACTIVE" }, include: { channel: { select: { userId: true } } } });
   const hasFacebook = competitors.some((competitor) => typeof competitor.platform === "string" && competitor.platform.toLowerCase() === "facebook");
   const facebookConnection = hasFacebook && competitors[0] ? await db.aIConnection.findUnique({ where: { userId_provider_kind: { userId: competitors[0].channel.userId, provider: "FACEBOOK", kind: "PLATFORM" } } }) : null;
   const facebookToken = facebookConnection && !facebookConnection.revokedAt ? decryptSecret(facebookConnection.encryptedKey) : undefined;
-  const limiter = new RedisRateLimiter(redis);
+  const limiter = new LocalRateLimiter();
   const results = await mapWithConcurrency(competitors, 4, async (competitor) => {
     let failed = false;
     let syncedVideos = 0;
@@ -53,7 +52,7 @@ export async function syncChannelVideos(channelId: string, redis: Redis, syncId?
       await db.competitor.update({ where: { id: competitor.id }, data: { syncError: message } });
       logger.error("Competitor sync failed", { channelId, competitorId: competitor.id, message });
     }
-    if (syncId) await markCompetitorProcessed(redis, syncId, failed);
+    if (syncId) await markCompetitorProcessed(syncId, failed);
     return { failed, videos: syncedVideos };
   });
   return { channelId, competitors: results.filter((result) => !result.failed).length, videos: results.reduce((total, result) => total + result.videos, 0) };

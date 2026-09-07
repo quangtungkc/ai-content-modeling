@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -136,8 +136,8 @@ model Channel {
   videoDurationSec      Int?
   hasDialogue           Boolean      @default(false)
   creativeInstructions  String?
-  mustKeep              String[]
-  mustAvoid             String[]
+  mustKeep              Json         @default("[]")
+  mustAvoid             Json         @default("[]")
   timezone              String
   status                RecordStatus @default(ACTIVE)
   createdAt             DateTime     @default(now())
@@ -375,7 +375,7 @@ model Asset {
   storageKey  String
   characterId String?
   backgroundId String?
-  sceneIds    String[]        @default([])
+  sceneIds    Json            @default("[]")
   version     Int             @default(1)
   mimeType    String
   checksum    String
@@ -465,4 +465,35 @@ model SceneGenerationVersion {
   generationJob   VideoGenerationJob @relation(fields: [generationJobId], references: [id])
   @@unique([sceneId, version])
   @@index([sceneId, createdAt(sort: Desc)])
+}
+
+model BackgroundJob {
+  id             String   @id @default(cuid())
+  name           String
+  payload        Json
+  idempotencyKey String   @unique
+  status         String   @default("queued")
+  attempts       Int      @default(0)
+  maxAttempts    Int      @default(3)
+  error          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  startedAt      DateTime?
+  completedAt    DateTime?
+  @@index([status, createdAt])
+}
+
+model SyncRun {
+  id                String   @id
+  userId            String
+  status            String   @default("running")
+  total             Int      @default(0)
+  processed         Int      @default(0)
+  failed            Int      @default(0)
+  remainingChannels Int      @default(0)
+  error             String?
+  startedAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  completedAt       DateTime?
+  @@index([userId, startedAt])
 }
