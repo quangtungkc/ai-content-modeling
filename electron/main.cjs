@@ -385,9 +385,8 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
     const slot = slots[index];
     if (!slot || !["character", "background", "scene"].includes(slot.kind) || typeof slot.prompt !== "string") throw new Error("Prompt ảnh không hợp lệ.");
     event.sender.send("gemini-browser:progress", { processed: index, total: slots.length, label: slot.label ?? `Ảnh ${index + 1}` });
-    const script = `(async () => {
+    const prepareScript = `(() => {
       const prompt = ${JSON.stringify(slot.prompt)};
-      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const collectRoots = () => {
         const roots = [document];
         const seen = new Set(roots);
@@ -413,31 +412,57 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
         document.execCommand("insertText", false, prompt);
       }
       input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: prompt }));
-      await sleep(300);
+      input.focus();
+      return { beforeSources: [...before], beforeCanvasCount: beforeCanvases.size, promptPrefix: prompt.slice(0, 48) };
+    })()`;
+    const prepared = await window.webContents.executeJavaScript(prepareScript, true);
+    if (!prepared || prepared.error) throw new Error(prepared?.error ?? "Không thể chuẩn bị prompt Gemini.");
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    window.webContents.sendInputEvent({ type: "keyDown", keyCode: "ENTER" });
+    window.webContents.sendInputEvent({ type: "keyUp", keyCode: "ENTER" });
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const sendScript = `(() => {
+      const input = document.querySelector('textarea, [contenteditable="true"]');
+      if (!input) return { error: "Không tìm thấy ô nhập prompt Gemini." };
+      const inputText = input.tagName === "TEXTAREA" ? input.value : (input.innerText || input.textContent || "");
+      if (!inputText.includes(${JSON.stringify(prepared.promptPrefix)})) return { sent: true };
+      input.focus();
       const inputBounds = input.getBoundingClientRect();
-      const sendCandidates = [...document.querySelectorAll('button, [role="button"]')].filter((element) => {
+      const candidates = [...document.querySelectorAll('button, [role="button"]')].filter((element) => {
         const label = ((element.getAttribute("aria-label") || "") + " " + (element.getAttribute("title") || "") + " " + (element.textContent || "")).toLowerCase();
         const bounds = element.getBoundingClientRect();
         const style = getComputedStyle(element);
         return !element.disabled && bounds.width > 0 && bounds.height > 0 && style.visibility !== "hidden" && style.display !== "none" && (label.includes("send") || label.includes("gửi") || label.includes("submit"));
       });
-      const send = sendCandidates.sort((left, right) => {
+      const send = candidates.sort((left, right) => {
         const leftBounds = left.getBoundingClientRect();
         const rightBounds = right.getBoundingClientRect();
-        const leftDistance = Math.hypot(leftBounds.left - inputBounds.right, leftBounds.top - inputBounds.bottom);
-        const rightDistance = Math.hypot(rightBounds.left - inputBounds.right, rightBounds.top - inputBounds.bottom);
-        return leftDistance - rightDistance;
+        return Math.hypot(leftBounds.left - inputBounds.right, leftBounds.top - inputBounds.bottom) - Math.hypot(rightBounds.left - inputBounds.right, rightBounds.top - inputBounds.bottom);
       })[0];
-      if (!send) return { error: "Không tìm thấy nút gửi prompt Gemini." };
-      send.click();
-      await sleep(600);
-      const inputText = input.tagName === "TEXTAREA" ? input.value : (input.innerText || input.textContent || "");
-      if (inputText.includes(prompt.slice(0, 48))) {
-        input.focus();
-        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
-        await sleep(600);
-      }
+      send?.click();
+      return { sent: Boolean(send) };
+    })()`;
+    const sendResult = await window.webContents.executeJavaScript(sendScript, true);
+    if (sendResult?.error) throw new Error(sendResult.error);
+    if (!sendResult?.sent) {
+      throw new Error("Gemini chưa nhận được prompt. Hãy kiểm tra cửa sổ Gemini đang mở và thử lại.");
+    }
+    const script = `(async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const collectRoots = () => {
+        const roots = [document];
+        const seen = new Set(roots);
+        for (let index = 0; index < roots.length; index += 1) {
+          for (const element of roots[index].querySelectorAll("*")) {
+            if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+          }
+        }
+        return roots;
+      };
+      const allImages = () => collectRoots().flatMap((root) => [...root.querySelectorAll("img")]);
+      const allCanvases = () => collectRoots().flatMap((root) => [...root.querySelectorAll("canvas")]);
+      const before = new Set(${JSON.stringify(prepared.beforeSources)});
+      const beforeCanvasCount = ${prepared.beforeCanvasCount};
       for (let elapsed = 0; elapsed < 180000; elapsed += 1500) {
         await sleep(1500);
         const candidates = allImages().filter((image) => {
@@ -459,7 +484,8 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
             return { imageSource: source, captureRect };
           } catch { return { imageSource: source, captureRect }; }
         }
-        const canvas = allCanvases().find((item) => !beforeCanvases.has(item) && item.width >= 128 && item.height >= 128);
+        const canvases = allCanvases();
+        const canvas = canvases.slice(beforeCanvasCount).find((item) => item.width >= 128 && item.height >= 128);
         if (canvas) {
           try { return { dataUrl: canvas.toDataURL("image/png") }; } catch { return { error: "Không thể đọc ảnh Gemini vừa tạo." }; }
         }
