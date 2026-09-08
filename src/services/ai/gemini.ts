@@ -182,5 +182,12 @@ function normalizeModelingIdeas(value: unknown): unknown {
 
 function normalizeDevelopedIdea(value: unknown): unknown {
   const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
-  return { ...source, schemaVersion: "1.0" };
+  const storyboard = Array.isArray(source.storyboard)
+    ? source.storyboard.map((scene, index) => {
+      const item = scene && typeof scene === "object" ? scene as Record<string, unknown> : {};
+      const parsedNumber = typeof item.sceneNumber === "number" && Number.isFinite(item.sceneNumber) ? item.sceneNumber : index + 1;
+      return { ...item, sceneNumber: parsedNumber > 0 ? Math.trunc(parsedNumber) : index + 1 };
+    })
+    : [];
+  return { ...source, schemaVersion: "1.0", storyboard };
 }
