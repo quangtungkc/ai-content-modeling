@@ -249,6 +249,8 @@ export function ViralDashboard() {
       }
       let stored = 0;
       let skipped = 0;
+      const discovered = results.reduce((total, result) => total + result.items.length, 0);
+      const scanErrors = results.filter((result) => result.error).length;
       for (const result of results) {
         for (const item of result.items) {
           if (!item.publishedAt || item.views === null) { skipped += 1; continue; }
@@ -272,7 +274,9 @@ export function ViralDashboard() {
       setAppliedFilters((current) => ({ ...current }));
       setMessage(stored
         ? `Đã quét và lưu ${stored} video từ 3 đối thủ. ${skipped ? `${skipped} mục chưa đủ số liệu nên bỏ qua.` : ""}`
-        : "Chưa tìm thấy video có đủ thời gian đăng và lượt xem. Mở Trang trong cửa sổ Facebook, cuộn đến bài viết rồi quét lại.");
+        : discovered
+          ? `Đã tìm thấy ${discovered} video nhưng Facebook chưa hiển thị đủ thời gian đăng hoặc lượt xem để lưu. ${scanErrors ? `${scanErrors} Trang không thể mở.` : ""}`
+          : `Chưa tải được video từ ba Trang. ${scanErrors ? `${scanErrors} Trang không thể mở.` : "Kiểm tra lại phiên đăng nhập Facebook rồi thử lại."}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Không thể quét Facebook.");
     } finally {

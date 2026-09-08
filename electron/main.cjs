@@ -134,8 +134,11 @@ async function scanFacebookPages(entries) {
   const results = [];
   for (const entry of entries.slice(0, 3)) {
     try {
-      await browser.loadURL(entry.url);
-      await delay(3000);
+      const videosUrl = `${entry.url.replace(/\/$/, "")}/videos`;
+      await browser.loadURL(videosUrl);
+      await delay(2500);
+      await browser.webContents.executeJavaScript("window.scrollTo(0, Math.max(document.body.scrollHeight * 0.6, 1400));", true);
+      await delay(2500);
       const page = await browser.webContents.executeJavaScript(`
         (() => {
           const currentUrl = window.location.href;
@@ -163,10 +166,17 @@ async function scanFacebookPages(entries) {
           const found = new Map();
           for (const anchor of document.querySelectorAll("a[href]")) {
             const href = anchor.href;
-            if (!/\\/(reel|videos|posts)\\//.test(href) && !/watch\\/?\\?v=/.test(href)) continue;
+            if (!/\\/(reel|videos|posts)\\//.test(href) && !/watch\\/?\\?v=/.test(href) && !/\\/share\\/r\\//.test(href)) continue;
             if (found.has(href)) continue;
-            const article = anchor.closest('[role="article"]');
-            const text = (article?.innerText || anchor.innerText || "").trim();
+            let container = anchor.closest('[role="article"]');
+            if (!container) {
+              container = anchor;
+              for (let level = 0; level < 6 && container.parentElement; level += 1) {
+                if (container.innerText && container.innerText.length > 30) break;
+                container = container.parentElement;
+              }
+            }
+            const text = (container?.innerText || anchor.innerText || "").trim();
             if (!text) continue;
             const views = compactNumber(text.match(/([0-9][0-9.,\\s]*[KMB]?)\\s*(?:views|lượt xem)/i)?.[1]);
             const likes = compactNumber(text.match(/([0-9][0-9.,\\s]*[KMB]?)\\s*(?:reactions|likes|lượt thích)/i)?.[1]);
