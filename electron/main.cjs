@@ -338,6 +338,17 @@ function saveGeminiImage(projectId, slot, dataUrl) {
   return `/api/v1/projects/${projectId}/images?kind=${slot.kind}&sceneNumber=${sceneNumber}`;
 }
 
+async function getGeminiImageDataUrl(window, source) {
+  if (typeof source !== "string" || !source) throw new Error("Không tìm thấy nguồn ảnh Gemini.");
+  if (source.startsWith("data:image/")) return source;
+  const response = await window.webContents.session.fetch(source);
+  if (!response.ok) throw new Error("Không thể tải ảnh Gemini vừa tạo.");
+  const mimeType = (response.headers.get("content-type") || "image/png").split(";")[0].toLowerCase();
+  if (!mimeType.startsWith("image/")) throw new Error("Gemini không trả về tệp ảnh hợp lệ.");
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return `data:${mimeType};base64,${buffer.toString("base64")}`;
+}
+
 ipcMain.handle("gemini-browser:run-job", async (event, value) => {
   const projectId = value?.projectId;
   const slots = value?.slots;
@@ -358,7 +369,20 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
     const script = `(async () => {
       const prompt = ${JSON.stringify(slot.prompt)};
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const before = new Set([...document.images].map((image) => image.currentSrc || image.src));
+      const collectRoots = () => {
+        const roots = [document];
+        const seen = new Set(roots);
+        for (let index = 0; index < roots.length; index += 1) {
+          for (const element of roots[index].querySelectorAll("*")) {
+            if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+          }
+        }
+        return roots;
+      };
+      const allImages = () => collectRoots().flatMap((root) => [...root.querySelectorAll("img")]);
+      const allCanvases = () => collectRoots().flatMap((root) => [...root.querySelectorAll("canvas")]);
+      const before = new Set(allImages().map((image) => image.currentSrc || image.src).filter(Boolean));
+      const beforeCanvases = new Set(allCanvases());
       const input = document.querySelector('textarea, [contenteditable="true"]');
       if (!input) return { error: "Không tìm thấy ô nhập prompt Gemini." };
       input.focus();
@@ -379,25 +403,34 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
       send.click();
       for (let elapsed = 0; elapsed < 180000; elapsed += 1500) {
         await sleep(1500);
-        const candidates = [...document.images].filter((image) => {
+        const candidates = allImages().filter((image) => {
           const source = image.currentSrc || image.src;
-          return source && !before.has(source) && (image.naturalWidth || image.width) >= 256 && (image.naturalHeight || image.height) >= 256;
+          return source && !before.has(source) && image.complete && (image.naturalWidth || image.width) >= 128 && (image.naturalHeight || image.height) >= 128;
         });
         const image = candidates[candidates.length - 1];
         if (image) {
           try {
-            const response = await fetch(image.currentSrc || image.src);
-            const blob = await response.blob();
-            const dataUrl = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); });
-            return { dataUrl };
+            const source = image.currentSrc || image.src;
+            if (source.startsWith("blob:")) {
+              const response = await fetch(source);
+              const blob = await response.blob();
+              const dataUrl = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); });
+              return { dataUrl };
+            }
+            return { imageSource: source };
           } catch { return { error: "Không thể đọc ảnh Gemini vừa tạo." }; }
+        }
+        const canvas = allCanvases().find((item) => !beforeCanvases.has(item) && item.width >= 128 && item.height >= 128);
+        if (canvas) {
+          try { return { dataUrl: canvas.toDataURL("image/png") }; } catch { return { error: "Không thể đọc ảnh Gemini vừa tạo." }; }
         }
       }
       return { error: "Gemini không tạo ảnh trong thời gian chờ 180 giây." };
     })()`;
     const result = await window.webContents.executeJavaScript(script, true);
-    if (!result?.dataUrl) throw new Error(result?.error ?? "Không thể tạo ảnh trên Gemini Ultra.");
-    const url = saveGeminiImage(projectId, slot, result.dataUrl);
+    if (!result?.dataUrl && !result?.imageSource) throw new Error(result?.error ?? "Không thể tạo ảnh trên Gemini Ultra.");
+    const dataUrl = result.dataUrl ?? await getGeminiImageDataUrl(window, result.imageSource);
+    const url = saveGeminiImage(projectId, slot, dataUrl);
     images[`${slot.kind}-${Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0}`] = `${url}&v=${Date.now()}`;
     event.sender.send("gemini-browser:progress", { processed: index + 1, total: slots.length, label: slot.label ?? `Ảnh ${index + 1}` });
   }
