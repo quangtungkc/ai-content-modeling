@@ -133,7 +133,16 @@ function parseJsonText(text: string): unknown {
   try { return JSON.parse(trimmed); } catch {
     const start = trimmed.indexOf("{");
     const end = trimmed.lastIndexOf("}");
-    if (start >= 0 && end > start) return JSON.parse(trimmed.slice(start, end + 1));
+    if (start >= 0 && end > start) {
+      const candidate = trimmed.slice(start, end + 1);
+      try { return JSON.parse(candidate); } catch {
+        const repaired = candidate
+          .replace(/[“”]/g, '"')
+          .replace(/,\s*([}\]])/g, "$1")
+          .replace(/([{,]\s*)([A-Za-z_$][\w$-]*)\s*:/g, '$1"$2":');
+        return JSON.parse(repaired);
+      }
+    }
     throw new Error("Gemini không trả về JSON.");
   }
 }
