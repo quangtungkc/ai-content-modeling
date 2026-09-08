@@ -100,6 +100,8 @@ export function ViralDashboard() {
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [contentProjectError, setContentProjectError] = useState("");
   const [generatedImages, setGeneratedImages] = useState<Record<string, string>>({});
+  const [isGeneratingImages, setIsGeneratingImages] = useState(false);
+  const [showGeneratedImages, setShowGeneratedImages] = useState(false);
   const [analysisFilter, setAnalysisFilter] = useState<"all" | "analyzed" | "unanalyzed">("all");
   const [videoPage, setVideoPage] = useState(1);
   const [autoSyncRequested, setAutoSyncRequested] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("autoSync") === "1");
@@ -421,16 +423,29 @@ export function ViralDashboard() {
       setIsCreatingProject(false);
     }
   }
-  async function generateProjectImage(kind: "character" | "background" | "scene", prompt: string, sceneNumber?: number) {
+  async function generateAllProjectImages() {
     if (!contentProject) return;
-    const key = `${kind}-${sceneNumber ?? 0}`;
+    setIsGeneratingImages(true);
     setContentProjectError("");
+    setGeneratedImages({});
+    setShowGeneratedImages(false);
     try {
-      const response = await fetch(`/api/v1/projects/${contentProject.id}/images`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, sceneNumber, prompt, aspectRatio }) });
-      const body = await response.json() as { data?: { url?: string }; error?: { message?: string } };
-      if (!response.ok || !body.data?.url) throw new Error(body.error?.message ?? "Không thể tạo ảnh.");
-      setGeneratedImages((current) => ({ ...current, [key]: `${body.data?.url}&v=${Date.now()}` }));
-    } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo ảnh."); }
+      const requests = [
+        { kind: "character" as const, prompt: `Create a consistent character reference sheet. Art direction: ${JSON.stringify(contentProject.artDirection)}. Character design: ${JSON.stringify(contentProject.characterDesign)}. Aspect ratio: ${aspectRatio}.` },
+        { kind: "background" as const, prompt: `Create a consistent background reference image. Art direction: ${JSON.stringify(contentProject.artDirection)}. Background design: ${JSON.stringify(contentProject.backgroundDesign)}. Aspect ratio: ${aspectRatio}.` },
+        ...contentProject.scenes.map((scene) => ({ kind: "scene" as const, sceneNumber: scene.sceneNumber, prompt: `${scene.englishPrompt}\nVisual: ${scene.visualBlock}\nAction: ${scene.actionBlock}\nKeep the approved character and background designs consistent. Aspect ratio: ${aspectRatio}.` })),
+      ];
+      const images: Record<string, string> = {};
+      for (const item of requests) {
+        const response = await fetch(`/api/v1/projects/${contentProject.id}/images`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...item, aspectRatio }) });
+        const body = await response.json() as { data?: { url?: string }; error?: { message?: string } };
+        if (!response.ok || !body.data?.url) throw new Error(body.error?.message ?? "Không thể tạo toàn bộ ảnh.");
+        images[`${item.kind}-${"sceneNumber" in item ? item.sceneNumber : 0}`] = `${body.data.url}&v=${Date.now()}`;
+      }
+      setGeneratedImages(images);
+      setShowGeneratedImages(true);
+    } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo toàn bộ ảnh."); }
+    finally { setIsGeneratingImages(false); }
   }
   async function copyAnalysis() {
     if (!analysisResult) return;
@@ -603,7 +618,7 @@ export function ViralDashboard() {
               {modelingIdea && <div className="mt-5 space-y-4 border-t border-[#d8e3f1] pt-4 text-sm leading-6 text-[#0b3262]"><AnalysisBlock label="Ý tưởng" value={`${modelingIdea.title}\n${modelingIdea.coreConcept}`} /><AnalysisBlock label="Kịch bản" value={modelingIdea.script} /><AnalysisBlock label="Xây dựng hình tượng nhân vật" value={modelingIdea.characterDesign} /><AnalysisBlock label="Bối cảnh" value={modelingIdea.setting} /><AnalysisBlock label="Phong cách mỹ thuật" value={modelingIdea.artStyle} />
                 <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Tạo hình và phân cảnh</p><p className="mt-1 text-sm text-[#6883aa]">Giữ nhân vật và bối cảnh đồng nhất trong toàn bộ video.</p><div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end"><label className="flex-1 text-sm font-semibold text-[#0b3262]">Kích thước khung hình<select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)} className="mt-1 w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-2.5 font-normal"><option value="9:16">9:16 · Dọc</option><option value="16:9">16:9 · Ngang</option><option value="1:1">1:1 · Vuông</option><option value="4:5">4:5 · Dọc mạng xã hội</option></select></label><button type="button" onClick={() => void createContentProject()} disabled={isCreatingProject} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isCreatingProject ? "Đang tạo..." : "Tạo hình tượng & phân cảnh"}</button></div>{contentProjectError && <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{contentProjectError}</p>}{contentProject && <div className="mt-5 space-y-4 border-t border-[#d8e3f1] pt-4"><AnalysisBlock label="Thiết kế nhân vật đồng nhất" value={JSON.stringify(contentProject.characterDesign, null, 2)} /><AnalysisBlock label="Bối cảnh đồng nhất" value={JSON.stringify(contentProject.backgroundDesign, null, 2)} /><AnalysisBlock label="Khung hình" value={String(contentProject.artDirection.aspectRatio ?? aspectRatio)} /><div><p className="font-extrabold text-[#0b3262]">Các phân cảnh</p><div className="mt-2 space-y-3">{contentProject.scenes.map((scene) => <div key={scene.sceneNumber} className="rounded-lg border border-[#d8e3f1] bg-white p-3"><p className="font-bold text-[#0b5799]">Cảnh {scene.sceneNumber}</p><p className="mt-1"><strong>Hình ảnh:</strong> {scene.visualBlock}</p><p className="mt-1"><strong>Hành động:</strong> {scene.actionBlock}</p><p className="mt-1"><strong>Âm thanh:</strong> {scene.audioBlock}</p></div>)}</div></div></div>}</div>
               </div>}
-              {contentProject && <div className="mt-4 space-y-3"><button type="button" onClick={() => void generateProjectImage("character", `Create a consistent character reference sheet. Art direction: ${JSON.stringify(contentProject.artDirection)}. Character design: ${JSON.stringify(contentProject.characterDesign)}. Aspect ratio: ${aspectRatio}.`)} className="rounded-lg border border-[#0b5799] px-3 py-2 text-sm font-bold text-[#0b5799]">Tạo ảnh nhân vật</button><button type="button" onClick={() => void generateProjectImage("background", `Create a consistent background reference image. Art direction: ${JSON.stringify(contentProject.artDirection)}. Background design: ${JSON.stringify(contentProject.backgroundDesign)}. Aspect ratio: ${aspectRatio}.`)} className="ml-2 rounded-lg border border-[#0b5799] px-3 py-2 text-sm font-bold text-[#0b5799]">Tạo ảnh bối cảnh</button>{generatedImages["character-0"] && <img src={generatedImages["character-0"]} alt="Hình tượng nhân vật" className="mt-3 max-h-64 rounded-lg border border-[#d8e3f1]" />}{generatedImages["background-0"] && <img src={generatedImages["background-0"]} alt="Bối cảnh đồng nhất" className="mt-3 max-h-64 rounded-lg border border-[#d8e3f1]" />}{contentProject.scenes.map((scene) => <div key={`image-${scene.sceneNumber}`}><button type="button" onClick={() => void generateProjectImage("scene", `${scene.englishPrompt}\nVisual: ${scene.visualBlock}\nAction: ${scene.actionBlock}\nKeep the approved character and background designs consistent. Aspect ratio: ${aspectRatio}.`, scene.sceneNumber)} className="rounded-lg border border-[#0b5799] px-3 py-2 text-sm font-bold text-[#0b5799]">Tạo ảnh cảnh {scene.sceneNumber}</button>{generatedImages[`scene-${scene.sceneNumber}`] && <img src={generatedImages[`scene-${scene.sceneNumber}`]} alt={`Ảnh cảnh ${scene.sceneNumber}`} className="mt-3 max-h-64 rounded-lg border border-[#d8e3f1]" />}</div>)}</div>}
+              {contentProject && <div className="mt-4 space-y-3"><button type="button" onClick={() => void generateAllProjectImages()} disabled={isGeneratingImages} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isGeneratingImages ? "Đang tạo toàn bộ ảnh..." : "Tạo toàn bộ ảnh"}</button>{Object.keys(generatedImages).length > 0 && <button type="button" onClick={() => setShowGeneratedImages((visible) => !visible)} className="ml-2 rounded-lg border border-[#0b5799] px-4 py-2.5 text-sm font-bold text-[#0b5799]">{showGeneratedImages ? "Ẩn ảnh" : "Xem ảnh"}</button>}{showGeneratedImages && <div className="mt-4 grid gap-4 sm:grid-cols-2">{generatedImages["character-0"] && <figure><img src={generatedImages["character-0"]} alt="Hình tượng nhân vật" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Nhân vật</figcaption></figure>}{generatedImages["background-0"] && <figure><img src={generatedImages["background-0"]} alt="Bối cảnh đồng nhất" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Bối cảnh</figcaption></figure>}{contentProject.scenes.map((scene) => generatedImages[`scene-${scene.sceneNumber}`] && <figure key={`image-${scene.sceneNumber}`}><img src={generatedImages[`scene-${scene.sceneNumber}`]} alt={`Ảnh cảnh ${scene.sceneNumber}`} className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Cảnh {scene.sceneNumber}</figcaption></figure>)}</div>}</div>}
             </div>
           </section>
         </div>
