@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
-const { app, BrowserWindow, clipboard, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
@@ -338,6 +338,80 @@ function saveGeminiImage(projectId, slot, dataUrl) {
   return `/api/v1/projects/${projectId}/images?kind=${slot.kind}&sceneNumber=${sceneNumber}`;
 }
 
+function findSceneImagePath(projectId, sceneNumber) {
+  const imageRoot = path.join(app.getPath("userData"), "generated-images", projectId);
+  for (const extension of [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif"]) {
+    const target = path.join(imageRoot, `scene-${sceneNumber}${extension}`);
+    if (fs.existsSync(target)) return target;
+  }
+  throw new Error(`Chưa có ảnh cho cảnh ${sceneNumber}.`);
+}
+
+function saveGeminiVideo(projectId, sceneNumber, buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 1024) throw new Error("Gemini không trả về video hợp lệ.");
+  if (buffer.length > 200 * 1024 * 1024) throw new Error("Video Gemini vượt quá giới hạn 200 MB.");
+  const videoRoot = path.join(app.getPath("userData"), "generated-videos", projectId);
+  fs.mkdirSync(videoRoot, { recursive: true });
+  fs.writeFileSync(path.join(videoRoot, `scene-${sceneNumber}.mp4`), buffer);
+  return `/api/v1/projects/${projectId}/videos?sceneNumber=${sceneNumber}`;
+}
+
+async function dispatchBrowserClick(window, point) {
+  const x = Math.round(point.x);
+  const y = Math.round(point.y);
+  window.show();
+  window.focus();
+  window.webContents.focus();
+  if (!window.webContents.debugger.isAttached()) window.webContents.debugger.attach("1.3");
+  await window.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+  await delay(120);
+  await window.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+  await delay(70);
+  await window.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+}
+
+async function findGeminiControlPoint(window, labels) {
+  return window.webContents.executeJavaScript(`(() => {
+    const wanted = ${JSON.stringify(labels)}.map((value) => value.toLowerCase());
+    const roots = [document];
+    const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) {
+      for (const element of roots[index].querySelectorAll("*")) {
+        if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      }
+    }
+    const input = document.querySelector('textarea, [contenteditable="true"]');
+    const inputBounds = input?.getBoundingClientRect();
+    const candidates = roots.flatMap((root) => [...root.querySelectorAll('button, [role="button"], [role="menuitem"]')]).filter((element) => {
+      const label = ((element.getAttribute("aria-label") || "") + " " + (element.getAttribute("title") || "") + " " + (element.textContent || "")).trim().toLowerCase();
+      const bounds = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return !element.disabled && bounds.width > 0 && bounds.height > 0 && style.visibility !== "hidden" && style.display !== "none" && wanted.some((value) => label === value || label.includes(value));
+    });
+    const selected = candidates.sort((left, right) => {
+      if (!inputBounds) return 0;
+      const a = left.getBoundingClientRect();
+      const b = right.getBoundingClientRect();
+      return Math.hypot(a.left - inputBounds.left, a.top - inputBounds.top) - Math.hypot(b.left - inputBounds.left, b.top - inputBounds.top);
+    })[0];
+    if (!selected) return null;
+    const bounds = selected.getBoundingClientRect();
+    return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+  })()`, true);
+}
+
+async function getGeminiVideoBuffer(window, result) {
+  if (typeof result?.dataUrl === "string") {
+    const match = /^data:video\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=]+)$/i.exec(result.dataUrl);
+    if (!match) throw new Error("Dữ liệu video Gemini không hợp lệ.");
+    return Buffer.from(match[1], "base64");
+  }
+  if (typeof result?.videoSource !== "string" || !result.videoSource) throw new Error("Không tìm thấy nguồn video Gemini.");
+  const response = await window.webContents.session.fetch(result.videoSource);
+  if (!response.ok) throw new Error("Gemini chặn tải video vừa tạo.");
+  return Buffer.from(await response.arrayBuffer());
+}
+
 async function captureGeminiImage(window, rect) {
   if (!rect || !Number.isFinite(rect.x) || !Number.isFinite(rect.y) || !Number.isFinite(rect.width) || !Number.isFinite(rect.height)) {
     throw new Error("Không xác định được vùng ảnh Gemini vừa tạo.");
@@ -543,6 +617,132 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
     event.sender.send("gemini-browser:progress", { processed: index + 1, total: slots.length, label: slot.label ?? `Ảnh ${index + 1}` });
   }
   return { status: "completed", images };
+});
+
+ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
+  const projectId = value?.projectId;
+  const slots = value?.slots;
+  if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || !Array.isArray(slots) || slots.length === 0) {
+    throw new Error("Yêu cầu tạo video không hợp lệ.");
+  }
+  const window = createGeminiWindow();
+  await waitForGeminiLoad(window);
+  const videos = {};
+  for (let index = 0; index < slots.length; index += 1) {
+    const slot = slots[index];
+    if (!Number.isInteger(slot?.sceneNumber) || typeof slot.prompt !== "string" || !slot.prompt.trim()) throw new Error("Prompt video không hợp lệ.");
+    const sceneNumber = slot.sceneNumber;
+    const imagePath = findSceneImagePath(projectId, sceneNumber);
+    event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: slot.label ?? `Cảnh ${sceneNumber}` });
+
+    const toolsPoint = await findGeminiControlPoint(window, ["tools", "công cụ"]);
+    if (toolsPoint) {
+      await dispatchBrowserClick(window, toolsPoint);
+      await delay(500);
+    }
+    const videoPoint = await findGeminiControlPoint(window, ["create video", "tạo video", "videos", "video"]);
+    if (!videoPoint) throw new Error("Không tìm thấy chế độ Video trong Gemini. Hãy kiểm tra tài khoản đã được cấp quyền tạo video.");
+    await dispatchBrowserClick(window, videoPoint);
+    await delay(700);
+
+    const prepared = await window.webContents.executeJavaScript(`(() => {
+      const roots = [document];
+      const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll("*")) {
+          if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        }
+      }
+      const videos = roots.flatMap((root) => [...root.querySelectorAll("video")]);
+      const beforeSources = videos.map((video) => video.currentSrc || video.src || video.querySelector("source")?.src).filter(Boolean);
+      const input = document.querySelector('textarea, [contenteditable="true"]');
+      if (!input) return { error: "Không tìm thấy ô nhập prompt Gemini." };
+      input.focus();
+      if (input.tagName === "TEXTAREA") {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+        setter?.call(input, "");
+      } else {
+        document.execCommand("selectAll", false);
+        document.execCommand("delete", false);
+      }
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+      return { beforeSources };
+    })()`, true);
+    if (prepared?.error) throw new Error(prepared.error);
+
+    const attachment = nativeImage.createFromPath(imagePath);
+    if (attachment.isEmpty()) throw new Error(`Không thể đọc ảnh cảnh ${sceneNumber}.`);
+    clipboard.writeImage(attachment);
+    window.webContents.focus();
+    window.webContents.paste();
+    await delay(1200);
+
+    const prompt = `Create one 8-second video from the attached image. Use the attached image as the first frame and preserve the exact character identity, clothing, art style, colors, and environment. Animate only this scene. Action: ${slot.actionBlock}. Camera and visual direction: ${slot.visualBlock}. Audio and sound direction: ${slot.audioBlock}. Aspect ratio: ${slot.aspectRatio}. Generate one final video with audio.`;
+    const promptResult = await window.webContents.executeJavaScript(`(() => {
+      const prompt = ${JSON.stringify("__PROMPT__")};
+      const input = document.querySelector('textarea, [contenteditable="true"]');
+      if (!input) return { error: "Không tìm thấy ô nhập prompt Gemini." };
+      input.focus();
+      if (input.tagName === "TEXTAREA") {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+        setter?.call(input, prompt);
+      } else {
+        document.execCommand("insertText", false, prompt);
+      }
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: prompt }));
+      return { promptPrefix: prompt.slice(0, 48) };
+    })()`.replace(JSON.stringify("__PROMPT__"), JSON.stringify(prompt)), true);
+    if (promptResult?.error) throw new Error(promptResult.error);
+    await delay(400);
+    const sendPoint = await findGeminiControlPoint(window, ["send", "gửi", "submit"]);
+    if (!sendPoint) throw new Error("Không tìm thấy nút gửi video Gemini.");
+    await dispatchBrowserClick(window, sendPoint);
+    await delay(1200);
+    const deliveryText = await window.webContents.executeJavaScript(`(() => {
+      const input = document.querySelector('textarea, [contenteditable="true"]');
+      return input ? (input.tagName === "TEXTAREA" ? input.value : (input.innerText || input.textContent || "")) : "";
+    })()`, true);
+    if (deliveryText.includes(promptResult.promptPrefix)) throw new Error(`Gemini chưa nhận lệnh tạo video cảnh ${sceneNumber}.`);
+
+    const result = await window.webContents.executeJavaScript(`(async () => {
+      const before = new Set(${JSON.stringify(prepared.beforeSources ?? [])});
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const collectRoots = () => {
+        const roots = [document];
+        const seen = new Set(roots);
+        for (let index = 0; index < roots.length; index += 1) {
+          for (const element of roots[index].querySelectorAll("*")) {
+            if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+          }
+        }
+        return roots;
+      };
+      for (let elapsed = 0; elapsed < 600000; elapsed += 2000) {
+        await sleep(2000);
+        const candidates = collectRoots().flatMap((root) => [...root.querySelectorAll("video")]).filter((video) => {
+          const source = video.currentSrc || video.src || video.querySelector("source")?.src;
+          return source && !before.has(source) && video.readyState >= 2;
+        });
+        const video = candidates[candidates.length - 1];
+        if (!video) continue;
+        const source = video.currentSrc || video.src || video.querySelector("source")?.src;
+        if (source.startsWith("blob:")) {
+          const response = await fetch(source);
+          const blob = await response.blob();
+          const dataUrl = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); });
+          return { dataUrl };
+        }
+        return { videoSource: source };
+      }
+      return { error: "Gemini chưa tạo xong video sau 10 phút." };
+    })()`, true);
+    if (result?.error) throw new Error(result.error);
+    const buffer = await getGeminiVideoBuffer(window, result);
+    const url = saveGeminiVideo(projectId, sceneNumber, buffer);
+    videos[`scene-${sceneNumber}`] = `${url}&v=${Date.now()}`;
+    event.sender.send("gemini-browser:video-progress", { processed: index + 1, total: slots.length, label: slot.label ?? `Cảnh ${sceneNumber}` });
+  }
+  return { status: "completed", videos };
 });
 
 ipcMain.handle("gemini-browser:import-images", async (_event, value) => {

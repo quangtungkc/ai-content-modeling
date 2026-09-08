@@ -8,6 +8,7 @@ import { GeminiProvider } from "@/services/ai/gemini";
 
 export type GeneratedImageKind = "character" | "background" | "scene";
 const root = () => path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "Modeling AI", "generated-images");
+const videoRoot = () => path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "Modeling AI", "generated-videos");
 const filePath = (projectId: string, kind: GeneratedImageKind, sceneNumber?: number, extension = ".png") => path.join(root(), projectId, `${kind}-${sceneNumber ?? 0}${extension}`);
 const imageFormats = [
   { extension: ".png", mimeType: "image/png" },
@@ -47,4 +48,15 @@ export async function readProjectImage(projectId: string, userId: string, kind: 
     }
   }
   throw new AppError("IMAGE_NOT_FOUND", "Chưa có ảnh cho mục này.", 404);
+}
+
+export async function readProjectVideo(projectId: string, userId: string, sceneNumber: number) {
+  await ownedProject(projectId, userId);
+  const target = path.join(videoRoot(), projectId, `scene-${sceneNumber}.mp4`);
+  try {
+    await access(target);
+    return await readFile(target);
+  } catch {
+    throw new AppError("VIDEO_NOT_FOUND", "Chưa có video cho phân cảnh này.", 404);
+  }
 }

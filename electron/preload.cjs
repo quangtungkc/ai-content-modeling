@@ -31,6 +31,11 @@ contextBridge.exposeInMainWorld("desktopGemini", {
     ipcRenderer.on("gemini-browser:progress", handler);
     return ipcRenderer.invoke("gemini-browser:run-job", { projectId, slots }).finally(() => ipcRenderer.removeListener("gemini-browser:progress", handler));
   },
+  runVideoJob: (projectId, slots, onProgress) => {
+    const handler = (_event, progress) => onProgress?.(progress);
+    ipcRenderer.on("gemini-browser:video-progress", handler);
+    return ipcRenderer.invoke("gemini-browser:run-video-job", { projectId, slots }).finally(() => ipcRenderer.removeListener("gemini-browser:video-progress", handler));
+  },
 });
 
 contextBridge.exposeInMainWorld("desktopAuth", {
