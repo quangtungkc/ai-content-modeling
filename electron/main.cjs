@@ -320,6 +320,7 @@ function waitForGeminiLoad(window) {
 
 async function reloadGeminiBeforeNextPrompt(window) {
   if (window.isDestroyed()) throw new Error("Cửa sổ Gemini đã bị đóng trước khi gửi prompt tiếp theo.");
+  const conversationUrl = window.webContents.getURL();
   geminiLoadPromise = new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("Gemini tải lại quá lâu trước khi gửi prompt tiếp theo.")), 45_000);
     window.webContents.once("did-finish-load", () => { clearTimeout(timeout); resolve(); });
@@ -328,18 +329,18 @@ async function reloadGeminiBeforeNextPrompt(window) {
   await geminiLoadPromise;
   await delay(1_500);
   for (let elapsed = 0; elapsed < 20_000; elapsed += 500) {
-    const ready = await window.webContents.executeJavaScript("!window.location.href.includes('accounts.google.com') && Boolean(document.querySelector('textarea, [contenteditable=\"true\"]'))", true);
-    if (!ready) {
+    const ready = await window.webContents.executeJavaScript(`(() => {
+      const input = document.querySelector('textarea, [contenteditable="true"]');
+      if (!input || window.location.href.includes('accounts.google.com')) return false;
+      const bounds = input.getBoundingClientRect();
+      return bounds.width > 100 && bounds.height > 20;
+    })()`, true);
+    if (!ready || (conversationUrl.includes("gemini.google.com/app/") && !window.webContents.getURL().includes("gemini.google.com/app/"))) {
       await delay(500);
       continue;
     }
-    const newChatPoint = await findGeminiControlPoint(window, ["new chat", "cuộc trò chuyện mới"]);
-    if (!newChatPoint) throw new Error("Gemini đã tải lại nhưng không tìm thấy nút tạo cuộc trò chuyện mới.");
-    await dispatchBrowserClick(window, newChatPoint);
-    await delay(1_200);
-    const composerReady = await window.webContents.executeJavaScript("Boolean(document.querySelector('textarea, [contenteditable=\"true\"]'))", true);
-    if (composerReady) return;
-    await delay(500);
+    await delay(800);
+    return;
   }
   throw new Error("Gemini đã tải lại nhưng chưa sẵn sàng nhận prompt tiếp theo.");
 }
