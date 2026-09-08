@@ -327,15 +327,32 @@ async function reloadGeminiBeforeNextPrompt(window) {
   });
   window.webContents.reload();
   await geminiLoadPromise;
+  if (conversationUrl.includes("gemini.google.com/app/") && !window.webContents.getURL().includes("gemini.google.com/app/")) {
+    geminiLoadPromise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Không thể quay lại cuộc trò chuyện Gemini hiện tại sau khi tải lại.")), 45_000);
+      window.webContents.once("did-finish-load", () => { clearTimeout(timeout); resolve(); });
+    });
+    await window.webContents.loadURL(conversationUrl);
+    await geminiLoadPromise;
+  }
   await delay(1_500);
   for (let elapsed = 0; elapsed < 20_000; elapsed += 500) {
     const ready = await window.webContents.executeJavaScript(`(() => {
-      const input = document.querySelector('textarea, [contenteditable="true"]');
+      const roots = [document];
+      const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll("*")) {
+          if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        }
+      }
+      const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable="true"]')]).find((element) => {
+        const bounds = element.getBoundingClientRect();
+        return bounds.width > 100 && bounds.height > 20;
+      });
       if (!input || window.location.href.includes('accounts.google.com')) return false;
-      const bounds = input.getBoundingClientRect();
-      return bounds.width > 100 && bounds.height > 20;
+      return true;
     })()`, true);
-    if (!ready || (conversationUrl.includes("gemini.google.com/app/") && !window.webContents.getURL().includes("gemini.google.com/app/"))) {
+    if (!ready) {
       await delay(500);
       continue;
     }
