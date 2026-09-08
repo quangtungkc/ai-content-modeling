@@ -132,8 +132,9 @@ const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mil
 async function scanFacebookPages(entries) {
   const browser = createFacebookWindow();
   const results = [];
-  for (const entry of entries.slice(0, 3)) {
-    try {
+  try {
+    for (const entry of entries.slice(0, 3)) {
+      try {
       const videosUrl = `${entry.url.replace(/\/$/, "")}/videos`;
       await browser.loadURL(videosUrl);
       await delay(2500);
@@ -187,10 +188,13 @@ async function scanFacebookPages(entries) {
           return { needsLogin: false, items: [...found.values()].slice(0, 10) };
         })()
       `, true);
-      results.push({ competitorId: entry.id, sourceUrl: entry.url, ...page });
-    } catch (error) {
-      results.push({ competitorId: entry.id, sourceUrl: entry.url, needsLogin: false, items: [], error: error instanceof Error ? error.message : "Không thể mở Trang Facebook." });
+        results.push({ competitorId: entry.id, sourceUrl: entry.url, ...page });
+      } catch (error) {
+        results.push({ competitorId: entry.id, sourceUrl: entry.url, needsLogin: false, items: [], error: error instanceof Error ? error.message : "Không thể mở Trang Facebook." });
+      }
     }
+  } finally {
+    if (!browser.isDestroyed()) browser.close();
   }
   return results;
 }

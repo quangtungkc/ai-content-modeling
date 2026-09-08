@@ -42,6 +42,19 @@ type DesktopFacebook = {
   open: () => Promise<{ status: string }>;
   scan: (entries: Array<{ id: string; url: string }>) => Promise<FacebookScanResult[]>;
 };
+type VideoAnalysisResult = {
+  analysis: {
+    summary: string;
+    hook: string;
+    setup: string;
+    conflict: string;
+    escalation: string;
+    twist: string;
+    payoff: string;
+    retentionMechanism: string;
+    whyItWorks: string[];
+  };
+};
 const accents = [
   "border-l-emerald-600",
   "border-l-teal-500",
@@ -69,6 +82,8 @@ export function ViralDashboard() {
   const [manualError, setManualError] = useState("");
   const [isSavingManual, setIsSavingManual] = useState(false);
   const [isBrowserScanning, setIsBrowserScanning] = useState(false);
+  const [analyzingVideoId, setAnalyzingVideoId] = useState("");
+  const [analysisResult, setAnalysisResult] = useState<VideoAnalysisResult | null>(null);
   const [manualVideo, setManualVideo] = useState({ competitorId: "", url: "", publishedAt: new Date().toISOString().slice(0, 16), views: "", likes: "0", comments: "0", shares: "0", caption: "" });
   useEffect(() => {
     const controller = new AbortController();
@@ -283,6 +298,21 @@ export function ViralDashboard() {
       setIsBrowserScanning(false);
     }
   }
+  async function analyzeVideo(videoId: string) {
+    setAnalyzingVideoId(videoId);
+    setError("");
+    setMessage("");
+    try {
+      const response = await fetch(`/api/v1/videos/${videoId}/analysis`, { method: "POST" });
+      const body = await response.json() as { data?: VideoAnalysisResult; error?: { message?: string } };
+      if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể phân tích video.");
+      setAnalysisResult(body.data);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Không thể phân tích video.");
+    } finally {
+      setAnalyzingVideoId("");
+    }
+  }
   function openManualEntry() {
     const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
     if (!selectedChannelId) {
@@ -405,6 +435,25 @@ export function ViralDashboard() {
             {manualError && <p className="mt-4 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">{manualError}</p>}
             <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setShowManualEntry(false)} className="rounded-lg border border-[#cbd9ea] px-4 py-2.5 text-sm font-bold text-[#0b3262]">Hủy</button><button disabled={isSavingManual} className="rounded-lg bg-[#07865f] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isSavingManual ? "Đang lưu..." : "Lưu và xếp hạng"}</button></div>
           </form>
+        </div>
+      )}
+      {analysisResult && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
+          <section className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div><p className="text-xs font-extrabold tracking-[0.16em] text-teal-600">PHÂN TÍCH VIDEO</p><h2 className="mt-1 text-xl font-extrabold text-[#0b3262]">Cơ chế tạo tín hiệu</h2></div>
+              <button type="button" onClick={() => setAnalysisResult(null)} className="text-xl text-[#6883aa]" aria-label="Đóng">×</button>
+            </div>
+            <div className="mt-5 space-y-4 text-sm leading-6 text-[#0b3262]">
+              <AnalysisBlock label="Tóm tắt" value={analysisResult.analysis.summary} />
+              <AnalysisBlock label="Hook mở đầu" value={analysisResult.analysis.hook} />
+              <AnalysisBlock label="Thiết lập" value={analysisResult.analysis.setup} />
+              <AnalysisBlock label="Xung đột và leo thang" value={`${analysisResult.analysis.conflict} ${analysisResult.analysis.escalation}`} />
+              <AnalysisBlock label="Cú twist và kết" value={`${analysisResult.analysis.twist} ${analysisResult.analysis.payoff}`} />
+              <AnalysisBlock label="Cơ chế giữ người xem" value={analysisResult.analysis.retentionMechanism} />
+              <AnalysisBlock label="Vì sao hiệu quả" value={analysisResult.analysis.whyItWorks.join(" · ")} />
+            </div>
+          </section>
         </div>
       )}
       {updateStatus && <p aria-live="polite" className="mt-3 text-sm font-semibold text-[#0b5799]">{updateStatus}</p>}
@@ -589,8 +638,8 @@ export function ViralDashboard() {
                     >
                       Mở video
                     </a>
-                    <button className="text-xs font-bold text-[#0b5799]">
-                      Phân tích
+                    <button onClick={() => void analyzeVideo(video.id)} disabled={analyzingVideoId === video.id} className="text-xs font-bold text-[#0b5799] disabled:cursor-wait disabled:opacity-60">
+                      {analyzingVideoId === video.id ? "Đang phân tích..." : "Phân tích"}
                     </button>
                   </td>
                 </tr>
@@ -619,6 +668,9 @@ function formatViews(value: number) {
     : value >= 1_000
       ? `${Math.round(value / 1_000)}K`
       : String(value);
+}
+function AnalysisBlock({ label, value }: { label: string; value: string }) {
+  return <div><p className="font-extrabold text-[#0b3262]">{label}</p><p className="mt-1 text-[#6883aa]">{value || "Chưa có dữ liệu."}</p></div>;
 }
 function formatAge(value: string) {
   const hours = Math.max(
