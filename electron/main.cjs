@@ -329,7 +329,16 @@ async function reloadGeminiBeforeNextPrompt(window) {
   await delay(1_500);
   for (let elapsed = 0; elapsed < 20_000; elapsed += 500) {
     const ready = await window.webContents.executeJavaScript("!window.location.href.includes('accounts.google.com') && Boolean(document.querySelector('textarea, [contenteditable=\"true\"]'))", true);
-    if (ready) return;
+    if (!ready) {
+      await delay(500);
+      continue;
+    }
+    const newChatPoint = await findGeminiControlPoint(window, ["new chat", "cuộc trò chuyện mới"]);
+    if (!newChatPoint) throw new Error("Gemini đã tải lại nhưng không tìm thấy nút tạo cuộc trò chuyện mới.");
+    await dispatchBrowserClick(window, newChatPoint);
+    await delay(1_200);
+    const composerReady = await window.webContents.executeJavaScript("Boolean(document.querySelector('textarea, [contenteditable=\"true\"]'))", true);
+    if (composerReady) return;
     await delay(500);
   }
   throw new Error("Gemini đã tải lại nhưng chưa sẵn sàng nhận prompt tiếp theo.");
