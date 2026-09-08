@@ -21,7 +21,7 @@ export class GeminiProvider implements AIProvider {
       videoAnalysisResponseSchema,
     );
   }
-  generateIdeas(input: AIInput & { analysis: VideoAnalysis }) { return this.request("Generate exactly 3 to 5 original modeling directions. Keep the successful mechanism but change the execution; do not copy surface-level details, characters, setting, wording, or sequence. Return only JSON.", input, modelingIdeasSchema); }
+  generateIdeas(input: AIInput & { analysis: VideoAnalysis; artStyle?: string }) { return this.request(`Generate exactly ONE original modeling idea based on the source video's successful mechanism. Do not copy surface-level details, characters, setting, wording, or sequence. Return only JSON with one modelingDirections item containing title, coreConcept, script, characterDesign, setting, artStyle, sourceMechanism, whatIsPreserved, whatIsChanged, targetMarketAdaptation, similarityRisk, and whyWorthDeveloping. The selected art style is: ${input.artStyle ?? "Use the channel's existing art style"}. Write all content in Vietnamese.`, input, modelingIdeasSchema); }
   developIdea(input: AIInput & { analysis: VideoAnalysis; idea: ModelingDirection }) { return this.request("Develop the approved idea and return only the structured content package JSON.", input, developedIdeaSchema); }
   async understandVideo(input: VideoUnderstandingInput): Promise<VisualBreakdown> {
     if (!this.apiKey) throw new AIProviderNotConfiguredError(this.name);

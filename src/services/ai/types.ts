@@ -45,7 +45,7 @@ export type VideoAnalysis = {
   whyItWorks: string[];
 };
 
-export type ModelingDirection = { title: string; coreConcept: string; sourceMechanism: string; whatIsPreserved: string[]; whatIsChanged: string[]; targetMarketAdaptation: string; similarityRisk: "low" | "medium" | "high"; whyWorthDeveloping: string };
+export type ModelingDirection = { title: string; coreConcept: string; script: string; characterDesign: string; setting: string; artStyle: string; sourceMechanism: string; whatIsPreserved: string[]; whatIsChanged: string[]; targetMarketAdaptation: string; similarityRisk: "low" | "medium" | "high"; whyWorthDeveloping: string };
 export type ModelingIdeas = { schemaVersion: "1.0"; modelingDirections: ModelingDirection[] };
 export type VisualTimelineEvent = { timestamp: string; event: string; observableEvidence: string };
 export type VisualBreakdown = { schemaVersion: "1.0"; videoSummary: string; openingHook: string; timeline: VisualTimelineEvent[]; characters: Array<{ name: string; description: string; role: string }>; setting: string; visualGag: string; escalation: string; twist: string; payoff: string; cameraPattern: string; audioPattern: string; whyItLikelyWorks: string[] };
@@ -59,7 +59,7 @@ export type DevelopedIdea = { schemaVersion: "1.0"; deconstruction: Record<strin
 export interface AIProvider {
   readonly name: string;
   analyzeVideo(input: AIInput): Promise<VideoAnalysis>;
-  generateIdeas(input: AIInput & { analysis: VideoAnalysis }): Promise<ModelingIdeas>;
+  generateIdeas(input: AIInput & { analysis: VideoAnalysis; artStyle?: string }): Promise<ModelingIdeas>;
   developIdea(input: AIInput & { analysis: VideoAnalysis; idea: ModelingDirection }): Promise<DevelopedIdea>;
   understandVideo(input: VideoUnderstandingInput): Promise<VisualBreakdown>;
   reviewProject(input: FinalReviewInput): Promise<FinalReview>;

@@ -57,6 +57,7 @@ type VideoAnalysisResult = {
     whyItWorks: string[];
   };
 };
+type ModelingIdeaResult = { title: string; coreConcept: string; script: string; characterDesign: string; setting: string; artStyle: string; sourceMechanism: string; whatIsPreserved: string[]; whatIsChanged: string[]; targetMarketAdaptation: string; similarityRisk: "low" | "medium" | "high"; whyWorthDeveloping: string };
 const accents = [
   "border-l-emerald-600",
   "border-l-teal-500",
@@ -87,7 +88,11 @@ export function ViralDashboard() {
   const [facebookScanProgress, setFacebookScanProgress] = useState<FacebookScanProgress | null>(null);
   const [analyzingVideoId, setAnalyzingVideoId] = useState("");
   const [analysisResult, setAnalysisResult] = useState<VideoAnalysisResult | null>(null);
+  const [analysisVideoId, setAnalysisVideoId] = useState("");
   const [analysisCopied, setAnalysisCopied] = useState(false);
+  const [ideaArtStyle, setIdeaArtStyle] = useState("Hoạt hình 3D");
+  const [modelingIdea, setModelingIdea] = useState<ModelingIdeaResult | null>(null);
+  const [isGeneratingIdea, setIsGeneratingIdea] = useState(false);
   const [analysisFilter, setAnalysisFilter] = useState<"all" | "analyzed" | "unanalyzed">("all");
   const [videoPage, setVideoPage] = useState(1);
   const [autoSyncRequested, setAutoSyncRequested] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("autoSync") === "1");
@@ -351,6 +356,8 @@ export function ViralDashboard() {
       const body = await response.json() as { data?: VideoAnalysisResult; error?: { message?: string } };
       if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể phân tích video.");
       setAnalysisResult(body.data);
+      setAnalysisVideoId(videoId);
+      setModelingIdea(null);
       setDashboard((current) => current ? { ...current, videos: current.videos.map((video) => video.id === videoId ? { ...video, analysis: { createdAt: new Date().toISOString(), content: body.data!.analysis } } : video) } : current);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Không thể phân tích video.");
@@ -359,7 +366,26 @@ export function ViralDashboard() {
     }
   }
   function viewStoredAnalysis(video: Dashboard["videos"][number]) {
-    if (video.analysis) setAnalysisResult({ analysis: video.analysis.content });
+    if (video.analysis) {
+      setAnalysisResult({ analysis: video.analysis.content });
+      setAnalysisVideoId(video.id);
+      setModelingIdea(null);
+    }
+  }
+  async function generateModelingIdea() {
+    if (!analysisVideoId) return;
+    setIsGeneratingIdea(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/v1/videos/${analysisVideoId}/ideas`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ artStyle: ideaArtStyle }) });
+      const body = await response.json() as { data?: { ideas?: ModelingIdeaResult[] }; error?: { message?: string } };
+      if (!response.ok || !body.data?.ideas?.[0]) throw new Error(body.error?.message ?? "Không thể tạo Modeling Idea.");
+      setModelingIdea(body.data.ideas[0]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Không thể tạo Modeling Idea.");
+    } finally {
+      setIsGeneratingIdea(false);
+    }
   }
   async function copyAnalysis() {
     if (!analysisResult) return;
@@ -520,6 +546,15 @@ export function ViralDashboard() {
               <AnalysisBlock label="Cú twist và kết" value={`${analysisResult.analysis.twist} ${analysisResult.analysis.payoff}`} />
               <AnalysisBlock label="Cơ chế giữ người xem" value={analysisResult.analysis.retentionMechanism} />
               <AnalysisBlock label="Vì sao hiệu quả" value={analysisResult.analysis.whyItWorks.join(" · ")} />
+            </div>
+            <div className="mt-6 rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4">
+              <p className="font-extrabold text-[#0b3262]">Tạo Modeling Idea</p>
+              <p className="mt-1 text-sm text-[#6883aa]">Tạo đúng 1 ý tưởng mới dựa trên cơ chế thành công của video gốc.</p>
+              <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end">
+                <label className="flex-1 text-sm font-semibold text-[#0b3262]">Phong cách mỹ thuật<select value={ideaArtStyle} onChange={(event) => setIdeaArtStyle(event.target.value)} className="mt-1 w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-2.5 font-normal"><option>Hoạt hình 3D</option><option>Hoạt hình 2D</option><option>Stop motion đất sét</option><option>Anime</option><option>Điện ảnh chân thực</option><option>Truyện tranh</option><option>Pixel art</option></select></label>
+                <button type="button" onClick={() => void generateModelingIdea()} disabled={isGeneratingIdea} className="rounded-lg bg-[#07865f] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isGeneratingIdea ? "Đang tạo ý tưởng..." : "Tạo Modeling Idea"}</button>
+              </div>
+              {modelingIdea && <div className="mt-5 space-y-4 border-t border-[#d8e3f1] pt-4 text-sm leading-6 text-[#0b3262]"><AnalysisBlock label="Ý tưởng" value={`${modelingIdea.title}\n${modelingIdea.coreConcept}`} /><AnalysisBlock label="Kịch bản" value={modelingIdea.script} /><AnalysisBlock label="Xây dựng hình tượng nhân vật" value={modelingIdea.characterDesign} /><AnalysisBlock label="Bối cảnh" value={modelingIdea.setting} /><AnalysisBlock label="Phong cách mỹ thuật" value={modelingIdea.artStyle} /></div>}
             </div>
           </section>
         </div>
