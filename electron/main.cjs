@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
-const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, screen, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
-const { spawn } = require("node:child_process");
+const { execFile, spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -362,6 +362,17 @@ async function dispatchBrowserClick(window, point) {
   window.show();
   window.focus();
   window.webContents.focus();
+  if (process.platform === "win32") {
+    const contentBounds = window.getContentBounds();
+    const target = screen.dipToScreenPoint({ x: contentBounds.x + x, y: contentBounds.y + y });
+    const clickScript = `Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class ModelingAIMouse { [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra); }'; [ModelingAIMouse]::SetCursorPos(${target.x}, ${target.y}); Start-Sleep -Milliseconds 120; [ModelingAIMouse]::mouse_event(2,0,0,0,[UIntPtr]::Zero); Start-Sleep -Milliseconds 80; [ModelingAIMouse]::mouse_event(4,0,0,0,[UIntPtr]::Zero)`;
+    try {
+      await new Promise((resolve, reject) => execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", clickScript], { windowsHide: true }, (error) => error ? reject(error) : resolve()));
+      return;
+    } catch {
+      // Fall through to Chromium input only if Windows cannot inject the physical click.
+    }
+  }
   if (!window.webContents.debugger.isAttached()) window.webContents.debugger.attach("1.3");
   await window.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
   await delay(120);
@@ -529,24 +540,8 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
     if (!sendResult?.sent) {
       throw new Error("Gemini chưa nhận được prompt. Hãy kiểm tra cửa sổ Gemini đang mở và thử lại.");
     }
-    window.show();
-    window.focus();
-    window.webContents.focus();
     if (sendResult.clickPoint) {
-      const x = Math.round(sendResult.clickPoint.x);
-      const y = Math.round(sendResult.clickPoint.y);
-      try {
-        if (!window.webContents.debugger.isAttached()) window.webContents.debugger.attach("1.3");
-        await window.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
-        await new Promise((resolve) => setTimeout(resolve, 150));
-        await window.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
-        await new Promise((resolve) => setTimeout(resolve, 80));
-        await window.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
-      } catch {
-        window.webContents.sendInputEvent({ type: "mouseMove", x, y });
-        window.webContents.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
-        window.webContents.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
-      }
+      await dispatchBrowserClick(window, sendResult.clickPoint);
     }
     await new Promise((resolve) => setTimeout(resolve, 900));
     const deliveryCheck = await window.webContents.executeJavaScript(`(() => {
