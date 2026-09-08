@@ -22,7 +22,7 @@ export class GeminiProvider implements AIProvider {
     );
   }
   generateIdeas(input: AIInput & { analysis: VideoAnalysis; artStyle?: string }) { return this.request(`Generate exactly ONE original modeling idea based on the source video's successful mechanism. Do not copy surface-level details, characters, setting, wording, or sequence. Return only JSON with one modelingDirections item containing title, coreConcept, script, characterDesign, setting, artStyle, sourceMechanism, whatIsPreserved, whatIsChanged, targetMarketAdaptation, similarityRisk, and whyWorthDeveloping. The selected art style is: ${input.artStyle ?? "Use the channel's existing art style"}. Write all content in Vietnamese.`, input, modelingIdeasSchema, normalizeModelingIdeas, modelingIdeasResponseSchema); }
-  developIdea(input: AIInput & { analysis: VideoAnalysis; idea: ModelingDirection; aspectRatio?: string }) { return this.request(`Develop this modeling idea into a production-ready package. Keep the same character identity and the same background continuity across every scene. Use the selected frame size ${input.aspectRatio ?? "9:16"}. Return only structured JSON with deconstruction, artDirection, characterDesign, backgroundDesign, storyboard, and safetyReview. In storyboard, write each scene clearly with visualBlock, actionBlock, audioBlock, and englishPrompt. The schemaVersion must be the string "1.0".`, input, { parse: (value: unknown) => normalizeDevelopedIdea(value) as DevelopedIdea }, normalizeDevelopedIdea); }
+  developIdea(input: AIInput & { analysis: VideoAnalysis; idea: ModelingDirection; aspectRatio?: string }) { return this.request(`Develop this modeling idea into a production-ready package. Keep the same character identity and the same background continuity across every scene. Use the selected frame size ${input.aspectRatio ?? "9:16"}. Return only structured JSON with deconstruction, artDirection, characterDesign, backgroundDesign, storyboard, and safetyReview. In storyboard, write each scene clearly with visualBlock, actionBlock, audioBlock, and englishPrompt. The schemaVersion must be the string "1.0".`, input, { parse: (value: unknown) => normalizeDevelopedIdea(value) as DevelopedIdea }, normalizeDevelopedIdea, developedIdeaResponseSchema); }
   async understandVideo(input: VideoUnderstandingInput): Promise<VisualBreakdown> {
     if (!this.apiKey) throw new AIProviderNotConfiguredError(this.name);
     const systemPrompt = input.instruction ?? "Analyze this short-form competitor video. Do not propose a new idea yet. Return structured JSON with videoSummary, openingHook, timeline with MM:SS timestamps, characters, setting, visualGag, escalation, twist, payoff, cameraPattern, audioPattern, whyItLikelyWorks. Focus on observable evidence and distinguish evidence from inference.";
@@ -126,6 +126,34 @@ const modelingIdeasResponseSchema: Record<string, unknown> = {
     modelingDirections: { type: "ARRAY", minItems: 1, maxItems: 1, items: { type: "OBJECT", properties: { title: { type: "STRING" }, coreConcept: { type: "STRING" }, script: { type: "STRING" }, characterDesign: { type: "STRING" }, setting: { type: "STRING" }, artStyle: { type: "STRING" }, sourceMechanism: { type: "STRING" }, whatIsPreserved: { type: "ARRAY", items: { type: "STRING" } }, whatIsChanged: { type: "ARRAY", items: { type: "STRING" } }, targetMarketAdaptation: { type: "STRING" }, similarityRisk: { type: "STRING" }, whyWorthDeveloping: { type: "STRING" } }, required: ["title", "coreConcept", "script", "characterDesign", "setting", "artStyle", "sourceMechanism", "whatIsPreserved", "whatIsChanged", "targetMarketAdaptation", "similarityRisk", "whyWorthDeveloping"] } },
   },
   required: ["schemaVersion", "modelingDirections"],
+};
+
+const developedIdeaResponseSchema: Record<string, unknown> = {
+  type: "OBJECT",
+  properties: {
+    schemaVersion: { type: "STRING" },
+    deconstruction: { type: "OBJECT" },
+    artDirection: { type: "OBJECT" },
+    characterDesign: { type: "OBJECT" },
+    backgroundDesign: { type: "OBJECT" },
+    storyboard: {
+      type: "ARRAY",
+      minItems: 1,
+      items: {
+        type: "OBJECT",
+        properties: {
+          sceneNumber: { type: "INTEGER" },
+          visualBlock: { type: "STRING" },
+          actionBlock: { type: "STRING" },
+          audioBlock: { type: "STRING" },
+          englishPrompt: { type: "STRING" },
+        },
+        required: ["sceneNumber", "visualBlock", "actionBlock", "audioBlock", "englishPrompt"],
+      },
+    },
+    safetyReview: { type: "OBJECT" },
+  },
+  required: ["schemaVersion", "deconstruction", "artDirection", "characterDesign", "backgroundDesign", "storyboard", "safetyReview"],
 };
 
 function parseJsonText(text: string): unknown {
