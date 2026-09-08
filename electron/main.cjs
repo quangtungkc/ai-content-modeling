@@ -422,13 +422,20 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
     window.webContents.sendInputEvent({ type: "keyUp", keyCode: "ENTER" });
     await new Promise((resolve) => setTimeout(resolve, 1200));
     const sendScript = `(() => {
+      const roots = [document];
+      const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll("*")) {
+          if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        }
+      }
       const input = document.querySelector('textarea, [contenteditable="true"]');
       if (!input) return { error: "Không tìm thấy ô nhập prompt Gemini." };
       const inputText = input.tagName === "TEXTAREA" ? input.value : (input.innerText || input.textContent || "");
       if (!inputText.includes(${JSON.stringify(prepared.promptPrefix)})) return { sent: true };
       input.focus();
       const inputBounds = input.getBoundingClientRect();
-      const candidates = [...document.querySelectorAll('button, [role="button"]')].filter((element) => {
+      const candidates = roots.flatMap((root) => [...root.querySelectorAll('button, [role="button"]')]).filter((element) => {
         const label = ((element.getAttribute("aria-label") || "") + " " + (element.getAttribute("title") || "") + " " + (element.textContent || "")).toLowerCase();
         const bounds = element.getBoundingClientRect();
         const style = getComputedStyle(element);
@@ -439,13 +446,19 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
         const rightBounds = right.getBoundingClientRect();
         return Math.hypot(leftBounds.left - inputBounds.right, leftBounds.top - inputBounds.bottom) - Math.hypot(rightBounds.left - inputBounds.right, rightBounds.top - inputBounds.bottom);
       })[0];
-      send?.click();
-      return { sent: Boolean(send) };
+      if (!send) return { sent: false };
+      const bounds = send.getBoundingClientRect();
+      return { sent: true, clickPoint: { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 } };
     })()`;
     const sendResult = await window.webContents.executeJavaScript(sendScript, true);
     if (sendResult?.error) throw new Error(sendResult.error);
     if (!sendResult?.sent) {
       throw new Error("Gemini chưa nhận được prompt. Hãy kiểm tra cửa sổ Gemini đang mở và thử lại.");
+    }
+    if (sendResult.clickPoint) {
+      window.webContents.sendInputEvent({ type: "mouseMove", x: Math.round(sendResult.clickPoint.x), y: Math.round(sendResult.clickPoint.y) });
+      window.webContents.sendInputEvent({ type: "mouseDown", x: Math.round(sendResult.clickPoint.x), y: Math.round(sendResult.clickPoint.y), button: "left" });
+      window.webContents.sendInputEvent({ type: "mouseUp", x: Math.round(sendResult.clickPoint.x), y: Math.round(sendResult.clickPoint.y), button: "left" });
     }
     const script = `(async () => {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
