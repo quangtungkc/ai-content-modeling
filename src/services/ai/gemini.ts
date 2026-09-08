@@ -21,7 +21,7 @@ export class GeminiProvider implements AIProvider {
       videoAnalysisResponseSchema,
     );
   }
-  generateIdeas(input: AIInput & { analysis: VideoAnalysis; artStyle?: string }) { return this.request(`Generate exactly ONE original modeling idea based on the source video's successful mechanism. Do not copy surface-level details, characters, setting, wording, or sequence. Return only JSON with one modelingDirections item containing title, coreConcept, script, characterDesign, setting, artStyle, sourceMechanism, whatIsPreserved, whatIsChanged, targetMarketAdaptation, similarityRisk, and whyWorthDeveloping. The selected art style is: ${input.artStyle ?? "Use the channel's existing art style"}. Write all content in Vietnamese.`, input, modelingIdeasSchema); }
+  generateIdeas(input: AIInput & { analysis: VideoAnalysis; artStyle?: string }) { return this.request(`Generate exactly ONE original modeling idea based on the source video's successful mechanism. Do not copy surface-level details, characters, setting, wording, or sequence. Return only JSON with one modelingDirections item containing title, coreConcept, script, characterDesign, setting, artStyle, sourceMechanism, whatIsPreserved, whatIsChanged, targetMarketAdaptation, similarityRisk, and whyWorthDeveloping. The selected art style is: ${input.artStyle ?? "Use the channel's existing art style"}. Write all content in Vietnamese.`, input, modelingIdeasSchema, normalizeModelingIdeas, modelingIdeasResponseSchema); }
   developIdea(input: AIInput & { analysis: VideoAnalysis; idea: ModelingDirection }) { return this.request("Develop the approved idea and return only the structured content package JSON.", input, developedIdeaSchema); }
   async understandVideo(input: VideoUnderstandingInput): Promise<VisualBreakdown> {
     if (!this.apiKey) throw new AIProviderNotConfiguredError(this.name);
@@ -106,6 +106,15 @@ const videoAnalysisResponseSchema: Record<string, unknown> = {
   required: ["schemaVersion", "summary", "hook", "setup", "conflict", "escalation", "twist", "payoff", "theGag", "cameraPattern", "editingRhythm", "characterInteractions", "soundPattern", "retentionMechanism", "whyItWorks"],
 };
 
+const modelingIdeasResponseSchema: Record<string, unknown> = {
+  type: "OBJECT",
+  properties: {
+    schemaVersion: { type: "STRING" },
+    modelingDirections: { type: "ARRAY", minItems: 1, maxItems: 1, items: { type: "OBJECT", properties: { title: { type: "STRING" }, coreConcept: { type: "STRING" }, script: { type: "STRING" }, characterDesign: { type: "STRING" }, setting: { type: "STRING" }, artStyle: { type: "STRING" }, sourceMechanism: { type: "STRING" }, whatIsPreserved: { type: "ARRAY", items: { type: "STRING" } }, whatIsChanged: { type: "ARRAY", items: { type: "STRING" } }, targetMarketAdaptation: { type: "STRING" }, similarityRisk: { type: "STRING" }, whyWorthDeveloping: { type: "STRING" } }, required: ["title", "coreConcept", "script", "characterDesign", "setting", "artStyle", "sourceMechanism", "whatIsPreserved", "whatIsChanged", "targetMarketAdaptation", "similarityRisk", "whyWorthDeveloping"] } },
+  },
+  required: ["schemaVersion", "modelingDirections"],
+};
+
 function parseJsonText(text: string): unknown {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
   try { return JSON.parse(trimmed); } catch {
@@ -140,5 +149,33 @@ function normalizeVideoAnalysis(value: unknown): unknown {
     soundPattern: text(source.soundPattern ?? source.audioPattern),
     retentionMechanism: text(source.retentionMechanism ?? source.whyItLikelyWorks),
     whyItWorks: list(source.whyItWorks ?? source.whyItLikelyWorks),
+  };
+}
+
+function normalizeModelingIdeas(value: unknown): unknown {
+  const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const rawDirections = Array.isArray(source.modelingDirections) ? source.modelingDirections : Array.isArray(source.ideas) ? source.ideas : [];
+  const sourceItem = rawDirections[0] && typeof rawDirections[0] === "object" ? rawDirections[0] as Record<string, unknown> : {};
+  const text = (...items: unknown[]) => {
+    const item = items.find((candidate) => typeof candidate === "string" && candidate.trim());
+    return typeof item === "string" ? item : "Chưa có đủ dữ liệu để kết luận.";
+  };
+  const list = (item: unknown) => Array.isArray(item) ? item.map((entry) => String(entry)) : [];
+  return {
+    schemaVersion: "1.0",
+    modelingDirections: [{
+      title: text(sourceItem.title, sourceItem.name),
+      coreConcept: text(sourceItem.coreConcept, sourceItem.concept, sourceItem.idea),
+      script: text(sourceItem.script, sourceItem.story, sourceItem.storyline),
+      characterDesign: text(sourceItem.characterDesign, sourceItem.characters, sourceItem.character),
+      setting: text(sourceItem.setting, sourceItem.background, sourceItem.environment),
+      artStyle: text(sourceItem.artStyle, sourceItem.style),
+      sourceMechanism: text(sourceItem.sourceMechanism, sourceItem.mechanism),
+      whatIsPreserved: list(sourceItem.whatIsPreserved),
+      whatIsChanged: list(sourceItem.whatIsChanged),
+      targetMarketAdaptation: text(sourceItem.targetMarketAdaptation),
+      similarityRisk: sourceItem.similarityRisk === "high" || sourceItem.similarityRisk === "medium" ? sourceItem.similarityRisk : "low",
+      whyWorthDeveloping: text(sourceItem.whyWorthDeveloping, sourceItem.reason),
+    }],
   };
 }
