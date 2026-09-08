@@ -1,6 +1,6 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 type Dashboard = {
   channel: { id: string; name: string } | null;
@@ -84,6 +84,7 @@ export function ViralDashboard() {
   const [isBrowserScanning, setIsBrowserScanning] = useState(false);
   const [analyzingVideoId, setAnalyzingVideoId] = useState("");
   const [analysisResult, setAnalysisResult] = useState<VideoAnalysisResult | null>(null);
+  const [autoSyncRequested, setAutoSyncRequested] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("autoSync") === "1");
   const [manualVideo, setManualVideo] = useState({ competitorId: "", url: "", publishedAt: new Date().toISOString().slice(0, 16), views: "", likes: "0", comments: "0", shares: "0", caption: "" });
   useEffect(() => {
     const controller = new AbortController();
@@ -196,7 +197,7 @@ export function ViralDashboard() {
     [videos],
   );
   const maxScore = Math.max(100, ...ranking.map((video) => video.score));
-  async function handleSync() {
+  const handleSync = useCallback(async () => {
     setIsSyncing(true);
     setSyncProgress(null);
     setError("");
@@ -212,7 +213,12 @@ export function ViralDashboard() {
       setIsSyncing(false);
       setError(caught instanceof Error ? caught.message : "Không thể bắt đầu đồng bộ dữ liệu.");
     }
-  }
+  }, [channelId]);
+  useEffect(() => {
+    if (!autoSyncRequested || !dashboard || isSyncing) return;
+    setAutoSyncRequested(false);
+    void handleSync();
+  }, [autoSyncRequested, dashboard, isSyncing, handleSync]);
   async function handleSoftwareUpdate() {
     const updater = (window as Window & { desktopUpdater?: DesktopUpdater }).desktopUpdater;
     if (updateReady && updater) {

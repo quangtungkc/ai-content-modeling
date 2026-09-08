@@ -48,6 +48,25 @@ function ensureRuntime() {
   };
 }
 
+function runtimeConfigPath() {
+  return path.join(app.getPath("userData"), "desktop-config.json");
+}
+
+function markSyncAfterUpdate() {
+  const configPath = runtimeConfigPath();
+  const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
+  fs.writeFileSync(configPath, JSON.stringify({ ...config, syncAfterUpdate: true }), { encoding: "utf8", mode: 0o600 });
+}
+
+function consumeSyncAfterUpdate() {
+  const configPath = runtimeConfigPath();
+  if (!fs.existsSync(configPath)) return false;
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  if (!config.syncAfterUpdate) return false;
+  fs.writeFileSync(configPath, JSON.stringify({ ...config, syncAfterUpdate: false }), { encoding: "utf8", mode: 0o600 });
+  return true;
+}
+
 function runtimeRoot() {
   return app.isPackaged
     ? path.join(process.resourcesPath, "app.asar.unpacked", "electron", "dist")
@@ -102,6 +121,7 @@ ipcMain.handle("desktop-update:download", async () => {
   return { status: "downloading" };
 });
 ipcMain.handle("desktop-update:install", () => {
+  markSyncAfterUpdate();
   autoUpdater.quitAndInstall();
 });
 
@@ -208,7 +228,7 @@ ipcMain.handle("facebook-browser:scan", async (_event, entries) => {
   return scanFacebookPages(entries.filter((entry) => entry && typeof entry.id === "string" && typeof entry.url === "string"));
 });
 
-function createWindow() {
+function createWindow(syncAfterUpdate = false) {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -229,13 +249,14 @@ function createWindow() {
   });
 
   mainWindow = window;
-  void window.loadURL(APP_URL);
+  const url = syncAfterUpdate ? `${APP_URL}/?autoSync=1` : APP_URL;
+  void window.loadURL(url);
 }
 
 app.whenReady().then(async () => {
   startLocalServices();
   await waitForServer();
-  createWindow();
+  createWindow(consumeSyncAfterUpdate());
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
