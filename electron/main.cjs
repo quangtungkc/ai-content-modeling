@@ -625,7 +625,7 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
   const videos = {};
   for (let index = 0; index < slots.length; index += 1) {
     const slot = slots[index];
-    if (!Number.isInteger(slot?.sceneNumber) || typeof slot.prompt !== "string" || !slot.prompt.trim()) throw new Error("Prompt video không hợp lệ.");
+    if (!Number.isInteger(slot?.sceneNumber) || typeof slot.visualBlock !== "string" || typeof slot.actionBlock !== "string" || typeof slot.audioBlock !== "string") throw new Error("Dữ liệu phân cảnh tạo video không hợp lệ.");
     const sceneNumber = slot.sceneNumber;
     const imagePath = findSceneImagePath(projectId, sceneNumber);
     event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: slot.label ?? `Cảnh ${sceneNumber}` });
