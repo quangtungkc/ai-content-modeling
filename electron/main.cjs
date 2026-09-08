@@ -13,6 +13,8 @@ let mainWindow;
 let serverProcess;
 let workerProcess;
 let facebookWindow;
+let geminiWindow;
+let geminiLoadPromise;
 
 function notifyUpdate(event, payload = {}) {
   mainWindow?.webContents.send(`desktop-update:${event}`, payload);
@@ -284,6 +286,122 @@ ipcMain.handle("gemini-browser:copy", (_event, prompt) => {
   if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Prompt Gemini không hợp lệ.");
   clipboard.writeText(prompt.trim());
   return { status: "copied" };
+});
+
+function createGeminiWindow() {
+  if (geminiWindow && !geminiWindow.isDestroyed()) {
+    geminiWindow.show();
+    geminiWindow.focus();
+    return geminiWindow;
+  }
+  geminiWindow = new BrowserWindow({
+    width: 1280,
+    height: 900,
+    minWidth: 960,
+    minHeight: 700,
+    title: "Gemini Ultra — Modeling AI",
+    autoHideMenuBar: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      partition: "persist:modeling-ai-gemini",
+    },
+  });
+  geminiWindow.on("closed", () => { geminiWindow = undefined; });
+  geminiLoadPromise = new Promise((resolve) => geminiWindow.webContents.once("did-finish-load", resolve));
+  void geminiWindow.loadURL("https://gemini.google.com/app");
+  return geminiWindow;
+}
+
+function waitForGeminiLoad(window) {
+  if (window.webContents.isLoading() && geminiLoadPromise) return geminiLoadPromise;
+  return Promise.resolve();
+}
+
+function saveGeminiImage(projectId, slot, dataUrl) {
+  const match = /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(dataUrl);
+  if (!match) throw new Error("Gemini không trả về dữ liệu ảnh hợp lệ.");
+  const mimeToExtension = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif", "image/bmp": ".bmp", "image/avif": ".avif" };
+  const extension = mimeToExtension[match[1].toLowerCase()];
+  if (!extension) throw new Error(`Định dạng ảnh Gemini chưa được hỗ trợ: ${match[1]}`);
+  const imageRoot = path.join(app.getPath("userData"), "generated-images", projectId);
+  fs.mkdirSync(imageRoot, { recursive: true });
+  const sceneNumber = Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0;
+  const allowedExtensions = Object.values(mimeToExtension);
+  for (const oldExtension of allowedExtensions) {
+    const oldTarget = path.join(imageRoot, `${slot.kind}-${sceneNumber}${oldExtension}`);
+    if (fs.existsSync(oldTarget)) fs.rmSync(oldTarget);
+  }
+  const buffer = Buffer.from(match[2], "base64");
+  if (buffer.length > 20 * 1024 * 1024) throw new Error("Ảnh Gemini vượt quá giới hạn 20 MB.");
+  fs.writeFileSync(path.join(imageRoot, `${slot.kind}-${sceneNumber}${extension}`), buffer);
+  return `/api/v1/projects/${projectId}/images?kind=${slot.kind}&sceneNumber=${sceneNumber}`;
+}
+
+ipcMain.handle("gemini-browser:run-job", async (event, value) => {
+  const projectId = value?.projectId;
+  const slots = value?.slots;
+  if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || !Array.isArray(slots) || slots.length === 0) {
+    throw new Error("Yêu cầu tạo ảnh không hợp lệ.");
+  }
+  const window = createGeminiWindow();
+  await waitForGeminiLoad(window);
+  const pageText = await window.webContents.executeJavaScript("document.body?.innerText || ''", true);
+  if (/sign in|đăng nhập|log in/i.test(pageText) && /accounts|login/i.test(window.webContents.getURL())) {
+    throw new Error("Gemini Ultra chưa đăng nhập trong cửa sổ của app. Hãy đăng nhập một lần rồi chạy lại.");
+  }
+  const images = {};
+  for (let index = 0; index < slots.length; index += 1) {
+    const slot = slots[index];
+    if (!slot || !["character", "background", "scene"].includes(slot.kind) || typeof slot.prompt !== "string") throw new Error("Prompt ảnh không hợp lệ.");
+    event.sender.send("gemini-browser:progress", { processed: index, total: slots.length, label: slot.label ?? `Ảnh ${index + 1}` });
+    const script = `(async () => {
+      const prompt = ${JSON.stringify(slot.prompt)};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const before = new Set([...document.images].map((image) => image.currentSrc || image.src));
+      const input = document.querySelector('textarea, [contenteditable="true"]');
+      if (!input) return { error: "Không tìm thấy ô nhập prompt Gemini." };
+      input.focus();
+      if (input.tagName === "TEXTAREA") {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+        setter?.call(input, prompt);
+      } else {
+        document.execCommand("selectAll", false);
+        document.execCommand("insertText", false, prompt);
+      }
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: prompt }));
+      await sleep(300);
+      const send = [...document.querySelectorAll('button, [role="button"]')].find((element) => {
+        const label = ((element.getAttribute("aria-label") || "") + " " + (element.getAttribute("title") || "") + " " + (element.textContent || "")).toLowerCase();
+        return !element.disabled && (label.includes("send") || label.includes("gửi") || label.includes("submit"));
+      });
+      if (!send) return { error: "Không tìm thấy nút gửi prompt Gemini." };
+      send.click();
+      for (let elapsed = 0; elapsed < 180000; elapsed += 1500) {
+        await sleep(1500);
+        const candidates = [...document.images].filter((image) => {
+          const source = image.currentSrc || image.src;
+          return source && !before.has(source) && (image.naturalWidth || image.width) >= 256 && (image.naturalHeight || image.height) >= 256;
+        });
+        const image = candidates[candidates.length - 1];
+        if (image) {
+          try {
+            const response = await fetch(image.currentSrc || image.src);
+            const blob = await response.blob();
+            const dataUrl = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); });
+            return { dataUrl };
+          } catch { return { error: "Không thể đọc ảnh Gemini vừa tạo." }; }
+        }
+      }
+      return { error: "Gemini không tạo ảnh trong thời gian chờ 180 giây." };
+    })()`;
+    const result = await window.webContents.executeJavaScript(script, true);
+    if (!result?.dataUrl) throw new Error(result?.error ?? "Không thể tạo ảnh trên Gemini Ultra.");
+    const url = saveGeminiImage(projectId, slot, result.dataUrl);
+    images[`${slot.kind}-${Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0}`] = `${url}&v=${Date.now()}`;
+    event.sender.send("gemini-browser:progress", { processed: index + 1, total: slots.length, label: slot.label ?? `Ảnh ${index + 1}` });
+  }
+  return { status: "completed", images };
 });
 
 ipcMain.handle("gemini-browser:import-images", async (_event, value) => {

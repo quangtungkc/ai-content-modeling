@@ -46,9 +46,7 @@ type DesktopFacebook = {
 };
 type ImageSlot = { kind: "character" | "background" | "scene"; sceneNumber?: number; label: string; prompt: string };
 type DesktopGemini = {
-  open: (prompt: string) => Promise<{ status: string }>;
-  copy: (prompt: string) => Promise<{ status: string }>;
-  importImages: (projectId: string, slots: Array<Pick<ImageSlot, "kind" | "sceneNumber">>) => Promise<{ status: string; images: Record<string, string> }>;
+  runJob: (projectId: string, slots: ImageSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; images: Record<string, string> }>;
 };
 type VideoAnalysisResult = {
   analysis: {
@@ -110,6 +108,7 @@ export function ViralDashboard() {
   const [showGeneratedImages, setShowGeneratedImages] = useState(false);
   const [geminiImageSlots, setGeminiImageSlots] = useState<ImageSlot[]>([]);
   const [geminiImageMessage, setGeminiImageMessage] = useState("");
+  const [geminiImageProgress, setGeminiImageProgress] = useState({ processed: 0, total: 0 });
   const [analysisFilter, setAnalysisFilter] = useState<"all" | "analyzed" | "unanalyzed">("all");
   const [videoPage, setVideoPage] = useState(1);
   const [autoSyncRequested, setAutoSyncRequested] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("autoSync") === "1");
@@ -437,9 +436,9 @@ export function ViralDashboard() {
   function buildGeminiImageSlots(): ImageSlot[] {
     if (!contentProject) return [];
     return [
-      { kind: "character", label: "Nhân vật", prompt: `Create a consistent character reference sheet. Art direction: ${JSON.stringify(contentProject.artDirection)}. Character design: ${JSON.stringify(contentProject.characterDesign)}. Aspect ratio: ${aspectRatio}. Generate one final PNG image only.` },
-      { kind: "background", label: "Bối cảnh", prompt: `Create a consistent background reference image. Art direction: ${JSON.stringify(contentProject.artDirection)}. Background design: ${JSON.stringify(contentProject.backgroundDesign)}. Aspect ratio: ${aspectRatio}. Generate one final PNG image only.` },
-      ...contentProject.scenes.map((scene) => ({ kind: "scene" as const, sceneNumber: scene.sceneNumber, label: `Cảnh ${scene.sceneNumber}`, prompt: `${scene.englishPrompt}\nVisual: ${scene.visualBlock}\nAction: ${scene.actionBlock}\nKeep the approved character and background designs consistent. Aspect ratio: ${aspectRatio}. Generate one final PNG image only.` })),
+      { kind: "character", label: "Nhân vật", prompt: `Create a consistent character reference sheet. Art direction: ${JSON.stringify(contentProject.artDirection)}. Character design: ${JSON.stringify(contentProject.characterDesign)}. Aspect ratio: ${aspectRatio}. Generate one final image only.` },
+      { kind: "background", label: "Bối cảnh", prompt: `Create a consistent background reference image. Art direction: ${JSON.stringify(contentProject.artDirection)}. Background design: ${JSON.stringify(contentProject.backgroundDesign)}. Aspect ratio: ${aspectRatio}. Generate one final image only.` },
+      ...contentProject.scenes.map((scene) => ({ kind: "scene" as const, sceneNumber: scene.sceneNumber, label: `Cảnh ${scene.sceneNumber}`, prompt: `${scene.englishPrompt}\nVisual: ${scene.visualBlock}\nAction: ${scene.actionBlock}\nKeep the approved character and background designs consistent. Aspect ratio: ${aspectRatio}. Generate one final image only.` })),
     ];
   }
   async function generateAllProjectImages() {
@@ -450,33 +449,13 @@ export function ViralDashboard() {
       const slots = buildGeminiImageSlots();
       const gemini = (window as Window & { desktopGemini?: DesktopGemini }).desktopGemini;
       if (!gemini) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
-      await gemini.open(slots[0].prompt);
       setGeminiImageSlots(slots);
-      setGeminiImageMessage("Gemini Ultra đã mở và prompt ảnh Nhân vật đã được sao chép. Dán vào Gemini, tạo ảnh và tải về. Sau đó tiếp tục từng prompt bên dưới.");
-    } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể mở Gemini Ultra."); }
-    finally { setIsGeneratingImages(false); }
-  }
-  async function copyGeminiImagePrompt(slot: ImageSlot) {
-    try {
-      const gemini = (window as Window & { desktopGemini?: DesktopGemini }).desktopGemini;
-      if (!gemini) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
-      await gemini.copy(slot.prompt);
-      setGeminiImageMessage(`Đã sao chép prompt ${slot.label}. Dán vào Gemini Ultra, tạo ảnh và tải về.`);
-    } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể sao chép prompt."); }
-  }
-  async function importGeminiImages() {
-    if (!contentProject || geminiImageSlots.length === 0) return;
-    setIsGeneratingImages(true);
-    setContentProjectError("");
-    try {
-      const gemini = (window as Window & { desktopGemini?: DesktopGemini }).desktopGemini;
-      if (!gemini) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
-      const result = await gemini.importImages(contentProject.id, geminiImageSlots.map(({ kind, sceneNumber }) => ({ kind, sceneNumber })));
-      if (result.status === "cancelled") return;
-      setGeneratedImages(Object.fromEntries(Object.entries(result.images).map(([key, url]) => [key, `${url}&v=${Date.now()}`])));
+      setGeminiImageProgress({ processed: 0, total: slots.length });
+      const result = await gemini.runJob(contentProject.id, slots, (progress) => { setGeminiImageProgress({ processed: progress.processed, total: progress.total }); setGeminiImageMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`); });
+      setGeneratedImages(result.images);
       setShowGeneratedImages(true);
-      setGeminiImageMessage("Đã đưa toàn bộ ảnh Gemini vào Content Project.");
-    } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể nhập ảnh từ Gemini."); }
+      setGeminiImageMessage("Đã tạo và đưa toàn bộ ảnh vào app theo đúng thứ tự.");
+    } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể mở Gemini Ultra."); }
     finally { setIsGeneratingImages(false); }
   }
   async function copyAnalysis() {
@@ -650,7 +629,7 @@ export function ViralDashboard() {
               {modelingIdea && <div className="mt-5 space-y-4 border-t border-[#d8e3f1] pt-4 text-sm leading-6 text-[#0b3262]"><AnalysisBlock label="Ý tưởng" value={`${modelingIdea.title}\n${modelingIdea.coreConcept}`} /><AnalysisBlock label="Kịch bản" value={modelingIdea.script} /><AnalysisBlock label="Xây dựng hình tượng nhân vật" value={modelingIdea.characterDesign} /><AnalysisBlock label="Bối cảnh" value={modelingIdea.setting} /><AnalysisBlock label="Phong cách mỹ thuật" value={modelingIdea.artStyle} />
                 <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Tạo hình và phân cảnh</p><p className="mt-1 text-sm text-[#6883aa]">Giữ nhân vật và bối cảnh đồng nhất trong toàn bộ video.</p><div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end"><label className="flex-1 text-sm font-semibold text-[#0b3262]">Kích thước khung hình<select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)} className="mt-1 w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-2.5 font-normal"><option value="9:16">9:16 · Dọc</option><option value="16:9">16:9 · Ngang</option><option value="1:1">1:1 · Vuông</option><option value="4:5">4:5 · Dọc mạng xã hội</option></select></label><button type="button" onClick={() => void createContentProject()} disabled={isCreatingProject} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isCreatingProject ? "Đang tạo..." : "Tạo hình tượng & phân cảnh"}</button></div>{contentProjectError && <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{contentProjectError}</p>}{contentProject && <div className="mt-5 space-y-4 border-t border-[#d8e3f1] pt-4"><AnalysisBlock label="Thiết kế nhân vật đồng nhất" value={JSON.stringify(contentProject.characterDesign, null, 2)} /><AnalysisBlock label="Bối cảnh đồng nhất" value={JSON.stringify(contentProject.backgroundDesign, null, 2)} /><AnalysisBlock label="Khung hình" value={String(contentProject.artDirection.aspectRatio ?? aspectRatio)} /><div><p className="font-extrabold text-[#0b3262]">Các phân cảnh</p><div className="mt-2 space-y-3">{contentProject.scenes.map((scene) => <div key={scene.sceneNumber} className="rounded-lg border border-[#d8e3f1] bg-white p-3"><p className="font-bold text-[#0b5799]">Cảnh {scene.sceneNumber}</p><p className="mt-1"><strong>Hình ảnh:</strong> {scene.visualBlock}</p><p className="mt-1"><strong>Hành động:</strong> {scene.actionBlock}</p><p className="mt-1"><strong>Âm thanh:</strong> {scene.audioBlock}</p></div>)}</div></div></div>}</div>
               </div>}
-              {contentProject && <div className="mt-4 space-y-3"><button type="button" onClick={() => void generateAllProjectImages()} disabled={isGeneratingImages} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isGeneratingImages ? "Đang mở Gemini Ultra..." : "Tạo ảnh bằng Gemini Ultra"}</button>{geminiImageSlots.length > 0 && <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Tạo ảnh trên Gemini Ultra</p><p className="mt-1 text-sm leading-6 text-[#6883aa]">Mở từng prompt, dán vào Gemini Ultra, tạo và tải ảnh. Khi đủ ảnh, chọn đúng thứ tự để nhập về dự án.</p>{geminiImageMessage && <p className="mt-2 text-sm font-semibold text-[#0b5799]">{geminiImageMessage}</p>}<ol className="mt-3 space-y-2 text-sm text-[#0b3262]">{geminiImageSlots.map((slot, index) => <li key={`${slot.kind}-${slot.sceneNumber ?? 0}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#d8e3f1] bg-white px-3 py-2"><span>{index + 1}. {slot.label}</span><button type="button" onClick={() => void copyGeminiImagePrompt(slot)} className="rounded-md border border-[#0b5799] px-3 py-1.5 font-bold text-[#0b5799]">Sao chép prompt</button></li>)}</ol><button type="button" onClick={() => void importGeminiImages()} disabled={isGeneratingImages} className="mt-3 rounded-lg bg-[#07865f] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">Nhập ảnh vào app</button></div>}{Object.keys(generatedImages).length > 0 && <button type="button" onClick={() => setShowGeneratedImages((visible) => !visible)} className="ml-2 rounded-lg border border-[#0b5799] px-4 py-2.5 text-sm font-bold text-[#0b5799]">{showGeneratedImages ? "Ẩn ảnh" : "Xem ảnh"}</button>}{showGeneratedImages && <div className="mt-4 grid gap-4 sm:grid-cols-2">{generatedImages["character-0"] && <figure><img src={generatedImages["character-0"]} alt="Hình tượng nhân vật" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Nhân vật</figcaption></figure>}{generatedImages["background-0"] && <figure><img src={generatedImages["background-0"]} alt="Bối cảnh đồng nhất" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Bối cảnh</figcaption></figure>}{contentProject.scenes.map((scene) => generatedImages[`scene-${scene.sceneNumber}`] && <figure key={`image-${scene.sceneNumber}`}><img src={generatedImages[`scene-${scene.sceneNumber}`]} alt={`Ảnh cảnh ${scene.sceneNumber}`} className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Cảnh {scene.sceneNumber}</figcaption></figure>)}</div>}</div>}
+              {contentProject && <div className="mt-4 space-y-3"><button type="button" onClick={() => void generateAllProjectImages()} disabled={isGeneratingImages} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isGeneratingImages ? `Đang tạo ảnh ${geminiImageProgress.processed}/${geminiImageProgress.total}...` : "Tự động tạo toàn bộ ảnh bằng Gemini Ultra"}</button>{geminiImageSlots.length > 0 && <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Quy trình Gemini Ultra</p><p className="mt-1 text-sm leading-6 text-[#6883aa]">App tự gửi từng prompt, chờ ảnh hoàn tất, lưu ảnh về Content Project rồi mới gửi prompt kế tiếp.</p>{geminiImageMessage && <p className="mt-2 text-sm font-semibold text-[#0b5799]">{geminiImageMessage}</p>}<p className="mt-2 text-xs text-[#6883aa]">Nếu lần đầu dùng, đăng nhập Gemini trong cửa sổ mở ra. Không xử lý CAPTCHA tự động.</p></div>}{Object.keys(generatedImages).length > 0 && <button type="button" onClick={() => setShowGeneratedImages((visible) => !visible)} className="ml-2 rounded-lg border border-[#0b5799] px-4 py-2.5 text-sm font-bold text-[#0b5799]">{showGeneratedImages ? "Ẩn ảnh" : "Xem ảnh"}</button>}{showGeneratedImages && <div className="mt-4 grid gap-4 sm:grid-cols-2">{generatedImages["character-0"] && <figure><img src={generatedImages["character-0"]} alt="Hình tượng nhân vật" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Nhân vật</figcaption></figure>}{generatedImages["background-0"] && <figure><img src={generatedImages["background-0"]} alt="Bối cảnh đồng nhất" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Bối cảnh</figcaption></figure>}{contentProject.scenes.map((scene) => generatedImages[`scene-${scene.sceneNumber}`] && <figure key={`image-${scene.sceneNumber}`}><img src={generatedImages[`scene-${scene.sceneNumber}`]} alt={`Ảnh cảnh ${scene.sceneNumber}`} className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Cảnh {scene.sceneNumber}</figcaption></figure>)}</div>}</div>}
             </div>
           </section>
         </div>

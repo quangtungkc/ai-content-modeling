@@ -26,6 +26,11 @@ contextBridge.exposeInMainWorld("desktopGemini", {
   open: (prompt) => ipcRenderer.invoke("gemini-browser:open", prompt),
   copy: (prompt) => ipcRenderer.invoke("gemini-browser:copy", prompt),
   importImages: (projectId, slots) => ipcRenderer.invoke("gemini-browser:import-images", { projectId, slots }),
+  runJob: (projectId, slots, onProgress) => {
+    const handler = (_event, progress) => onProgress?.(progress);
+    ipcRenderer.on("gemini-browser:progress", handler);
+    return ipcRenderer.invoke("gemini-browser:run-job", { projectId, slots }).finally(() => ipcRenderer.removeListener("gemini-browser:progress", handler));
+  },
 });
 
 contextBridge.exposeInMainWorld("desktopAuth", {
