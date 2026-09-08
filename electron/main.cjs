@@ -318,6 +318,22 @@ function waitForGeminiLoad(window) {
   return Promise.resolve();
 }
 
+async function reloadGeminiBeforeNextPrompt(window) {
+  if (window.isDestroyed()) throw new Error("Cửa sổ Gemini đã bị đóng trước khi gửi prompt tiếp theo.");
+  geminiLoadPromise = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Gemini tải lại quá lâu trước khi gửi prompt tiếp theo.")), 45_000);
+    window.webContents.once("did-finish-load", () => { clearTimeout(timeout); resolve(); });
+  });
+  window.webContents.reload();
+  await geminiLoadPromise;
+  for (let elapsed = 0; elapsed < 20_000; elapsed += 500) {
+    const ready = await window.webContents.executeJavaScript("Boolean(document.querySelector('textarea, [contenteditable=\"true\"]'))", true);
+    if (ready) return;
+    await delay(500);
+  }
+  throw new Error("Gemini đã tải lại nhưng chưa sẵn sàng nhận prompt tiếp theo.");
+}
+
 function saveGeminiImage(projectId, slot, dataUrl) {
   const match = /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(dataUrl);
   if (!match) throw new Error("Gemini không trả về dữ liệu ảnh hợp lệ.");
@@ -610,6 +626,10 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
     const url = saveGeminiImage(projectId, slot, dataUrl);
     images[`${slot.kind}-${Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0}`] = `${url}&v=${Date.now()}`;
     event.sender.send("gemini-browser:progress", { processed: index + 1, total: slots.length, label: slot.label ?? `Ảnh ${index + 1}` });
+    if (index < slots.length - 1) {
+      event.sender.send("gemini-browser:progress", { processed: index + 1, total: slots.length, label: "Đang tải lại Gemini trước ảnh tiếp theo..." });
+      await reloadGeminiBeforeNextPrompt(window);
+    }
   }
   return { status: "completed", images };
 });
@@ -736,6 +756,10 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
     const url = saveGeminiVideo(projectId, sceneNumber, buffer);
     videos[`scene-${sceneNumber}`] = `${url}&v=${Date.now()}`;
     event.sender.send("gemini-browser:video-progress", { processed: index + 1, total: slots.length, label: slot.label ?? `Cảnh ${sceneNumber}` });
+    if (index < slots.length - 1) {
+      event.sender.send("gemini-browser:video-progress", { processed: index + 1, total: slots.length, label: "Đang tải lại Gemini trước cảnh tiếp theo..." });
+      await reloadGeminiBeforeNextPrompt(window);
+    }
   }
   return { status: "completed", videos };
 });
