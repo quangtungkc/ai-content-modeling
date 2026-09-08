@@ -338,15 +338,34 @@ function saveGeminiImage(projectId, slot, dataUrl) {
   return `/api/v1/projects/${projectId}/images?kind=${slot.kind}&sceneNumber=${sceneNumber}`;
 }
 
-async function getGeminiImageDataUrl(window, source) {
+async function captureGeminiImage(window, rect) {
+  if (!rect || !Number.isFinite(rect.x) || !Number.isFinite(rect.y) || !Number.isFinite(rect.width) || !Number.isFinite(rect.height)) {
+    throw new Error("Không xác định được vùng ảnh Gemini vừa tạo.");
+  }
+  const image = await window.webContents.capturePage({
+    x: Math.max(0, Math.floor(rect.x)),
+    y: Math.max(0, Math.floor(rect.y)),
+    width: Math.max(1, Math.floor(rect.width)),
+    height: Math.max(1, Math.floor(rect.height)),
+  });
+  const png = image.toPNG();
+  if (png.length < 1024) throw new Error("Không thể chụp ảnh Gemini vừa tạo.");
+  return `data:image/png;base64,${png.toString("base64")}`;
+}
+
+async function getGeminiImageDataUrl(window, source, captureRect) {
   if (typeof source !== "string" || !source) throw new Error("Không tìm thấy nguồn ảnh Gemini.");
   if (source.startsWith("data:image/")) return source;
-  const response = await window.webContents.session.fetch(source);
-  if (!response.ok) throw new Error("Không thể tải ảnh Gemini vừa tạo.");
-  const mimeType = (response.headers.get("content-type") || "image/png").split(";")[0].toLowerCase();
-  if (!mimeType.startsWith("image/")) throw new Error("Gemini không trả về tệp ảnh hợp lệ.");
-  const buffer = Buffer.from(await response.arrayBuffer());
-  return `data:${mimeType};base64,${buffer.toString("base64")}`;
+  try {
+    const response = await window.webContents.session.fetch(source);
+    if (!response.ok) throw new Error("Gemini chặn tải trực tiếp ảnh.");
+    const mimeType = (response.headers.get("content-type") || "image/png").split(";")[0].toLowerCase();
+    if (!mimeType.startsWith("image/")) throw new Error("Gemini không trả về tệp ảnh hợp lệ.");
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return `data:${mimeType};base64,${buffer.toString("base64")}`;
+  } catch {
+    return captureGeminiImage(window, captureRect);
+  }
 }
 
 ipcMain.handle("gemini-browser:run-job", async (event, value) => {
@@ -409,16 +428,18 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
         });
         const image = candidates[candidates.length - 1];
         if (image) {
+          const bounds = image.getBoundingClientRect();
+          const captureRect = { x: bounds.left, y: bounds.top, width: bounds.width, height: bounds.height };
+          const source = image.currentSrc || image.src;
           try {
-            const source = image.currentSrc || image.src;
             if (source.startsWith("blob:")) {
               const response = await fetch(source);
               const blob = await response.blob();
               const dataUrl = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); });
               return { dataUrl };
             }
-            return { imageSource: source };
-          } catch { return { error: "Không thể đọc ảnh Gemini vừa tạo." }; }
+            return { imageSource: source, captureRect };
+          } catch { return { imageSource: source, captureRect }; }
         }
         const canvas = allCanvases().find((item) => !beforeCanvases.has(item) && item.width >= 128 && item.height >= 128);
         if (canvas) {
@@ -429,7 +450,7 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
     })()`;
     const result = await window.webContents.executeJavaScript(script, true);
     if (!result?.dataUrl && !result?.imageSource) throw new Error(result?.error ?? "Không thể tạo ảnh trên Gemini Ultra.");
-    const dataUrl = result.dataUrl ?? await getGeminiImageDataUrl(window, result.imageSource);
+    const dataUrl = result.dataUrl ?? await getGeminiImageDataUrl(window, result.imageSource, result.captureRect);
     const url = saveGeminiImage(projectId, slot, dataUrl);
     images[`${slot.kind}-${Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0}`] = `${url}&v=${Date.now()}`;
     event.sender.send("gemini-browser:progress", { processed: index + 1, total: slots.length, label: slot.label ?? `Ảnh ${index + 1}` });
