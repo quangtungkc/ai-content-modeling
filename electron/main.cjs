@@ -461,11 +461,18 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
     if (sendResult.clickPoint) {
       const x = Math.round(sendResult.clickPoint.x);
       const y = Math.round(sendResult.clickPoint.y);
-      window.webContents.sendInputEvent({ type: "mouseMove", x, y });
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      window.webContents.sendInputEvent({ type: "mouseDown", x, y, button: "left" });
-      await new Promise((resolve) => setTimeout(resolve, 80));
-      window.webContents.sendInputEvent({ type: "mouseUp", x, y, button: "left" });
+      try {
+        if (!window.webContents.debugger.isAttached()) window.webContents.debugger.attach("1.3");
+        await window.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        await window.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        await window.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+      } catch {
+        window.webContents.sendInputEvent({ type: "mouseMove", x, y });
+        window.webContents.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
+        window.webContents.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, 900));
     const deliveryCheck = await window.webContents.executeJavaScript(`(() => {
@@ -481,7 +488,7 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
         const input = document.querySelector('textarea, [contenteditable="true"]');
         return input ? (input.tagName === "TEXTAREA" ? input.value : (input.innerText || input.textContent || "")) : "";
       })()`, true);
-      if (retryCheck.includes(prepared.promptPrefix)) throw new Error("Gemini không nhận thao tác gửi. Hãy bấm nút gửi một lần trong cửa sổ Gemini rồi chạy lại.");
+      if (retryCheck.includes(prepared.promptPrefix)) throw new Error("Gemini không nhận thao tác gửi tự động. App đã thử cả chuột trình duyệt và phím Enter.");
     }
     const script = `(async () => {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
