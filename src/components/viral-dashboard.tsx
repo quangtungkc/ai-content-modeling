@@ -13,6 +13,7 @@ type Dashboard = {
     score: number;
     relativePerformance: number;
     currentViews: number;
+    analysis: { createdAt: string; content: VideoAnalysisResult["analysis"] } | null;
     competitor: {
       handle: string;
       displayName: string | null;
@@ -87,6 +88,8 @@ export function ViralDashboard() {
   const [analyzingVideoId, setAnalyzingVideoId] = useState("");
   const [analysisResult, setAnalysisResult] = useState<VideoAnalysisResult | null>(null);
   const [analysisCopied, setAnalysisCopied] = useState(false);
+  const [analysisFilter, setAnalysisFilter] = useState<"all" | "analyzed" | "unanalyzed">("all");
+  const [videoPage, setVideoPage] = useState(1);
   const [autoSyncRequested, setAutoSyncRequested] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("autoSync") === "1");
   const [manualVideo, setManualVideo] = useState({ competitorId: "", url: "", publishedAt: new Date().toISOString().slice(0, 16), views: "", likes: "0", comments: "0", shares: "0", caption: "" });
   useEffect(() => {
@@ -190,8 +193,11 @@ export function ViralDashboard() {
   }, [syncProgress?.syncId, syncProgress?.status]);
   const videos = useMemo(() => {
     const cutoff = Date.now() - Number(appliedFilters.periodHours) * 3_600_000;
-    return (dashboard?.videos ?? []).filter((video) => new Date(video.publishedAt).getTime() >= cutoff && video.currentViews >= Number(appliedFilters.minimumViews));
-  }, [dashboard, appliedFilters]);
+    return (dashboard?.videos ?? []).filter((video) => new Date(video.publishedAt).getTime() >= cutoff && video.currentViews >= Number(appliedFilters.minimumViews) && (analysisFilter === "all" || (analysisFilter === "analyzed" ? Boolean(video.analysis) : !video.analysis)));
+  }, [dashboard, appliedFilters, analysisFilter]);
+  const pageSize = 8;
+  const pageCount = Math.max(1, Math.ceil(videos.length / pageSize));
+  const visibleVideos = videos.slice((videoPage - 1) * pageSize, videoPage * pageSize);
   const ranking = useMemo(
     () =>
       [...videos]
@@ -200,6 +206,7 @@ export function ViralDashboard() {
     [videos],
   );
   const maxScore = Math.max(100, ...ranking.map((video) => video.score));
+  useEffect(() => { setVideoPage(1); }, [appliedFilters, analysisFilter]);
   const handleSync = useCallback(async () => {
     setIsSyncing(true);
     setSyncProgress(null);
@@ -324,11 +331,15 @@ export function ViralDashboard() {
       const body = await response.json() as { data?: VideoAnalysisResult; error?: { message?: string } };
       if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể phân tích video.");
       setAnalysisResult(body.data);
+      setDashboard((current) => current ? { ...current, videos: current.videos.map((video) => video.id === videoId ? { ...video, analysis: { createdAt: new Date().toISOString(), content: body.data!.analysis } } : video) } : current);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Không thể phân tích video.");
     } finally {
       setAnalyzingVideoId("");
     }
+  }
+  function viewStoredAnalysis(video: Dashboard["videos"][number]) {
+    if (video.analysis) setAnalysisResult({ analysis: video.analysis.content });
   }
   async function copyAnalysis() {
     if (!analysisResult) return;
@@ -609,6 +620,11 @@ export function ViralDashboard() {
           <span className="rounded-full bg-[#e8f7f2] px-3 py-1 text-xs font-bold text-[#07865f]">
             {appliedFilters.periodHours === "24" ? "24 giờ gần nhất" : `${appliedFilters.periodHours === "72" ? "3" : "7"} ngày gần nhất`}
           </span>
+          <select value={analysisFilter} onChange={(event) => setAnalysisFilter(event.target.value as typeof analysisFilter)} className="rounded-lg border border-[#cbd9ea] px-3 py-2 text-sm font-semibold text-[#0b5799]">
+            <option value="all">Tất cả video</option>
+            <option value="analyzed">Đã phân tích</option>
+            <option value="unanalyzed">Chưa phân tích</option>
+          </select>
         </div>
         <div className="mt-5 overflow-x-auto">
           <table className="w-full min-w-[700px] text-left">
@@ -622,7 +638,7 @@ export function ViralDashboard() {
               </tr>
             </thead>
             <tbody>
-              {videos.slice(0, 8).map((video) => (
+              {visibleVideos.map((video) => (
                 <tr
                   key={video.id}
                   className="border-b border-[#edf2f7] text-sm"
@@ -649,6 +665,7 @@ export function ViralDashboard() {
                           {video.competitor.platform} ·{" "}
                           {formatAge(video.publishedAt)}
                         </p>
+                        {video.analysis && <p className="mt-1 text-xs font-bold text-[#07865f]">✓ Đã phân tích</p>}
                       </div>
                     </div>
                   </td>
@@ -672,8 +689,8 @@ export function ViralDashboard() {
                     >
                       Mở video
                     </a>
-                    <button onClick={() => void analyzeVideo(video.id)} disabled={analyzingVideoId === video.id} className="text-xs font-bold text-[#0b5799] disabled:cursor-wait disabled:opacity-60">
-                      {analyzingVideoId === video.id ? "Đang phân tích..." : "Phân tích"}
+                    <button onClick={() => video.analysis ? viewStoredAnalysis(video) : void analyzeVideo(video.id)} disabled={analyzingVideoId === video.id} className="text-xs font-bold text-[#0b5799] disabled:cursor-wait disabled:opacity-60">
+                      {analyzingVideoId === video.id ? "Đang phân tích..." : video.analysis ? "Xem phân tích" : "Phân tích"}
                     </button>
                   </td>
                 </tr>
@@ -692,6 +709,7 @@ export function ViralDashboard() {
             </tbody>
           </table>
         </div>
+        {videos.length > pageSize && <div className="mt-4 flex items-center justify-center gap-2"><button type="button" onClick={() => setVideoPage((page) => Math.max(1, page - 1))} disabled={videoPage === 1} className="rounded-lg border border-[#cbd9ea] px-3 py-2 text-sm font-bold text-[#0b5799] disabled:opacity-40">‹</button>{Array.from({ length: pageCount }, (_, index) => index + 1).map((page) => <button type="button" key={page} onClick={() => setVideoPage(page)} className={`rounded-lg px-3 py-2 text-sm font-bold ${page === videoPage ? "bg-[#0b5799] text-white" : "border border-[#cbd9ea] text-[#0b5799]"}`}>{page}</button>)}<button type="button" onClick={() => setVideoPage((page) => Math.min(pageCount, page + 1))} disabled={videoPage === pageCount} className="rounded-lg border border-[#cbd9ea] px-3 py-2 text-sm font-bold text-[#0b5799] disabled:opacity-40">›</button></div>}
       </section>
     </section>
   );
