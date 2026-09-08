@@ -690,7 +690,26 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
     const videoPoint = await findGeminiControlPoint(window, ["create video", "tạo video", "videos", "video"]);
     if (!videoPoint) throw new Error("Không tìm thấy chế độ Video trong Gemini. Hãy kiểm tra tài khoản đã được cấp quyền tạo video.");
     await dispatchBrowserClick(window, videoPoint);
-    await delay(700);
+    let videoComposerReady = false;
+    for (let elapsed = 0; elapsed < 30_000; elapsed += 500) {
+      videoComposerReady = await window.webContents.executeJavaScript(`(() => {
+        const roots = [document];
+        const seen = new Set(roots);
+        for (let index = 0; index < roots.length; index += 1) {
+          for (const element of roots[index].querySelectorAll("*")) {
+            if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+          }
+        }
+        return roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable="true"]')]).some((element) => {
+          const bounds = element.getBoundingClientRect();
+          return bounds.width > 100 && bounds.height > 20;
+        });
+      })()`, true);
+      if (videoComposerReady) break;
+      await delay(500);
+    }
+    if (!videoComposerReady) throw new Error("Màn hình Tạo video đã mở nhưng ô Mô tả video chưa sẵn sàng.");
+    await delay(800);
 
     const prepared = await window.webContents.executeJavaScript(`(() => {
       const roots = [document];
@@ -702,7 +721,10 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
       }
       const videos = roots.flatMap((root) => [...root.querySelectorAll("video")]);
       const beforeSources = videos.map((video) => video.currentSrc || video.src || video.querySelector("source")?.src).filter(Boolean);
-      const input = document.querySelector('textarea, [contenteditable="true"]');
+      const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable="true"]')]).find((element) => {
+        const bounds = element.getBoundingClientRect();
+        return bounds.width > 100 && bounds.height > 20;
+      });
       if (!input) return { error: "Không tìm thấy ô nhập prompt Gemini." };
       input.focus();
       if (input.tagName === "TEXTAREA") {
@@ -727,7 +749,17 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
     const prompt = `Create one 8-second video from the attached image. Use the attached image as the first frame and preserve the exact character identity, clothing, art style, colors, and environment. Animate only this scene. Action: ${slot.actionBlock}. Camera and visual direction: ${slot.visualBlock}. Audio and sound direction: ${slot.audioBlock}. Aspect ratio: ${slot.aspectRatio}. Generate one final video with audio.`;
     const promptResult = await window.webContents.executeJavaScript(`(() => {
       const prompt = ${JSON.stringify("__PROMPT__")};
-      const input = document.querySelector('textarea, [contenteditable="true"]');
+      const roots = [document];
+      const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll("*")) {
+          if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        }
+      }
+      const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable="true"]')]).find((element) => {
+        const bounds = element.getBoundingClientRect();
+        return bounds.width > 100 && bounds.height > 20;
+      });
       if (!input) return { error: "Không tìm thấy ô nhập prompt Gemini." };
       input.focus();
       if (input.tagName === "TEXTAREA") {
@@ -746,7 +778,17 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
     await dispatchBrowserClick(window, sendPoint);
     await delay(1200);
     const deliveryText = await window.webContents.executeJavaScript(`(() => {
-      const input = document.querySelector('textarea, [contenteditable="true"]');
+      const roots = [document];
+      const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll("*")) {
+          if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        }
+      }
+      const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable="true"]')]).find((element) => {
+        const bounds = element.getBoundingClientRect();
+        return bounds.width > 100 && bounds.height > 20;
+      });
       return input ? (input.tagName === "TEXTAREA" ? input.value : (input.innerText || input.textContent || "")) : "";
     })()`, true);
     if (deliveryText.includes(promptResult.promptPrefix)) throw new Error(`Gemini chưa nhận lệnh tạo video cảnh ${sceneNumber}.`);
