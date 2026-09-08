@@ -27,5 +27,5 @@ export async function deleteCurrentSession() {
 }
 
 export function sessionCookie(token: string, expiresAt: Date) {
-  return { name: SESSION_COOKIE, value: token, httpOnly: true, sameSite: "lax" as const, secure: process.env.NODE_ENV === "production", path: "/", expires: expiresAt };
+  return { name: SESSION_COOKIE, value: token, httpOnly: true, sameSite: "lax" as const, secure: process.env.NODE_ENV === "production" && process.env.DESKTOP_MODE !== "1", path: "/", expires: expiresAt };
 }

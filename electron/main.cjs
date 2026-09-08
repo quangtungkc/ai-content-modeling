@@ -40,6 +40,7 @@ function ensureRuntime() {
     NODE_ENV: "production",
     PORT: String(PORT),
     HOSTNAME: "127.0.0.1",
+    DESKTOP_MODE: "1",
     DATABASE_URL: `file:${databasePath.replace(/\\/g, "/")}`,
     AUTH_SECRET: config.authSecret,
     CREDENTIAL_ENCRYPTION_KEY: config.credentialEncryptionKey,
