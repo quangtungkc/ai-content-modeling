@@ -60,7 +60,7 @@ export interface AIProvider {
   readonly name: string;
   analyzeVideo(input: AIInput): Promise<VideoAnalysis>;
   generateIdeas(input: AIInput & { analysis: VideoAnalysis; artStyle?: string }): Promise<ModelingIdeas>;
-  developIdea(input: AIInput & { analysis: VideoAnalysis; idea: ModelingDirection }): Promise<DevelopedIdea>;
+  developIdea(input: AIInput & { analysis: VideoAnalysis; idea: ModelingDirection; aspectRatio?: string }): Promise<DevelopedIdea>;
   understandVideo(input: VideoUnderstandingInput): Promise<VisualBreakdown>;
   reviewProject(input: FinalReviewInput): Promise<FinalReview>;
   validateAsset(input: AssetValidationInput): Promise<AssetValidation>;
