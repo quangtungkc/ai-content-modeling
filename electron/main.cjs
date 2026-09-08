@@ -81,6 +81,24 @@ function getDesktopSession() {
   return config.desktopSession && typeof config.desktopSession.token === "string" ? config.desktopSession : null;
 }
 
+async function ensureDesktopSession() {
+  const existing = getDesktopSession();
+  if (existing && new Date(existing.expiresAt).getTime() > Date.now()) return existing;
+  try {
+    const response = await fetch(`${APP_URL}/api/auth/desktop-session`, { method: "POST" });
+    if (!response.ok) return null;
+    const body = await response.json();
+    const token = body?.data?.token;
+    const expiresAt = body?.data?.expiresAt;
+    if (typeof token !== "string" || typeof expiresAt !== "string") return null;
+    const session = { token, expiresAt };
+    updateDesktopSession(session);
+    return session;
+  } catch {
+    return null;
+  }
+}
+
 function runtimeRoot() {
   return app.isPackaged
     ? path.join(process.resourcesPath, "app.asar.unpacked", "electron", "dist")
@@ -272,7 +290,7 @@ async function createWindow(syncAfterUpdate = false) {
   });
 
   mainWindow = window;
-  const desktopSession = getDesktopSession();
+  const desktopSession = await ensureDesktopSession();
   if (desktopSession) {
     await window.webContents.session.cookies.set({
       url: APP_URL,
