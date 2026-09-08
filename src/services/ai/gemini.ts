@@ -40,6 +40,19 @@ export class GeminiProvider implements AIProvider {
     const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     try { return assetValidationSchema.parse(parseJsonText(body.candidates?.[0]?.content?.parts?.[0]?.text ?? "")); } catch (error) { throw new AIStructuredOutputError(this.name, error); }
   }
+  async generateImage(prompt: string, aspectRatio: string) {
+    if (!this.apiKey) throw new AIProviderNotConfiguredError(this.name);
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${process.env.GEMINI_IMAGE_MODEL ?? "gemini-3.1-flash-image"}:generateContent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": this.apiKey },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseModalities: ["IMAGE"], responseFormat: { image: { aspectRatio } } } }),
+    });
+    if (!response.ok) throw new AIStructuredOutputError(this.name, await readApiError(response));
+    const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ inlineData?: { mimeType?: string; data?: string } }> } }> };
+    const image = body.candidates?.[0]?.content?.parts?.find((part) => part.inlineData?.data)?.inlineData;
+    if (!image?.data) throw new AIStructuredOutputError(this.name, "Gemini không trả về ảnh.");
+    return { mimeType: image.mimeType ?? "image/png", data: image.data };
+  }
   private async request<T>(instruction: string, input: unknown, schema: { parse(value: unknown): T }, normalize?: (value: unknown) => unknown, responseSchema?: Record<string, unknown>): Promise<T> {
     if (!this.apiKey) throw new AIProviderNotConfiguredError(this.name);
     const response = await this.generateContent({ contents: [{ parts: [{ text: `${instruction}\n${JSON.stringify(input)}` }] }], generationConfig: { responseMimeType: "application/json", ...(responseSchema ? { responseSchema } : {}) } });
