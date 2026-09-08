@@ -455,10 +455,33 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
     if (!sendResult?.sent) {
       throw new Error("Gemini chưa nhận được prompt. Hãy kiểm tra cửa sổ Gemini đang mở và thử lại.");
     }
+    window.show();
+    window.focus();
+    window.webContents.focus();
     if (sendResult.clickPoint) {
-      window.webContents.sendInputEvent({ type: "mouseMove", x: Math.round(sendResult.clickPoint.x), y: Math.round(sendResult.clickPoint.y) });
-      window.webContents.sendInputEvent({ type: "mouseDown", x: Math.round(sendResult.clickPoint.x), y: Math.round(sendResult.clickPoint.y), button: "left" });
-      window.webContents.sendInputEvent({ type: "mouseUp", x: Math.round(sendResult.clickPoint.x), y: Math.round(sendResult.clickPoint.y), button: "left" });
+      const x = Math.round(sendResult.clickPoint.x);
+      const y = Math.round(sendResult.clickPoint.y);
+      window.webContents.sendInputEvent({ type: "mouseMove", x, y });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      window.webContents.sendInputEvent({ type: "mouseDown", x, y, button: "left" });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      window.webContents.sendInputEvent({ type: "mouseUp", x, y, button: "left" });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    const deliveryCheck = await window.webContents.executeJavaScript(`(() => {
+      const input = document.querySelector('textarea, [contenteditable="true"]');
+      return input ? (input.tagName === "TEXTAREA" ? input.value : (input.innerText || input.textContent || "")) : "";
+    })()`, true);
+    if (deliveryCheck.includes(prepared.promptPrefix)) {
+      window.webContents.focus();
+      window.webContents.sendInputEvent({ type: "keyDown", keyCode: "ENTER" });
+      window.webContents.sendInputEvent({ type: "keyUp", keyCode: "ENTER" });
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const retryCheck = await window.webContents.executeJavaScript(`(() => {
+        const input = document.querySelector('textarea, [contenteditable="true"]');
+        return input ? (input.tagName === "TEXTAREA" ? input.value : (input.innerText || input.textContent || "")) : "";
+      })()`, true);
+      if (retryCheck.includes(prepared.promptPrefix)) throw new Error("Gemini không nhận thao tác gửi. Hãy bấm nút gửi một lần trong cửa sổ Gemini rồi chạy lại.");
     }
     const script = `(async () => {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
