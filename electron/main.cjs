@@ -191,11 +191,12 @@ function createFacebookWindow() {
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function scanFacebookPages(entries) {
+async function scanFacebookPages(entries, onProgress) {
   const browser = createFacebookWindow();
   const results = [];
+  onProgress?.({ processed: 0, total: entries.length });
   try {
-    for (const entry of entries.slice(0, 3)) {
+    for (const [index, entry] of entries.entries()) {
       try {
       const videosUrl = `${entry.url.replace(/\/$/, "")}/videos`;
       await browser.loadURL(videosUrl);
@@ -254,6 +255,7 @@ async function scanFacebookPages(entries) {
       } catch (error) {
         results.push({ competitorId: entry.id, sourceUrl: entry.url, needsLogin: false, items: [], error: error instanceof Error ? error.message : "Không thể mở Trang Facebook." });
       }
+      onProgress?.({ processed: index + 1, total: entries.length });
     }
   } finally {
     if (!browser.isDestroyed()) browser.close();
@@ -267,7 +269,8 @@ ipcMain.handle("facebook-browser:open", () => {
 });
 ipcMain.handle("facebook-browser:scan", async (_event, entries) => {
   if (!Array.isArray(entries)) throw new Error("Danh sách đối thủ không hợp lệ.");
-  return scanFacebookPages(entries.filter((entry) => entry && typeof entry.id === "string" && typeof entry.url === "string"));
+  const validEntries = entries.filter((entry) => entry && typeof entry.id === "string" && typeof entry.url === "string");
+  return scanFacebookPages(validEntries, (progress) => _event.sender.send("facebook-browser:scan-progress", progress));
 });
 
 async function createWindow(syncAfterUpdate = false) {

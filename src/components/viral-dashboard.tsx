@@ -38,9 +38,10 @@ type DesktopUpdater = {
 };
 type FacebookScanItem = { url: string; caption: string; publishedAt: string | null; views: number | null; likes: number | null; comments: number | null; shares: number | null };
 type FacebookScanResult = { competitorId: string; sourceUrl: string; needsLogin: boolean; items: FacebookScanItem[]; error?: string };
+type FacebookScanProgress = { processed: number; total: number };
 type DesktopFacebook = {
   open: () => Promise<{ status: string }>;
-  scan: (entries: Array<{ id: string; url: string }>) => Promise<FacebookScanResult[]>;
+  scan: (entries: Array<{ id: string; url: string }>, onProgress?: (progress: FacebookScanProgress) => void) => Promise<FacebookScanResult[]>;
 };
 type VideoAnalysisResult = {
   analysis: {
@@ -82,6 +83,7 @@ export function ViralDashboard() {
   const [manualError, setManualError] = useState("");
   const [isSavingManual, setIsSavingManual] = useState(false);
   const [isBrowserScanning, setIsBrowserScanning] = useState(false);
+  const [facebookScanProgress, setFacebookScanProgress] = useState<FacebookScanProgress | null>(null);
   const [analyzingVideoId, setAnalyzingVideoId] = useState("");
   const [analysisResult, setAnalysisResult] = useState<VideoAnalysisResult | null>(null);
   const [autoSyncRequested, setAutoSyncRequested] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("autoSync") === "1");
@@ -242,7 +244,7 @@ export function ViralDashboard() {
       return;
     }
     await browser.open();
-    setMessage("Cửa sổ Facebook đã mở. Đăng nhập xong, quay lại app và bấm Quét thử 3 đối thủ.");
+    setMessage("Cửa sổ Facebook đã mở. Đăng nhập xong, quay lại app và bấm Quét toàn bộ đối thủ.");
   }
   async function scanFacebookTrial() {
     const browser = (window as Window & { desktopFacebook?: DesktopFacebook }).desktopFacebook;
@@ -257,15 +259,22 @@ export function ViralDashboard() {
     }
     setIsBrowserScanning(true);
     setError("");
-    setMessage("Đang mở và quét 3 Trang Facebook đầu tiên...");
+    setMessage("Đang tải danh sách đối thủ Facebook...");
     try {
       const competitorsResponse = await fetch(`/api/v1/channels/${selectedChannelId}/competitors`);
       const competitorsBody = await competitorsResponse.json() as { data?: CompetitorOption[]; error?: { message?: string } };
-      const facebookCompetitors = (competitorsBody.data ?? []).filter((competitor) => competitor.platform.toLowerCase() === "facebook").slice(0, 3);
+      const facebookCompetitors = (competitorsBody.data ?? []).filter((competitor) => competitor.platform.toLowerCase() === "facebook");
       if (!competitorsResponse.ok || !facebookCompetitors.length) throw new Error(competitorsBody.error?.message ?? "Channel chưa có đối thủ Facebook để quét.");
-      const results = await browser.scan(facebookCompetitors.map(({ id, url }) => ({ id, url })));
+      setFacebookScanProgress({ processed: 0, total: facebookCompetitors.length });
+      const results = await browser.scan(
+        facebookCompetitors.map(({ id, url }) => ({ id, url })),
+        (progress) => {
+          setFacebookScanProgress(progress);
+          setMessage(`Đang quét đối thủ: ${progress.processed}/${progress.total}`);
+        },
+      );
       if (results.some((result) => result.needsLogin)) {
-        setMessage("Facebook yêu cầu đăng nhập. Đăng nhập trong cửa sổ Facebook rồi bấm Quét thử 3 đối thủ lần nữa.");
+        setMessage("Facebook yêu cầu đăng nhập. Đăng nhập trong cửa sổ Facebook rồi bấm Quét toàn bộ đối thủ lần nữa.");
         return;
       }
       let stored = 0;
@@ -294,14 +303,15 @@ export function ViralDashboard() {
       }
       setAppliedFilters((current) => ({ ...current }));
       setMessage(stored
-        ? `Đã quét và lưu ${stored} video từ 3 đối thủ. ${skipped ? `${skipped} mục chưa đủ số liệu nên bỏ qua.` : ""}`
+        ? `Đã quét và lưu ${stored} video từ ${facebookCompetitors.length} đối thủ. ${skipped ? `${skipped} mục chưa đủ số liệu nên bỏ qua.` : ""}`
         : discovered
           ? `Đã tìm thấy ${discovered} video nhưng Facebook chưa hiển thị đủ thời gian đăng hoặc lượt xem để lưu. ${scanErrors ? `${scanErrors} Trang không thể mở.` : ""}`
-          : `Chưa tải được video từ ba Trang. ${scanErrors ? `${scanErrors} Trang không thể mở.` : "Kiểm tra lại phiên đăng nhập Facebook rồi thử lại."}`);
+          : `Chưa tải được video từ các Trang. ${scanErrors ? `${scanErrors} Trang không thể mở.` : "Kiểm tra lại phiên đăng nhập Facebook rồi thử lại."}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Không thể quét Facebook.");
     } finally {
       setIsBrowserScanning(false);
+      setFacebookScanProgress(null);
     }
   }
   async function analyzeVideo(videoId: string) {
@@ -409,7 +419,7 @@ export function ViralDashboard() {
             Mở Facebook
           </button>
           <button onClick={() => void scanFacebookTrial()} disabled={isBrowserScanning} className="rounded-lg border border-[#d7e2f1] bg-white px-4 py-3 text-sm font-bold text-[#0b3262] shadow-sm disabled:cursor-wait disabled:opacity-60">
-            {isBrowserScanning ? "Đang quét..." : "Quét thử 3"}
+            {isBrowserScanning ? (facebookScanProgress ? `Đang quét ${facebookScanProgress.processed}/${facebookScanProgress.total}...` : "Đang chuẩn bị...") : "Quét toàn bộ đối thủ"}
           </button>
           <button onClick={() => void handleSync()} disabled={isSyncing} className="rounded-lg bg-[#07865f] px-4 py-3 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60">
             {isSyncing ? "Đang xếp hàng..." : "↻ Đồng bộ dữ liệu"}

@@ -15,7 +15,11 @@ contextBridge.exposeInMainWorld("desktopUpdater", {
 
 contextBridge.exposeInMainWorld("desktopFacebook", {
   open: () => ipcRenderer.invoke("facebook-browser:open"),
-  scan: (entries) => ipcRenderer.invoke("facebook-browser:scan", entries),
+  scan: (entries, onProgress) => {
+    const handler = (_event, progress) => onProgress?.(progress);
+    ipcRenderer.on("facebook-browser:scan-progress", handler);
+    return ipcRenderer.invoke("facebook-browser:scan", entries).finally(() => ipcRenderer.removeListener("facebook-browser:scan-progress", handler));
+  },
 });
 
 contextBridge.exposeInMainWorld("desktopAuth", {
