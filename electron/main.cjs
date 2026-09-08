@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
-const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, screen, shell } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, screen, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const { execFile, spawn } = require("node:child_process");
 const crypto = require("node:crypto");
@@ -382,13 +382,21 @@ function saveGeminiImage(projectId, slot, dataUrl) {
   return `/api/v1/projects/${projectId}/images?kind=${slot.kind}&sceneNumber=${sceneNumber}`;
 }
 
-function findSceneImagePath(projectId, sceneNumber) {
+function findGeneratedImagePath(projectId, kind, sceneNumber = 0) {
   const imageRoot = path.join(app.getPath("userData"), "generated-images", projectId);
   for (const extension of [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif"]) {
-    const target = path.join(imageRoot, `scene-${sceneNumber}${extension}`);
+    const target = path.join(imageRoot, `${kind}-${sceneNumber}${extension}`);
     if (fs.existsSync(target)) return target;
   }
-  throw new Error(`Chưa có ảnh cho cảnh ${sceneNumber}.`);
+  throw new Error(`Chưa có ảnh ${kind === "character" ? "nhân vật" : `cảnh ${sceneNumber}`}.`);
+}
+
+function findSceneImagePath(projectId, sceneNumber) {
+  return findGeneratedImagePath(projectId, "scene", sceneNumber);
+}
+
+function findCharacterImagePath(projectId) {
+  return findGeneratedImagePath(projectId, "character", 0);
 }
 
 function saveGeminiVideo(projectId, sceneNumber, buffer) {
@@ -453,6 +461,38 @@ async function findGeminiControlPoint(window, labels) {
     const bounds = selected.getBoundingClientRect();
     return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
   })()`, true);
+}
+
+async function uploadGeminiFiles(window, filePaths) {
+  if (!window.webContents.debugger.isAttached()) window.webContents.debugger.attach("1.3");
+  const candidate = await window.webContents.debugger.sendCommand("Runtime.evaluate", {
+    expression: `(() => {
+      const roots = [document];
+      const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll("*")) {
+          if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        }
+      }
+      return roots.flatMap((root) => [...root.querySelectorAll('input[type="file"]')]).find((input) => !input.disabled) || null;
+    })()`,
+    returnByValue: false,
+  });
+  if (!candidate?.result?.objectId) throw new Error("Không tìm thấy ô tải ảnh trên màn hình Tạo video Gemini.");
+  const node = await window.webContents.debugger.sendCommand("DOM.requestNode", { objectId: candidate.result.objectId });
+  await window.webContents.debugger.sendCommand("DOM.setFileInputFiles", { files: filePaths, nodeId: node.nodeId });
+}
+
+async function selectGeminiVideoAspectRatio(window, aspectRatio) {
+  if (aspectRatio !== "9:16") return;
+  const currentRatio = await findGeminiControlPoint(window, ["ngang", "16:9", "aspect ratio", "tỷ lệ"]);
+  if (!currentRatio) throw new Error("Không tìm thấy lựa chọn kích thước video Gemini.");
+  await dispatchBrowserClick(window, currentRatio);
+  await delay(500);
+  const verticalRatio = await findGeminiControlPoint(window, ["dọc", "9:16", "vertical"]);
+  if (!verticalRatio) throw new Error("Không tìm thấy lựa chọn video dọc 9:16 trong Gemini.");
+  await dispatchBrowserClick(window, verticalRatio);
+  await delay(700);
 }
 
 async function getGeminiVideoBuffer(window, result) {
@@ -680,6 +720,7 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
     if (!Number.isInteger(slot?.sceneNumber) || typeof slot.visualBlock !== "string" || typeof slot.actionBlock !== "string" || typeof slot.audioBlock !== "string") throw new Error("Dữ liệu phân cảnh tạo video không hợp lệ.");
     const sceneNumber = slot.sceneNumber;
     const imagePath = findSceneImagePath(projectId, sceneNumber);
+    const characterImagePath = findCharacterImagePath(projectId);
     event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: slot.label ?? `Cảnh ${sceneNumber}` });
 
     const toolsPoint = await findGeminiControlPoint(window, ["tools", "công cụ"]);
@@ -710,6 +751,7 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
     }
     if (!videoComposerReady) throw new Error("Màn hình Tạo video đã mở nhưng ô Mô tả video chưa sẵn sàng.");
     await delay(800);
+    await selectGeminiVideoAspectRatio(window, slot.aspectRatio);
 
     const prepared = await window.webContents.executeJavaScript(`(() => {
       const roots = [document];
@@ -739,14 +781,10 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
     })()`, true);
     if (prepared?.error) throw new Error(prepared.error);
 
-    const attachment = nativeImage.createFromPath(imagePath);
-    if (attachment.isEmpty()) throw new Error(`Không thể đọc ảnh cảnh ${sceneNumber}.`);
-    clipboard.writeImage(attachment);
-    window.webContents.focus();
-    window.webContents.paste();
-    await delay(1200);
+    await uploadGeminiFiles(window, [characterImagePath, imagePath]);
+    await delay(1_500);
 
-    const prompt = `Create one 8-second video from the attached image. Use the attached image as the first frame and preserve the exact character identity, clothing, art style, colors, and environment. Animate only this scene. Action: ${slot.actionBlock}. Camera and visual direction: ${slot.visualBlock}. Audio and sound direction: ${slot.audioBlock}. Aspect ratio: ${slot.aspectRatio}. Generate one final video with audio.`;
+    const prompt = `Create one 8-second vertical 9:16 video from the two attached images. The first attachment is the character reference; preserve that exact character identity, appearance, clothing, colors, and art style. The second attachment is the scene image; use it as the first frame and preserve its environment. Animate only this scene. Action: ${slot.actionBlock}. Camera and visual direction: ${slot.visualBlock}. Audio and sound direction: ${slot.audioBlock}. Generate one final video with audio.`;
     const promptResult = await window.webContents.executeJavaScript(`(() => {
       const prompt = ${JSON.stringify("__PROMPT__")};
       const roots = [document];
