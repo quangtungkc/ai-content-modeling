@@ -4,7 +4,7 @@ import { decryptSecret } from "@/lib/secrets";
 import { GeminiProvider } from "@/services/ai/gemini";
 import { OpenAIProvider } from "@/services/ai/openai";
 import { AIService } from "@/services/ai/service";
-import { videoAnalysisSchema } from "@/services/ai/schemas";
+import { modelingIdeasSchema, videoAnalysisSchema } from "@/services/ai/schemas";
 import type { ChannelDNA, VideoContext } from "@/services/ai/types";
 
 export async function generateIdeasFromVideo(videoId: string, userId: string, artStyle = "", provider?: AIService) {
@@ -27,5 +27,14 @@ export async function generateIdeasFromVideo(videoId: string, userId: string, ar
   const result = await aiService.generateIdeas({ channelDNA, video: videoContext, analysis, artStyle });
   if (result.modelingDirections.length !== 1) throw new AppError("INVALID_IDEA_COUNT", "AI phải trả đúng 1 modeling idea.", 502);
   const ideas = await db.$transaction(result.modelingDirections.map((content) => db.modelingIdea.create({ data: { sourceVideoId: video.id, analysisId: analysisRecord.id, title: content.title, content, status: "DRAFT" } })));
-  return { sourceVideoId: video.id, analysisId: analysisRecord.id, ideas };
+  return {
+    sourceVideoId: video.id,
+    analysisId: analysisRecord.id,
+    ideas: ideas.map((idea) => ({
+      id: idea.id,
+      createdAt: idea.createdAt,
+      status: idea.status,
+      ...modelingIdeasSchema.shape.modelingDirections.element.parse(idea.content),
+    })),
+  };
 }
