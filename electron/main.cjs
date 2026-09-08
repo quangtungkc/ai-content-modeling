@@ -44,6 +44,7 @@ function ensureRuntime() {
     DATABASE_URL: `file:${databasePath.replace(/\\/g, "/")}`,
     AUTH_SECRET: config.authSecret,
     CREDENTIAL_ENCRYPTION_KEY: config.credentialEncryptionKey,
+    GEMINI_MODEL: process.env.GEMINI_MODEL || "gemini-3.6-flash",
     AI_PROVIDER: process.env.AI_PROVIDER || "unconfigured",
     META_GRAPH_VERSION: process.env.META_GRAPH_VERSION || "v24.0",
   };
