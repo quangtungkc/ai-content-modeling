@@ -22,6 +22,12 @@ contextBridge.exposeInMainWorld("desktopFacebook", {
   },
 });
 
+contextBridge.exposeInMainWorld("desktopGemini", {
+  open: (prompt) => ipcRenderer.invoke("gemini-browser:open", prompt),
+  copy: (prompt) => ipcRenderer.invoke("gemini-browser:copy", prompt),
+  importImages: (projectId, slots) => ipcRenderer.invoke("gemini-browser:import-images", { projectId, slots }),
+});
+
 contextBridge.exposeInMainWorld("desktopAuth", {
   save: (token, expiresAt) => ipcRenderer.invoke("desktop-auth:save", { token, expiresAt }),
   clear: () => ipcRenderer.invoke("desktop-auth:clear"),

@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
-const { app, BrowserWindow, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
@@ -271,6 +271,49 @@ ipcMain.handle("facebook-browser:scan", async (_event, entries) => {
   if (!Array.isArray(entries)) throw new Error("Danh sách đối thủ không hợp lệ.");
   const validEntries = entries.filter((entry) => entry && typeof entry.id === "string" && typeof entry.url === "string");
   return scanFacebookPages(validEntries, (progress) => _event.sender.send("facebook-browser:scan-progress", progress));
+});
+
+ipcMain.handle("gemini-browser:open", async (_event, prompt) => {
+  if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Prompt Gemini không hợp lệ.");
+  clipboard.writeText(prompt.trim());
+  await shell.openExternal("https://gemini.google.com/app");
+  return { status: "opened" };
+});
+
+ipcMain.handle("gemini-browser:copy", (_event, prompt) => {
+  if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Prompt Gemini không hợp lệ.");
+  clipboard.writeText(prompt.trim());
+  return { status: "copied" };
+});
+
+ipcMain.handle("gemini-browser:import-images", async (_event, value) => {
+  const projectId = value?.projectId;
+  const slots = value?.slots;
+  if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || !Array.isArray(slots) || slots.length === 0) {
+    throw new Error("Yêu cầu nhập ảnh không hợp lệ.");
+  }
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: `Chọn ${slots.length} ảnh PNG theo đúng thứ tự`,
+    properties: ["openFile", "multiSelections"],
+    filters: [{ name: "Ảnh PNG", extensions: ["png"] }],
+  });
+  if (selection.canceled) return { status: "cancelled", images: {} };
+  if (selection.filePaths.length !== slots.length) throw new Error(`Hãy chọn đúng ${slots.length} ảnh PNG theo thứ tự đã hiển thị.`);
+  const imageRoot = path.join(app.getPath("userData"), "generated-images", projectId);
+  fs.mkdirSync(imageRoot, { recursive: true });
+  const images = {};
+  for (let index = 0; index < slots.length; index += 1) {
+    const slot = slots[index];
+    const source = selection.filePaths[index];
+    if (path.extname(source).toLowerCase() !== ".png") throw new Error("Chỉ hỗ trợ ảnh PNG tải từ Gemini.");
+    const stat = fs.statSync(source);
+    if (stat.size > 20 * 1024 * 1024) throw new Error("Mỗi ảnh PNG phải nhỏ hơn 20 MB.");
+    const sceneNumber = Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0;
+    const targetName = `${slot.kind}-${sceneNumber}.png`;
+    fs.copyFileSync(source, path.join(imageRoot, targetName));
+    images[`${slot.kind}-${sceneNumber}`] = `/api/v1/projects/${projectId}/images?kind=${slot.kind}&sceneNumber=${sceneNumber}`;
+  }
+  return { status: "imported", images };
 });
 
 async function createWindow(syncAfterUpdate = false) {
