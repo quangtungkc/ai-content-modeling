@@ -86,6 +86,7 @@ export function ViralDashboard() {
   const [facebookScanProgress, setFacebookScanProgress] = useState<FacebookScanProgress | null>(null);
   const [analyzingVideoId, setAnalyzingVideoId] = useState("");
   const [analysisResult, setAnalysisResult] = useState<VideoAnalysisResult | null>(null);
+  const [analysisCopied, setAnalysisCopied] = useState(false);
   const [autoSyncRequested, setAutoSyncRequested] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("autoSync") === "1");
   const [manualVideo, setManualVideo] = useState({ competitorId: "", url: "", publishedAt: new Date().toISOString().slice(0, 16), views: "", likes: "0", comments: "0", shares: "0", caption: "" });
   useEffect(() => {
@@ -329,6 +330,23 @@ export function ViralDashboard() {
       setAnalyzingVideoId("");
     }
   }
+  async function copyAnalysis() {
+    if (!analysisResult) return;
+    const analysis = analysisResult.analysis;
+    const text = [
+      "PHÂN TÍCH VIDEO",
+      `\nTóm tắt: ${analysis.summary}`,
+      `\nHook mở đầu: ${analysis.hook}`,
+      `\nThiết lập: ${analysis.setup}`,
+      `\nXung đột và leo thang: ${analysis.conflict} ${analysis.escalation}`,
+      `\nCú twist và kết: ${analysis.twist} ${analysis.payoff}`,
+      `\nCơ chế giữ người xem: ${analysis.retentionMechanism}`,
+      `\nVì sao hiệu quả: ${analysis.whyItWorks.join(" · ")}`,
+    ].join("\n");
+    await navigator.clipboard.writeText(text);
+    setAnalysisCopied(true);
+    window.setTimeout(() => setAnalysisCopied(false), 1800);
+  }
   function openManualEntry() {
     const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
     if (!selectedChannelId) {
@@ -458,7 +476,7 @@ export function ViralDashboard() {
           <section className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div><p className="text-xs font-extrabold tracking-[0.16em] text-teal-600">PHÂN TÍCH VIDEO</p><h2 className="mt-1 text-xl font-extrabold text-[#0b3262]">Cơ chế tạo tín hiệu</h2></div>
-              <button type="button" onClick={() => setAnalysisResult(null)} className="text-xl text-[#6883aa]" aria-label="Đóng">×</button>
+              <div className="flex items-center gap-3"><button type="button" onClick={() => void copyAnalysis()} className="rounded-lg border border-[#cbd9ea] px-3 py-2 text-sm font-bold text-[#0b5799]">{analysisCopied ? "Đã sao chép" : "Sao chép phân tích"}</button><button type="button" onClick={() => setAnalysisResult(null)} className="text-xl text-[#6883aa]" aria-label="Đóng">×</button></div>
             </div>
             <div className="mt-5 space-y-4 text-sm leading-6 text-[#0b3262]">
               <AnalysisBlock label="Tóm tắt" value={analysisResult.analysis.summary} />
