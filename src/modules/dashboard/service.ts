@@ -8,7 +8,6 @@ export async function getViralDashboard(userId: string, channelId?: string, peri
   const channels = await db.channel.findMany({ where: { userId, status: "ACTIVE", ...(channelId ? { id: channelId } : {}) }, select: { id: true, name: true, timezone: true }, orderBy: { createdAt: "asc" } });
   const selectedChannel = channels[0];
   if (!selectedChannel) return { periodStart, periodEnd, channel: null, stats: { competitors: 0, newVideos: 0, viralVideos: 0 }, videos: [] };
-  await removeVideosBeforeToday(selectedChannel.id);
   const competitors = await db.competitor.findMany({ where: { channelId: selectedChannel.id, status: "ACTIVE" }, select: { id: true, displayName: true, handle: true, platform: true } });
   const videos = await db.competitorVideo.findMany({ where: { competitorId: { in: competitors.map(({ id }) => id) }, publishedAt: { gte: periodStart, lte: periodEnd } }, include: { competitor: { select: { displayName: true, handle: true, platform: true } }, snapshots: { orderBy: { capturedAt: "desc" }, take: 1 }, analyses: { orderBy: { version: "desc" }, take: 1, select: { createdAt: true, content: true } } }, orderBy: { publishedAt: "desc" } });
   const cards = await Promise.all(videos.map(async (video) => {
@@ -23,14 +22,14 @@ export async function getViralDashboard(userId: string, channelId?: string, peri
   return { periodStart, periodEnd, channel: selectedChannel, stats: { competitors: competitors.length, newVideos: videos.length, viralVideos: validCards.filter((video) => video.score >= 80).length }, videos: validCards };
 }
 
-async function removeVideosBeforeToday(channelId: string) {
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-  const expired = await db.competitorVideo.findMany({
-    where: { competitor: { channelId }, OR: [{ publishedAt: { lt: startOfToday } }, { publishedAt: null }] },
+export async function deleteVideosForChannel(channelId: string, userId: string) {
+  const channel = await db.channel.findFirst({ where: { id: channelId, userId, status: "ACTIVE" }, select: { id: true } });
+  if (!channel) throw new Error("CHANNEL_NOT_FOUND");
+  const videos = await db.competitorVideo.findMany({
+    where: { competitor: { channelId } },
     select: { id: true },
   });
-  const ids = expired.map(({ id }) => id);
+  const ids = videos.map(({ id }) => id);
   if (!ids.length) return;
   await db.$transaction([
     db.modelingIdea.deleteMany({ where: { sourceVideoId: { in: ids } } }),
@@ -39,4 +38,5 @@ async function removeVideosBeforeToday(channelId: string) {
     db.videoMetricSnapshot.deleteMany({ where: { videoId: { in: ids } } }),
     db.competitorVideo.deleteMany({ where: { id: { in: ids } } }),
   ]);
+  return { deleted: ids.length };
 }

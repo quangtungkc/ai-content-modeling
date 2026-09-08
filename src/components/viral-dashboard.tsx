@@ -224,6 +224,26 @@ export function ViralDashboard() {
       setError(caught instanceof Error ? caught.message : "Không thể bắt đầu đồng bộ dữ liệu.");
     }
   }, [channelId]);
+  async function deleteVideoData() {
+    const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
+    if (!selectedChannelId) {
+      setError("Hãy chọn Channel trước khi xoá dữ liệu video.");
+      return;
+    }
+    if (!window.confirm("Xoá toàn bộ video và kết quả phân tích của Channel này? Không thể hoàn tác.")) return;
+    setError("");
+    setMessage("Đang xoá dữ liệu video...");
+    try {
+      const response = await fetch(`/api/v1/dashboard?channelId=${encodeURIComponent(selectedChannelId)}`, { method: "DELETE" });
+      const body = await response.json() as { data?: { deleted?: number }; error?: { message?: string } };
+      if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể xoá dữ liệu video.");
+      setAnalysisResult(null);
+      setMessage(`Đã xoá ${body.data.deleted ?? 0} video và dữ liệu phân tích. Dữ liệu sẽ chỉ bị xoá khi Phong bấm nút này.`);
+      setAppliedFilters((current) => ({ ...current }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Không thể xoá dữ liệu video.");
+    }
+  }
   useEffect(() => {
     if (!autoSyncRequested || !dashboard || isSyncing) return;
     setAutoSyncRequested(false);
@@ -452,6 +472,9 @@ export function ViralDashboard() {
           </button>
           <button onClick={() => void handleSync()} disabled={isSyncing} className="rounded-lg bg-[#07865f] px-4 py-3 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60">
             {isSyncing ? "Đang xếp hàng..." : "↻ Đồng bộ dữ liệu"}
+          </button>
+          <button onClick={() => void deleteVideoData()} className="rounded-lg border border-rose-200 bg-white px-4 py-3 text-sm font-bold text-rose-700 shadow-sm">
+            Xoá dữ liệu video
           </button>
         </div>
       </header>
