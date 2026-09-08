@@ -293,23 +293,31 @@ ipcMain.handle("gemini-browser:import-images", async (_event, value) => {
     throw new Error("Yêu cầu nhập ảnh không hợp lệ.");
   }
   const selection = await dialog.showOpenDialog(mainWindow, {
-    title: `Chọn ${slots.length} ảnh PNG theo đúng thứ tự`,
+    title: `Chọn ${slots.length} ảnh theo đúng thứ tự`,
     properties: ["openFile", "multiSelections"],
-    filters: [{ name: "Ảnh PNG", extensions: ["png"] }],
+    filters: [{ name: "Tất cả tệp hình ảnh", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif"] }],
   });
   if (selection.canceled) return { status: "cancelled", images: {} };
-  if (selection.filePaths.length !== slots.length) throw new Error(`Hãy chọn đúng ${slots.length} ảnh PNG theo thứ tự đã hiển thị.`);
+  if (selection.filePaths.length !== slots.length) throw new Error(`Hãy chọn đúng ${slots.length} ảnh theo thứ tự đã hiển thị.`);
   const imageRoot = path.join(app.getPath("userData"), "generated-images", projectId);
   fs.mkdirSync(imageRoot, { recursive: true });
+  const allowedExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif"]);
+  const allowedKinds = new Set(["character", "background", "scene"]);
   const images = {};
   for (let index = 0; index < slots.length; index += 1) {
     const slot = slots[index];
     const source = selection.filePaths[index];
-    if (path.extname(source).toLowerCase() !== ".png") throw new Error("Chỉ hỗ trợ ảnh PNG tải từ Gemini.");
+    if (!slot || !allowedKinds.has(slot.kind)) throw new Error("Loại ảnh không hợp lệ.");
+    const extension = path.extname(source).toLowerCase();
+    if (!allowedExtensions.has(extension)) throw new Error("Định dạng ảnh chưa được hỗ trợ.");
     const stat = fs.statSync(source);
-    if (stat.size > 20 * 1024 * 1024) throw new Error("Mỗi ảnh PNG phải nhỏ hơn 20 MB.");
+    if (stat.size > 20 * 1024 * 1024) throw new Error("Mỗi ảnh phải nhỏ hơn 20 MB.");
     const sceneNumber = Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0;
-    const targetName = `${slot.kind}-${sceneNumber}.png`;
+    for (const oldExtension of allowedExtensions) {
+      const oldTarget = path.join(imageRoot, `${slot.kind}-${sceneNumber}${oldExtension}`);
+      if (fs.existsSync(oldTarget)) fs.rmSync(oldTarget);
+    }
+    const targetName = `${slot.kind}-${sceneNumber}${extension}`;
     fs.copyFileSync(source, path.join(imageRoot, targetName));
     images[`${slot.kind}-${sceneNumber}`] = `/api/v1/projects/${projectId}/images?kind=${slot.kind}&sceneNumber=${sceneNumber}`;
   }
