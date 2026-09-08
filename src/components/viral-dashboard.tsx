@@ -72,6 +72,18 @@ const accents = [
   "border-l-blue-600",
 ];
 
+// Gemini on the consumer web blocks prompts that name a third-party studio/style.
+// Existing projects may have been created before that rule was added, so sanitize
+// immediately before the prompt is sent instead of requiring the user to recreate a project.
+function toGeminiSafePrompt(prompt: string) {
+  return prompt
+    .replace(/\b(?:3D\s+)?Pixar(?:[-\s]style)?\b/gi, "original expressive 3D animated film style")
+    .replace(/\bDisney(?:[-\s]style)?\b/gi, "original family animation style")
+    .replace(/\bDreamWorks(?:[-\s]style)?\b/gi, "original stylized 3D animation style")
+    .replace(/\bStudio\s+Ghibli(?:[-\s]style)?\b/gi, "original hand-painted fantasy animation style")
+    .replace(/\b(?:in\s+the\s+style\s+of|style\s+of)\s+[^,.\n]+/gi, "with an original visual treatment");
+}
+
 export function ViralDashboard() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [error, setError] = useState("");
@@ -446,9 +458,9 @@ export function ViralDashboard() {
   function buildGeminiImageSlots(): ImageSlot[] {
     if (!contentProject) return [];
     return [
-      { kind: "character", label: "Nhân vật", prompt: `Create a consistent character reference sheet. Art direction: ${JSON.stringify(contentProject.artDirection)}. Character design: ${JSON.stringify(contentProject.characterDesign)}. Aspect ratio: ${aspectRatio}. Generate one final image only.` },
-      { kind: "background", label: "Bối cảnh", prompt: `Create a consistent background reference image. Art direction: ${JSON.stringify(contentProject.artDirection)}. Background design: ${JSON.stringify(contentProject.backgroundDesign)}. Aspect ratio: ${aspectRatio}. Generate one final image only.` },
-      ...contentProject.scenes.map((scene) => ({ kind: "scene" as const, sceneNumber: scene.sceneNumber, label: `Cảnh ${scene.sceneNumber}`, prompt: `${scene.englishPrompt}\nVisual: ${scene.visualBlock}\nAction: ${scene.actionBlock}\nKeep the approved character and background designs consistent. Aspect ratio: ${aspectRatio}. Generate one final image only.` })),
+      { kind: "character", label: "Nhân vật", prompt: toGeminiSafePrompt(`Create a consistent character reference sheet. Art direction: ${JSON.stringify(contentProject.artDirection)}. Character design: ${JSON.stringify(contentProject.characterDesign)}. Use an original visual treatment and do not imitate a named studio, franchise, artist, or character. Aspect ratio: ${aspectRatio}. Generate one final image only.`) },
+      { kind: "background", label: "Bối cảnh", prompt: toGeminiSafePrompt(`Create a consistent background reference image. Art direction: ${JSON.stringify(contentProject.artDirection)}. Background design: ${JSON.stringify(contentProject.backgroundDesign)}. Use an original visual treatment and do not imitate a named studio, franchise, artist, or character. Aspect ratio: ${aspectRatio}. Generate one final image only.`) },
+      ...contentProject.scenes.map((scene) => ({ kind: "scene" as const, sceneNumber: scene.sceneNumber, label: `Cảnh ${scene.sceneNumber}`, prompt: toGeminiSafePrompt(`${scene.englishPrompt}\nVisual: ${scene.visualBlock}\nAction: ${scene.actionBlock}\nKeep the approved character and background designs consistent. Use an original visual treatment and do not imitate a named studio, franchise, artist, or character. Aspect ratio: ${aspectRatio}. Generate one final image only.`) })),
     ];
   }
   async function generateAllProjectImages() {
