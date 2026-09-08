@@ -68,6 +68,19 @@ function consumeSyncAfterUpdate() {
   return true;
 }
 
+function updateDesktopSession(value) {
+  const configPath = runtimeConfigPath();
+  const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
+  fs.writeFileSync(configPath, JSON.stringify({ ...config, desktopSession: value }), { encoding: "utf8", mode: 0o600 });
+}
+
+function getDesktopSession() {
+  const configPath = runtimeConfigPath();
+  if (!fs.existsSync(configPath)) return null;
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  return config.desktopSession && typeof config.desktopSession.token === "string" ? config.desktopSession : null;
+}
+
 function runtimeRoot() {
   return app.isPackaged
     ? path.join(process.resourcesPath, "app.asar.unpacked", "electron", "dist")
@@ -124,6 +137,15 @@ ipcMain.handle("desktop-update:download", async () => {
 ipcMain.handle("desktop-update:install", () => {
   markSyncAfterUpdate();
   autoUpdater.quitAndInstall();
+});
+ipcMain.handle("desktop-auth:save", (_event, value) => {
+  if (!value || typeof value.token !== "string" || typeof value.expiresAt !== "string") throw new Error("Phiên đăng nhập không hợp lệ.");
+  updateDesktopSession({ token: value.token, expiresAt: value.expiresAt });
+  return { status: "saved" };
+});
+ipcMain.handle("desktop-auth:clear", (event) => {
+  updateDesktopSession(null);
+  return event.sender.session.cookies.remove(APP_URL, "ai_content_modeling_session").then(() => ({ status: "cleared" }));
 });
 
 function createFacebookWindow() {
@@ -229,7 +251,7 @@ ipcMain.handle("facebook-browser:scan", async (_event, entries) => {
   return scanFacebookPages(entries.filter((entry) => entry && typeof entry.id === "string" && typeof entry.url === "string"));
 });
 
-function createWindow(syncAfterUpdate = false) {
+async function createWindow(syncAfterUpdate = false) {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -250,6 +272,18 @@ function createWindow(syncAfterUpdate = false) {
   });
 
   mainWindow = window;
+  const desktopSession = getDesktopSession();
+  if (desktopSession) {
+    await window.webContents.session.cookies.set({
+      url: APP_URL,
+      name: "ai_content_modeling_session",
+      value: desktopSession.token,
+      path: "/",
+      httpOnly: true,
+      sameSite: "lax",
+      expirationDate: new Date(desktopSession.expiresAt).getTime() / 1000,
+    });
+  }
   const url = syncAfterUpdate ? `${APP_URL}/?autoSync=1` : APP_URL;
   void window.loadURL(url);
 }
@@ -257,9 +291,9 @@ function createWindow(syncAfterUpdate = false) {
 app.whenReady().then(async () => {
   startLocalServices();
   await waitForServer();
-  createWindow(consumeSyncAfterUpdate());
+  await createWindow(consumeSyncAfterUpdate());
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) void createWindow();
   });
 });
 

@@ -35,6 +35,10 @@ export default function LoginPage() {
         setError(body.error?.message ?? "Không thể xác thực. Vui lòng thử lại.");
         return;
       }
+      const desktopAuth = (window as Window & { desktopAuth?: { save: (token: string, expiresAt: string) => Promise<unknown> } }).desktopAuth;
+      if (desktopAuth && body.data?.desktopSessionToken && body.data?.desktopSessionExpiresAt) {
+        await desktopAuth.save(body.data.desktopSessionToken, body.data.desktopSessionExpiresAt);
+      }
       window.location.assign("/");
     } catch {
       setError("Không kết nối được tới server local. Hãy tải lại trang và thử lại.");

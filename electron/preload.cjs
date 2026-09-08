@@ -17,3 +17,8 @@ contextBridge.exposeInMainWorld("desktopFacebook", {
   open: () => ipcRenderer.invoke("facebook-browser:open"),
   scan: (entries) => ipcRenderer.invoke("facebook-browser:scan", entries),
 });
+
+contextBridge.exposeInMainWorld("desktopAuth", {
+  save: (token, expiresAt) => ipcRenderer.invoke("desktop-auth:save", { token, expiresAt }),
+  clear: () => ipcRenderer.invoke("desktop-auth:clear"),
+});
