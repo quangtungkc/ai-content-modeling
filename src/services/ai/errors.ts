@@ -7,7 +7,7 @@ export class AIProviderNotConfiguredError extends AppError {
 export class AIStructuredOutputError extends AppError {
   constructor(provider: string, details?: unknown) {
     const status = details && typeof details === "object" && "status" in details ? Number((details as { status?: unknown }).status) : 0;
-    const apiMessage = details && typeof details === "object" && "message" in details && typeof (details as { message?: unknown }).message === "string"
+    const apiMessage = typeof details === "string" ? details : details && typeof details === "object" && "message" in details && typeof (details as { message?: unknown }).message === "string"
       ? (details as { message: string }).message
       : "";
     const message = status === 401 || status === 403

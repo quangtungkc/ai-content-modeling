@@ -45,12 +45,12 @@ export class GeminiProvider implements AIProvider {
     const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${process.env.GEMINI_IMAGE_MODEL ?? "gemini-3.1-flash-image"}:generateContent`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": this.apiKey },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseModalities: ["IMAGE"], responseFormat: { image: { aspectRatio } } } }),
+      body: JSON.stringify({ contents: [{ parts: [{ text: `${prompt}\nOutput aspect ratio: ${aspectRatio}.` }] }], generationConfig: { responseModalities: ["TEXT", "IMAGE"] } }),
     });
     if (!response.ok) throw new AIStructuredOutputError(this.name, await readApiError(response));
     const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ inlineData?: { mimeType?: string; data?: string } }> } }> };
     const image = body.candidates?.[0]?.content?.parts?.find((part) => part.inlineData?.data)?.inlineData;
-    if (!image?.data) throw new AIStructuredOutputError(this.name, "Gemini không trả về ảnh.");
+    if (!image?.data) throw new AIStructuredOutputError(this.name, { message: "Gemini không trả về dữ liệu ảnh. Kiểm tra quyền truy cập model tạo ảnh của API key." });
     return { mimeType: image.mimeType ?? "image/png", data: image.data };
   }
   private async request<T>(instruction: string, input: unknown, schema: { parse(value: unknown): T }, normalize?: (value: unknown) => unknown, responseSchema?: Record<string, unknown>): Promise<T> {
