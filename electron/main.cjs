@@ -414,12 +414,30 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
       }
       input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: prompt }));
       await sleep(300);
-      const send = [...document.querySelectorAll('button, [role="button"]')].find((element) => {
+      const inputBounds = input.getBoundingClientRect();
+      const sendCandidates = [...document.querySelectorAll('button, [role="button"]')].filter((element) => {
         const label = ((element.getAttribute("aria-label") || "") + " " + (element.getAttribute("title") || "") + " " + (element.textContent || "")).toLowerCase();
-        return !element.disabled && (label.includes("send") || label.includes("gửi") || label.includes("submit"));
+        const bounds = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return !element.disabled && bounds.width > 0 && bounds.height > 0 && style.visibility !== "hidden" && style.display !== "none" && (label.includes("send") || label.includes("gửi") || label.includes("submit"));
       });
+      const send = sendCandidates.sort((left, right) => {
+        const leftBounds = left.getBoundingClientRect();
+        const rightBounds = right.getBoundingClientRect();
+        const leftDistance = Math.hypot(leftBounds.left - inputBounds.right, leftBounds.top - inputBounds.bottom);
+        const rightDistance = Math.hypot(rightBounds.left - inputBounds.right, rightBounds.top - inputBounds.bottom);
+        return leftDistance - rightDistance;
+      })[0];
       if (!send) return { error: "Không tìm thấy nút gửi prompt Gemini." };
       send.click();
+      await sleep(600);
+      const inputText = input.tagName === "TEXTAREA" ? input.value : (input.innerText || input.textContent || "");
+      if (inputText.includes(prompt.slice(0, 48))) {
+        input.focus();
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
+        await sleep(600);
+      }
       for (let elapsed = 0; elapsed < 180000; elapsed += 1500) {
         await sleep(1500);
         const candidates = allImages().filter((image) => {
