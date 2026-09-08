@@ -7,7 +7,7 @@ import type { AIInput, AIProvider, ModelingDirection, VideoAnalysis, VideoUnders
 
 export class GeminiProvider implements AIProvider {
   readonly name = "gemini";
-  constructor(private readonly apiKey = process.env.GEMINI_API_KEY, private readonly model = process.env.GEMINI_MODEL ?? "gemini-2.5-flash") {}
+  constructor(private readonly apiKey = process.env.GEMINI_API_KEY, private readonly model = process.env.GEMINI_MODEL ?? "gemini-3.6-flash") {}
   analyzeVideo(input: AIInput) {
     return this.request(
       "Analyze the video. Return exactly one JSON object, with no Markdown fences and no commentary. Use exactly these keys: schemaVersion (string \"1.0\"), summary, hook, setup, conflict, escalation, twist, payoff, theGag, cameraPattern, editingRhythm, soundPattern, retentionMechanism (all strings), characterInteractions and whyItWorks (arrays of strings). Write the analysis in Vietnamese. If evidence is missing, use a short honest explanation instead of inventing details.",
