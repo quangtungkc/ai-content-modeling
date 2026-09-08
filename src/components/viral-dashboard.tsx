@@ -490,6 +490,7 @@ export function ViralDashboard() {
     setIsGeneratingVideos(true);
     setContentProjectError("");
     setGeminiVideoProgress({ processed: 0, total: sceneSlots.length });
+    setGeminiVideoMessage("Đang mở Google Flow...");
     try {
       const gemini = (window as Window & { desktopGemini?: DesktopGemini }).desktopGemini;
       if (!gemini) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
@@ -501,7 +502,7 @@ export function ViralDashboard() {
       setShowGeneratedVideos(true);
       setGeminiVideoMessage("Đã tạo và lưu toàn bộ video theo đúng thứ tự phân cảnh.");
     } catch (caught) {
-      setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo video bằng Gemini Ultra.");
+      setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo video bằng Google Flow.");
     } finally {
       setIsGeneratingVideos(false);
     }
