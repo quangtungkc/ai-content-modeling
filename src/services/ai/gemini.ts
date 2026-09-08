@@ -7,7 +7,11 @@ import type { AIInput, AIProvider, ModelingDirection, VideoAnalysis, VideoUnders
 
 export class GeminiProvider implements AIProvider {
   readonly name = "gemini";
-  constructor(private readonly apiKey = process.env.GEMINI_API_KEY, private readonly model = process.env.GEMINI_MODEL ?? "gemini-3.6-flash") {}
+  constructor(
+    private readonly apiKey = process.env.GEMINI_API_KEY,
+    private readonly model = process.env.GEMINI_MODEL ?? "gemini-3.6-flash",
+    private readonly fallbackModel = process.env.GEMINI_FALLBACK_MODEL ?? "gemini-3.5-flash-lite",
+  ) {}
   analyzeVideo(input: AIInput) {
     return this.request(
       "Analyze the video. Return exactly one JSON object, with no Markdown fences and no commentary. Use exactly these keys: schemaVersion (string \"1.0\"), summary, hook, setup, conflict, escalation, twist, payoff, theGag, cameraPattern, editingRhythm, soundPattern, retentionMechanism (all strings), characterInteractions and whyItWorks (arrays of strings). Write the analysis in Vietnamese. If evidence is missing, use a short honest explanation instead of inventing details.",
@@ -21,10 +25,8 @@ export class GeminiProvider implements AIProvider {
   developIdea(input: AIInput & { analysis: VideoAnalysis; idea: ModelingDirection }) { return this.request("Develop the approved idea and return only the structured content package JSON.", input, developedIdeaSchema); }
   async understandVideo(input: VideoUnderstandingInput): Promise<VisualBreakdown> {
     if (!this.apiKey) throw new AIProviderNotConfiguredError(this.name);
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`;
     const systemPrompt = input.instruction ?? "Analyze this short-form competitor video. Do not propose a new idea yet. Return structured JSON with videoSummary, openingHook, timeline with MM:SS timestamps, characters, setting, visualGag, escalation, twist, payoff, cameraPattern, audioPattern, whyItLikelyWorks. Focus on observable evidence and distinguish evidence from inference.";
-    const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ parts: [{ file_data: { file_uri: input.videoFileUri, mime_type: input.mimeType } }, { text: `${systemPrompt}\nChannel DNA context:\n${JSON.stringify(input.channelDNA ?? {})}` }] }], generationConfig: { responseMimeType: "application/json" } }) });
-    if (!response.ok) throw new AIStructuredOutputError(this.name, { status: response.status, message: await readApiError(response) });
+    const response = await this.generateContent({ contents: [{ parts: [{ file_data: { file_uri: input.videoFileUri, mime_type: input.mimeType } }, { text: `${systemPrompt}\nChannel DNA context:\n${JSON.stringify(input.channelDNA ?? {})}` }] }], generationConfig: { responseMimeType: "application/json" } });
     const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     try { return visualBreakdownSchema.parse(parseJsonText(body.candidates?.[0]?.content?.parts?.[0]?.text ?? "")); } catch (error) { throw new AIStructuredOutputError(this.name, error); }
   }
@@ -33,24 +35,57 @@ export class GeminiProvider implements AIProvider {
   }
   async validateAsset(input: AssetValidationInput): Promise<AssetValidation> {
     if (!this.apiKey) throw new AIProviderNotConfiguredError(this.name);
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`;
     const prompt = "Validate this uploaded asset against the expected design. Return only JSON. AI may recommend APPROVED or NEEDS_REVISION, but do not make a user decision. Score characterMatch when relevant, styleMatch, and composition from 0 to 100. If the character is cut off or the scene lacks required space, report a concrete issue and suggestion.";
-    const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ parts: [{ file_data: { file_uri: input.assetUri, mime_type: input.mimeType } }, { text: `${prompt}\nAsset type: ${input.assetType}\nExpected design: ${JSON.stringify(input.expectedDesign)}\nProject context: ${JSON.stringify(input.projectContext ?? {})}` }] }], generationConfig: { responseMimeType: "application/json" } }) });
-    if (!response.ok) throw new AIStructuredOutputError(this.name, { status: response.status, message: await readApiError(response) });
+    const response = await this.generateContent({ contents: [{ parts: [{ file_data: { file_uri: input.assetUri, mime_type: input.mimeType } }, { text: `${prompt}\nAsset type: ${input.assetType}\nExpected design: ${JSON.stringify(input.expectedDesign)}\nProject context: ${JSON.stringify(input.projectContext ?? {})}` }] }], generationConfig: { responseMimeType: "application/json" } });
     const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     try { return assetValidationSchema.parse(parseJsonText(body.candidates?.[0]?.content?.parts?.[0]?.text ?? "")); } catch (error) { throw new AIStructuredOutputError(this.name, error); }
   }
   private async request<T>(instruction: string, input: unknown, schema: { parse(value: unknown): T }, normalize?: (value: unknown) => unknown, responseSchema?: Record<string, unknown>): Promise<T> {
     if (!this.apiKey) throw new AIProviderNotConfiguredError(this.name);
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`;
-    const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ parts: [{ text: `${instruction}\n${JSON.stringify(input)}` }] }], generationConfig: { responseMimeType: "application/json", ...(responseSchema ? { responseSchema } : {}) } }) });
-    if (!response.ok) throw new AIStructuredOutputError(this.name, { status: response.status, message: await readApiError(response) });
+    const response = await this.generateContent({ contents: [{ parts: [{ text: `${instruction}\n${JSON.stringify(input)}` }] }], generationConfig: { responseMimeType: "application/json", ...(responseSchema ? { responseSchema } : {}) } });
     const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     try {
       const parsed = parseJsonText(body.candidates?.[0]?.content?.parts?.[0]?.text ?? "");
       return schema.parse(normalize ? normalize(parsed) : parsed);
     } catch (error) { throw new AIStructuredOutputError(this.name, error); }
   }
+  private async generateContent(body: unknown): Promise<Response> {
+    if (!this.apiKey) throw new AIProviderNotConfiguredError(this.name);
+
+    const models = [...new Set([this.model, this.fallbackModel])];
+    let lastError = { status: 503, message: "Gemini đang quá tải. App đã tự thử lại nhưng chưa nhận được phản hồi." };
+
+    for (const [modelIndex, model] of models.entries()) {
+      // Ưu tiên chuyển ngay sang model nhẹ hơn khi model chính báo quá tải.
+      const attempts = modelIndex === 0 ? 1 : 3;
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${this.apiKey}`;
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (response.ok) return response;
+
+        const message = await readApiError(response);
+        lastError = { status: response.status, message };
+        if (!isTransientGeminiError(response.status)) {
+          throw new AIStructuredOutputError(this.name, lastError);
+        }
+        if (attempt < attempts - 1) await delay(1_000 * (attempt + 1));
+      }
+    }
+
+    throw new AIStructuredOutputError(this.name, lastError);
+  }
+}
+
+function isTransientGeminiError(status: number) {
+  return [429, 500, 502, 503, 504].includes(status);
+}
+
+function delay(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function readApiError(response: Response) {
