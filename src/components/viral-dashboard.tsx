@@ -76,8 +76,8 @@ export function ViralDashboard() {
   const [channels, setChannels] = useState<ChannelOption[]>([]);
   const [periodHours, setPeriodHours] = useState("24");
   const [channelId, setChannelId] = useState("");
-  const [minimumViews, setMinimumViews] = useState("50000");
-  const [appliedFilters, setAppliedFilters] = useState({ periodHours: "24", channelId: "", minimumViews: "50000" });
+  const [minimumViews, setMinimumViews] = useState("20000");
+  const [appliedFilters, setAppliedFilters] = useState({ periodHours: "24", channelId: "", minimumViews: "20000" });
   const [showManualEntry, setShowManualEntry] = useState(false);
   const [manualChannelId, setManualChannelId] = useState("");
   const [manualCompetitors, setManualCompetitors] = useState<CompetitorOption[]>([]);
@@ -534,7 +534,7 @@ export function ViralDashboard() {
         <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_auto]">
           <label className="block"><span className="mb-2 block text-sm text-[#6883aa]">Khoảng thời gian</span><select value={periodHours} onChange={(event) => setPeriodHours(event.target.value)} className="w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]"><option value="24">24 giờ gần nhất</option><option value="72">3 ngày gần nhất</option><option value="168">7 ngày gần nhất</option></select></label>
           <label className="block"><span className="mb-2 block text-sm text-[#6883aa]">Kênh</span><select value={channelId} onChange={(event) => setChannelId(event.target.value)} className="w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]"><option value="">Kênh mặc định</option>{channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}</select></label>
-          <label className="block"><span className="mb-2 block text-sm text-[#6883aa]">Mức tín hiệu</span><select value={minimumViews} onChange={(event) => setMinimumViews(event.target.value)} className="w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]"><option value="50000">Từ 50.000 lượt xem</option><option value="100000">Từ 100.000 lượt xem</option></select></label>
+          <label className="block"><span className="mb-2 block text-sm text-[#6883aa]">Mức tín hiệu</span><select value={minimumViews} onChange={(event) => setMinimumViews(event.target.value)} className="w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]"><option value="20000">Từ 20.000 lượt xem</option><option value="50000">Từ 50.000 lượt xem</option><option value="100000">Từ 100.000 lượt xem</option></select></label>
           <button onClick={() => { setMessage(""); setAppliedFilters({ periodHours, channelId, minimumViews }); }} disabled={isLoading} className="self-end rounded-lg bg-[#07865f] px-6 py-3 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60">
             {isLoading ? "Đang tải..." : "Áp dụng"}
           </button>
@@ -546,7 +546,7 @@ export function ViralDashboard() {
           </div>
         )}
         {message && !isLoading && syncProgress?.status !== "running" && <p aria-live="polite" className="mt-3 text-sm font-semibold text-[#07865f]">{message}</p>}
-        <p className="mt-3 text-xs leading-5 text-[#6883aa]"><strong>Mức tín hiệu</strong> lọc video theo lượt xem hiện tại: từ 50.000 hoặc từ 100.000 lượt xem. Điểm lan truyền vẫn được giữ trong bảng để so sánh mức vượt chuẩn của từng video.</p>
+        <p className="mt-3 text-xs leading-5 text-[#6883aa]"><strong>Mức tín hiệu</strong> lọc video theo lượt xem hiện tại: từ 20.000, 50.000 hoặc 100.000 lượt xem. Điểm lan truyền vẫn được giữ trong bảng để so sánh mức vượt chuẩn của từng video.</p>
       </section>
       <section className="mt-7 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {kpis.map(([label, value, hint], index) => (
