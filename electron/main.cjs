@@ -326,8 +326,9 @@ async function reloadGeminiBeforeNextPrompt(window) {
   });
   window.webContents.reload();
   await geminiLoadPromise;
+  await delay(1_500);
   for (let elapsed = 0; elapsed < 20_000; elapsed += 500) {
-    const ready = await window.webContents.executeJavaScript("Boolean(document.querySelector('textarea, [contenteditable=\"true\"]'))", true);
+    const ready = await window.webContents.executeJavaScript("!window.location.href.includes('accounts.google.com') && Boolean(document.querySelector('textarea, [contenteditable=\"true\"]'))", true);
     if (ready) return;
     await delay(500);
   }
@@ -483,6 +484,10 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
   }
   const images = {};
   for (let index = 0; index < slots.length; index += 1) {
+    if (index > 0) {
+      event.sender.send("gemini-browser:progress", { processed: index, total: slots.length, label: "Đang tải lại Gemini trước khi dán ảnh tiếp theo..." });
+      await reloadGeminiBeforeNextPrompt(window);
+    }
     const slot = slots[index];
     if (!slot || !["character", "background", "scene"].includes(slot.kind) || typeof slot.prompt !== "string") throw new Error("Prompt ảnh không hợp lệ.");
     event.sender.send("gemini-browser:progress", { processed: index, total: slots.length, label: slot.label ?? `Ảnh ${index + 1}` });
@@ -626,10 +631,6 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
     const url = saveGeminiImage(projectId, slot, dataUrl);
     images[`${slot.kind}-${Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0}`] = `${url}&v=${Date.now()}`;
     event.sender.send("gemini-browser:progress", { processed: index + 1, total: slots.length, label: slot.label ?? `Ảnh ${index + 1}` });
-    if (index < slots.length - 1) {
-      event.sender.send("gemini-browser:progress", { processed: index + 1, total: slots.length, label: "Đang tải lại Gemini trước ảnh tiếp theo..." });
-      await reloadGeminiBeforeNextPrompt(window);
-    }
   }
   return { status: "completed", images };
 });
@@ -644,6 +645,10 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
   await waitForGeminiLoad(window);
   const videos = {};
   for (let index = 0; index < slots.length; index += 1) {
+    if (index > 0) {
+      event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang tải lại Gemini trước khi dán lệnh video tiếp theo..." });
+      await reloadGeminiBeforeNextPrompt(window);
+    }
     const slot = slots[index];
     if (!Number.isInteger(slot?.sceneNumber) || typeof slot.visualBlock !== "string" || typeof slot.actionBlock !== "string" || typeof slot.audioBlock !== "string") throw new Error("Dữ liệu phân cảnh tạo video không hợp lệ.");
     const sceneNumber = slot.sceneNumber;
@@ -756,10 +761,6 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
     const url = saveGeminiVideo(projectId, sceneNumber, buffer);
     videos[`scene-${sceneNumber}`] = `${url}&v=${Date.now()}`;
     event.sender.send("gemini-browser:video-progress", { processed: index + 1, total: slots.length, label: slot.label ?? `Cảnh ${sceneNumber}` });
-    if (index < slots.length - 1) {
-      event.sender.send("gemini-browser:video-progress", { processed: index + 1, total: slots.length, label: "Đang tải lại Gemini trước cảnh tiếp theo..." });
-      await reloadGeminiBeforeNextPrompt(window);
-    }
   }
   return { status: "completed", videos };
 });
