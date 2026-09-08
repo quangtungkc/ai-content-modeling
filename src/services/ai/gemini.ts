@@ -194,13 +194,28 @@ function normalizeModelingIdeas(value: unknown): unknown {
 }
 
 function normalizeDevelopedIdea(value: unknown): unknown {
-  const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
-  const storyboard = Array.isArray(source.storyboard)
-    ? source.storyboard.map((scene, index) => {
-      const item = scene && typeof scene === "object" ? scene as Record<string, unknown> : {};
-      const parsedNumber = typeof item.sceneNumber === "number" && Number.isFinite(item.sceneNumber) ? item.sceneNumber : index + 1;
-      return { ...item, sceneNumber: parsedNumber > 0 ? Math.trunc(parsedNumber) : index + 1 };
-    })
-    : [];
-  return { ...source, schemaVersion: "1.0", storyboard };
+  const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const source = raw.content && typeof raw.content === "object" ? raw.content as Record<string, unknown> : raw;
+  const record = (item: unknown) => item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+  const text = (item: unknown, fallback: string) => typeof item === "string" && item.trim() ? item : fallback;
+  const storyboard = Array.isArray(source.storyboard) ? source.storyboard.map((scene, index) => {
+    const item = record(scene);
+    const parsedNumber = typeof item.sceneNumber === "number" && Number.isFinite(item.sceneNumber) ? item.sceneNumber : index + 1;
+    return {
+      sceneNumber: parsedNumber > 0 ? Math.trunc(parsedNumber) : index + 1,
+      visualBlock: text(item.visualBlock ?? item.visual ?? item.image, "Chưa có mô tả hình ảnh cho cảnh này."),
+      actionBlock: text(item.actionBlock ?? item.action, "Chưa có mô tả hành động cho cảnh này."),
+      audioBlock: text(item.audioBlock ?? item.audio, "Không có âm thanh đặc biệt."),
+      englishPrompt: text(item.englishPrompt ?? item.prompt, "Create a consistent scene using the approved character and background designs."),
+    };
+  }) : [];
+  return {
+    schemaVersion: "1.0",
+    deconstruction: record(source.deconstruction),
+    artDirection: record(source.artDirection),
+    characterDesign: record(source.characterDesign ?? source.characters),
+    backgroundDesign: record(source.backgroundDesign ?? source.background),
+    storyboard,
+    safetyReview: record(source.safetyReview),
+  };
 }
