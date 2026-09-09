@@ -760,7 +760,13 @@ async function waitForFlowAsset(window, filename) {
 
 async function uploadFlowAsset(window, filePath) {
   const filename = path.basename(filePath);
-  if (await findFlowAssetPoint(window, filename)) return;
+  if (await findFlowAssetPoint(window, filename)) {
+    await clickFlowControl(window, ["Thêm thành phần vào ô nhập câu lệnh", "Add media to prompt", "Thêm nội dung nghe nhìn", "Add media"], false);
+    const existingAssetPoint = await waitForFlowControlPoint(window, [filename], false, 20_000);
+    await dispatchBrowserClick(window, existingAssetPoint);
+    await delay(700);
+    return;
+  }
   await clickFlowControl(window, ["Thêm thành phần vào ô nhập câu lệnh", "Add media to prompt", "Thêm nội dung nghe nhìn", "Add media"], false);
   const uploadPoint = await waitForFlowControlPoint(window, ["Tải nội dung nghe nhìn lên", "Upload media", "Upload files", "Upload"], false);
   if (!window.webContents.debugger.isAttached()) window.webContents.debugger.attach("1.3");
@@ -814,8 +820,8 @@ async function clearFlowComposer(window) {
   }
 }
 
-async function ensureFlowMode(window, mode) {
-  const wanted = mode.toLowerCase();
+async function ensureFlowMode(window, modes) {
+  const wanted = (Array.isArray(modes) ? modes : [modes]).map((mode) => mode.toLowerCase());
   for (let elapsed = 0; elapsed < 15_000; elapsed += 500) {
     const state = await window.webContents.executeJavaScript(`(() => {
       const roots = [document];
@@ -833,7 +839,7 @@ async function ensureFlowMode(window, mode) {
       const labelsFor = (element) => [element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent]
         .filter(Boolean).map((value) => value.replace(/\\s+/g, ' ').trim().toLowerCase());
       const candidate = roots.flatMap((root) => [...root.querySelectorAll('[role="radio"]')])
-        .find((element) => isVisible(element) && labelsFor(element).some((label) => label === ${JSON.stringify(wanted)} || label.endsWith(' ' + ${JSON.stringify(wanted)}) || label.endsWith(${JSON.stringify(wanted)})));
+        .find((element) => isVisible(element) && labelsFor(element).some((label) => ${JSON.stringify(wanted)}.some((value) => label === value || label.endsWith(' ' + value) || label.endsWith(value))));
       if (!candidate) return { selected: false, point: null };
       const bounds = candidate.getBoundingClientRect();
       return { selected: candidate.getAttribute('aria-checked') === 'true', point: { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 } };
@@ -846,12 +852,12 @@ async function ensureFlowMode(window, mode) {
     }
     await delay(500);
   }
-  throw new Error('Không tìm thấy chế độ ' + mode + ' trong cài đặt Google Flow.');
+  throw new Error('Không tìm thấy chế độ ' + wanted.join(' / ') + ' trong cài đặt Google Flow.');
 }
 
 async function configureFlowVideo(window) {
   await clickFlowControl(window, ["Điều kiện kích hoạt cài đặt", "Video settings", "Settings"], false);
-  await ensureFlowMode(window, "Video");
+  await ensureFlowMode(window, ["Video"]);
   await clickFlowControl(window, ["9:16"], true);
   await clickFlowControl(window, ["Chọn nhóm mô hình", "Select model", "Model"], false);
   await clickFlowControl(window, ["Veo 3.1 - Lite [Lower Priority]"], true, 15_000);
@@ -864,12 +870,12 @@ async function configureFlowVideo(window) {
   await dispatchBrowserEscape(window);
 }
 
-async function configureFlowImage(window, aspectRatio) {
+async function configureFlowImage(window) {
   await clickFlowControl(window, ["Điều kiện kích hoạt cài đặt", "Video settings", "Settings"], false);
-  await clickFlowControl(window, ["Image", "Ảnh"], false);
-  const supportedAspectRatios = new Set(["16:9", "4:3", "1:1", "3:4", "9:16"]);
-  const flowAspectRatio = supportedAspectRatios.has(aspectRatio) ? aspectRatio : "9:16";
-  await clickFlowControl(window, [flowAspectRatio], true);
+  await ensureFlowMode(window, ["Image", "Ảnh"]);
+  await clickFlowControl(window, ["9:16"], true);
+  await clickFlowControl(window, ["Chọn nhóm mô hình", "Select model", "Model"], false);
+  await clickFlowControl(window, ["Nano Banana Pro"], true, 15_000);
   await clickFlowControl(window, ["x1"], true);
   await dispatchBrowserEscape(window);
 }
@@ -1308,25 +1314,22 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
 async function runFlowImageJob(event, projectId, channelId, slots) {
   event.sender.send("flow-browser:image-progress", { processed: 0, total: slots.length, label: "Đang mở Google Flow..." });
   const window = createFlowWindow();
-  const projectUrl = await createFlowProject(window);
   const images = {};
   const characterReferencePath = findChannelMainCharacterImagePath(channelId);
   for (let index = 0; index < slots.length; index += 1) {
-    if (index > 0) {
-      event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang quay về màn hình tạo ảnh Google Flow trước ảnh tiếp theo..." });
-      await reloadFlowProject(window, projectUrl);
-    }
     const slot = slots[index];
-    if (!slot || !["character", "background", "scene"].includes(slot.kind) || typeof slot.prompt !== "string" || !slot.prompt.trim()) {
+    if (!slot || slot.kind !== "scene" || !Number.isInteger(slot.sceneNumber) || typeof slot.prompt !== "string" || !slot.prompt.trim()) {
       throw new Error("Dữ liệu ảnh tạo bằng Google Flow không hợp lệ.");
     }
+    event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang mở project Google Flow riêng cho " + (slot.label || "ảnh") + "..." });
+    const projectUrl = await createFlowProject(window);
     event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: slot.label || "Ảnh " + (index + 1) });
     let slotError = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         await clearFlowComposer(window);
         event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang cấu hình Google Flow cho " + (slot.label || "ảnh") + "..." });
-        await configureFlowImage(window, slot.aspectRatio || "9:16");
+        await configureFlowImage(window);
         if (characterReferencePath) {
           event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang gắn ảnh nhân vật chính làm tham chiếu..." });
           await uploadFlowAsset(window, characterReferencePath);
@@ -1366,8 +1369,10 @@ async function runFlowImageJob(event, projectId, channelId, slots) {
     const { buffer, mimeType } = await getFlowImageBuffer(window, result);
     const url = saveFlowImage(projectId, slot, buffer, mimeType);
     const sceneNumber = Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0;
+    const savedPath = findGeneratedImagePath(projectId, "scene", sceneNumber);
+    if (!fs.existsSync(savedPath) || fs.statSync(savedPath).size < 1024) throw new Error("Ảnh cảnh " + sceneNumber + " chưa được lưu thành công vào app.");
     images[`${slot.kind}-${sceneNumber}`] = `${url}&v=${Date.now()}`;
-    event.sender.send("flow-browser:image-progress", { processed: index + 1, total: slots.length, label: slot.label || "Ảnh " + (index + 1) });
+    event.sender.send("flow-browser:image-progress", { processed: index + 1, total: slots.length, label: "Đã tải và lưu " + (slot.label || "ảnh") + " vào app" });
         slotError = null;
         break;
       } catch (error) {
