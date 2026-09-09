@@ -14,6 +14,7 @@ type ActivityStep = {
 type AutomationRun = {
   id: string;
   sourceVideoId: string;
+  ideaId: string | null;
   projectId: string | null;
   status: "RUNNING" | "SUCCEEDED" | "FAILED";
   settings: { artStyle: string; aspectRatio: string };
@@ -21,11 +22,13 @@ type AutomationRun = {
   error: string | null;
   startedAt: string;
   completedAt: string | null;
+  finalVideoUrl: string | null;
 };
 
 export function ActivityHistory() {
   const [runs, setRuns] = useState<AutomationRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState("");
+  const [expandedStepKey, setExpandedStepKey] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -46,6 +49,19 @@ export function ActivityHistory() {
   }, []);
 
   const selectedRun = runs.find((run) => run.id === selectedRunId) ?? null;
+  const completedSteps = selectedRun?.steps.filter((step) => step.status === "completed").length ?? 0;
+  const activeStep = selectedRun?.steps.find((step) => step.status === "running") ?? null;
+
+  useEffect(() => {
+    if (!selectedRun) {
+      setExpandedStepKey("");
+      return;
+    }
+    const preferredStep = selectedRun.steps.find((step) => step.status === "running" || step.status === "failed")
+      ?? selectedRun.steps[selectedRun.steps.length - 1];
+    setExpandedStepKey(preferredStep?.key ?? "");
+  }, [selectedRunId, selectedRun]);
+
   return (
     <section className="mx-auto max-w-[1150px]">
       <header>
@@ -67,6 +83,7 @@ export function ActivityHistory() {
                 </div>
                 <p className="mt-2 text-xs text-[#6883aa]">{formatDate(run.startedAt)}</p>
                 <p className="mt-1 text-xs text-[#7990b0]">{run.settings.artStyle} · {run.settings.aspectRatio}</p>
+                <p className="mt-2 text-xs font-bold text-[#7c3aed]">{run.steps.filter((step) => step.status === "completed").length}/{run.steps.length} bước đã xong</p>
               </button>
             ))}
           </div>
@@ -80,23 +97,46 @@ export function ActivityHistory() {
                 </div>
                 <StatusBadge status={selectedRun.status} />
               </div>
+              <div className="mt-4 rounded-lg border border-violet-100 bg-violet-50 px-4 py-3 text-sm text-violet-900">
+                <p className="font-extrabold">Tiến độ: {completedSteps}/{selectedRun.steps.length} bước đã hoàn tất</p>
+                {activeStep && <p className="mt-1">Đang thực hiện: {activeStep.label}</p>}
+                {selectedRun.status === "SUCCEEDED" && <p className="mt-1">Quy trình đã hoàn thành toàn bộ.</p>}
+              </div>
               <div className="mt-5 rounded-lg bg-[#f7f9fc] p-4 text-sm text-[#0b3262]">
                 <p><strong>Phong cách:</strong> {selectedRun.settings.artStyle}</p>
                 <p className="mt-1"><strong>Khung hình:</strong> {selectedRun.settings.aspectRatio}</p>
+                {selectedRun.ideaId && <p className="mt-1"><strong>Modeling Idea:</strong> {selectedRun.ideaId}</p>}
                 {selectedRun.projectId && <p className="mt-1"><strong>Content Project:</strong> {selectedRun.projectId}</p>}
               </div>
               <div className="mt-5 space-y-3">
                 {selectedRun.steps.map((step, index) => (
-                  <div key={step.key} className="flex gap-3 rounded-lg border border-[#e4ebf4] p-3">
-                    <div className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-extrabold ${step.status === "completed" ? "bg-emerald-100 text-emerald-700" : step.status === "failed" ? "bg-rose-100 text-rose-700" : step.status === "running" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-500"}`}>{step.status === "completed" ? "✓" : step.status === "failed" ? "!" : index + 1}</div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center justify-between gap-2"><p className="font-bold text-[#0b3262]">{step.label}</p><span className="text-xs font-semibold text-[#6883aa]">{stepStatusLabel(step.status)}</span></div>
-                      {step.detail && <p className="mt-1 text-sm text-[#6883aa]">{step.detail}</p>}
-                      {step.error && <p className="mt-1 text-sm text-rose-700">{step.error}</p>}
-                    </div>
+                  <div key={step.key} className="rounded-lg border border-[#e4ebf4]">
+                    <button type="button" onClick={() => setExpandedStepKey((key) => key === step.key ? "" : step.key)} className="flex w-full items-center gap-3 p-3 text-left">
+                      <div className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-extrabold ${step.status === "completed" ? "bg-emerald-100 text-emerald-700" : step.status === "failed" ? "bg-rose-100 text-rose-700" : step.status === "running" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-500"}`}>{step.status === "completed" ? "✓" : step.status === "failed" ? "!" : index + 1}</div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center justify-between gap-2"><p className="font-bold text-[#0b3262]">{step.label}</p><span className="text-xs font-semibold text-[#6883aa]">{stepStatusLabel(step.status)}</span></div>
+                        <p className="mt-1 text-xs font-semibold text-violet-600">{expandedStepKey === step.key ? "Thu gọn kết quả" : "Xem kết quả bước"}</p>
+                      </div>
+                      <span className="text-lg text-[#6883aa]" aria-hidden="true">{expandedStepKey === step.key ? "⌃" : "⌄"}</span>
+                    </button>
+                    {expandedStepKey === step.key && <div className="border-t border-[#e4ebf4] bg-[#fbfcfe] px-4 py-3 text-sm">
+                      <p className="font-extrabold text-[#0b3262]">Kết quả bước</p>
+                      {step.detail && <p className="mt-1 text-[#6883aa]">{step.detail}</p>}
+                      {step.error && <p className="mt-1 text-rose-700">{step.error}</p>}
+                      {(step.startedAt || step.completedAt) && <p className="mt-2 text-xs text-[#7990b0]">{step.startedAt && `Bắt đầu: ${formatDate(step.startedAt)}`}{step.completedAt && ` · Kết thúc: ${formatDate(step.completedAt)}`}</p>}
+                      {step.key === "final-video" && selectedRun.finalVideoUrl && <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                        <p className="font-extrabold text-emerald-800">Video kết quả cuối cùng</p>
+                        <video controls preload="metadata" src={selectedRun.finalVideoUrl} className="mt-3 max-h-[420px] w-full rounded-lg bg-black" />
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <a href={selectedRun.finalVideoUrl} target="_blank" rel="noreferrer" className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white">Mở video kết quả</a>
+                          <a href={`${selectedRun.finalVideoUrl}&download=1`} download="video-modeling.mp4" className="rounded-lg border border-emerald-300 px-3 py-2 text-xs font-bold text-emerald-800">Tải video</a>
+                        </div>
+                      </div>}
+                    </div>}
                   </div>
                 ))}
               </div>
+              {selectedRun.finalVideoUrl && selectedRun.steps.every((step) => step.key !== "final-video" || step.status !== "completed") && <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">Video cuối đã có sẵn: mở rộng bước “Ghép và xuất video hoàn chỉnh” để xem hoặc tải xuống.</div>}
               {selectedRun.error && <p className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{selectedRun.error}</p>}
             </article>
           )}

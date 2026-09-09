@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getRequiredSession } from "@/lib/auth/provider";
 import { AppError, toErrorResponse } from "@/lib/errors";
 import { db } from "@/lib/db";
+import { hasProjectFinalVideo } from "@/modules/assets/image-generation-service";
 
 const stepSchema = z.object({
   key: z.string().min(1).max(80),
@@ -103,7 +104,14 @@ export async function GET() {
   try {
     const session = await getRequiredSession();
     await ensureAutomationRunTable();
-    return Response.json({ data: await db.automationRun.findMany({ where: { userId: session.userId }, orderBy: { startedAt: "desc" }, take: 50 }), requestId });
+    const runs = await db.automationRun.findMany({ where: { userId: session.userId }, orderBy: { startedAt: "desc" }, take: 50 });
+    const data = await Promise.all(runs.map(async (run) => ({
+      ...run,
+      finalVideoUrl: run.status === "SUCCEEDED" && run.projectId && await hasProjectFinalVideo(run.projectId)
+        ? `/api/v1/projects/${run.projectId}/videos?final=1`
+        : null,
+    })));
+    return Response.json({ data, requestId });
   } catch (error) {
     return toErrorResponse(normalize(error), requestId);
   }
