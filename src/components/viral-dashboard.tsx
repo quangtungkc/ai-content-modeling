@@ -8,6 +8,7 @@ type Dashboard = {
   videos: Array<{
     id: string;
     url: string;
+    modelingVideoUrl: string | null;
     thumbnailUrl?: string | null;
     publishedAt: string;
     score: number;
@@ -918,6 +919,16 @@ export function ViralDashboard() {
                     >
                       Mở video
                     </a>
+                    {video.modelingVideoUrl && (
+                      <a
+                        href={video.modelingVideoUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mr-4 text-xs font-bold text-[#7c3aed]"
+                      >
+                        Video modeling
+                      </a>
+                    )}
                     <button onClick={() => video.analysis ? viewStoredAnalysis(video) : void analyzeVideo(video.id)} disabled={analyzingVideoId === video.id} className="text-xs font-bold text-[#0b5799] disabled:cursor-wait disabled:opacity-60">
                       {analyzingVideoId === video.id ? "Đang phân tích..." : video.analysis ? "Xem phân tích" : "Phân tích"}
                     </button>

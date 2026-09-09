@@ -1,4 +1,4 @@
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { db } from "@/lib/db";
 import { AppError } from "@/lib/errors";
@@ -67,4 +67,17 @@ export async function readProjectFinalVideo(projectId: string, userId: string) {
     }
   }
   throw new AppError("VIDEO_NOT_FOUND", "Chưa có video hoàn chỉnh.", 404);
+}
+
+export async function hasProjectFinalVideo(projectId: string) {
+  for (const rootPath of [videoRoot(), legacyVideoRoot()]) {
+    const target = path.join(rootPath, projectId, "final.mp4");
+    try {
+      const metadata = await stat(target);
+      if (metadata.isFile() && metadata.size > 1024) return true;
+    } catch {
+      // Try the legacy data location when necessary.
+    }
+  }
+  return false;
 }
