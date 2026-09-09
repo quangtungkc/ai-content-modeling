@@ -34,6 +34,7 @@ export async function analyzeCompetitorVideo(videoId: string, userId: string) {
     videoDuration: channel.videoDurationSec,
     hasDialogue: channel.hasDialogue,
     creativeInstructions: channel.creativeInstructions,
+    hashtags: channel.hashtags,
     mainCharacterImageAvailable: Boolean(channel.mainCharacterImageKey),
     mainCharacterImageName: channel.mainCharacterImageName,
     timezone: channel.timezone,

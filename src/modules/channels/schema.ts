@@ -13,6 +13,7 @@ export const channelInputSchema = z.object({
   videoDuration: z.coerce.number().int().positive().max(86400).optional(),
   hasDialogue: z.boolean().default(false),
   creativeInstructions: z.string().trim().max(5000).optional().default(""),
+  hashtags: z.string().trim().max(500).optional().default(""),
   timezone: z.string().trim().min(1).max(80),
 });
 

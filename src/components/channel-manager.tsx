@@ -16,6 +16,7 @@ type Channel = {
   videoDuration: string;
   hasDialogue: boolean;
   creativeInstructions: string;
+  hashtags: string;
   timezone: string;
   mainCharacterImageUrl: string | null;
   mainCharacterImageName: string;
@@ -46,6 +47,7 @@ const emptyChannel: Omit<Channel, "id"> = {
   videoDuration: "",
   hasDialogue: false,
   creativeInstructions: "",
+  hashtags: "",
   timezone: "UTC",
   mainCharacterImageUrl: null,
   mainCharacterImageName: "",
@@ -64,6 +66,7 @@ const fields: Array<
   ["contentStyle", "Phong cách nội dung", "Ví dụ: Hài ngắn"],
   ["visualStyle", "Phong cách hình ảnh", "Ví dụ: 3D cách điệu"],
   ["videoDuration", "Thời lượng video (giây)", "Ví dụ: 30"],
+  ["hashtags", "Hashtag kênh", "Ví dụ: #funny #animation #shorts"],
   ["timezone", "Timezone", "e.g. Asia/Ho_Chi_Minh"],
 ];
 
@@ -83,6 +86,7 @@ function toUiChannel(value: Record<string, unknown>): Channel {
       value.videoDurationSec == null ? "" : String(value.videoDurationSec),
     hasDialogue: Boolean(value.hasDialogue),
     creativeInstructions: String(value.creativeInstructions ?? ""),
+    hashtags: String(value.hashtags ?? ""),
     timezone: String(value.timezone ?? "UTC"),
     mainCharacterImageUrl: typeof value.mainCharacterImageUrl === "string" ? value.mainCharacterImageUrl : null,
     mainCharacterImageName: String(value.mainCharacterImageName ?? ""),

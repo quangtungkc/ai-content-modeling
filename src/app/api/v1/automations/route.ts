@@ -19,6 +19,10 @@ const stepSchema = z.object({
 const settingsSchema = z.object({
   artStyle: z.string().trim().min(1).max(100),
   aspectRatio: z.enum(["9:16", "16:9", "1:1", "4:5"]),
+  postText: z.string().trim().max(500).optional(),
+  hashtags: z.string().trim().max(500).optional(),
+  language: z.string().trim().max(80).optional(),
+  targetCountry: z.string().trim().max(120).optional(),
 });
 const createSchema = z.object({
   sourceVideoId: z.string().min(1),
@@ -32,6 +36,7 @@ const updateSchema = z.object({
   ideaId: z.string().nullable().optional(),
   projectId: z.string().nullable().optional(),
   error: z.string().max(1000).nullable().optional(),
+  settings: settingsSchema.optional(),
 });
 
 let ensureTablePromise: Promise<unknown> | null = null;
@@ -166,6 +171,7 @@ export async function PATCH(request: Request) {
         ...(input.ideaId !== undefined ? { ideaId: input.ideaId } : {}),
         ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
         ...(input.error !== undefined ? { error: input.error } : {}),
+        ...(input.settings ? { settings: input.settings as Prisma.InputJsonValue } : {}),
         ...(completedAt ? { completedAt } : {}),
       },
     });

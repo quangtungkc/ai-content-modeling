@@ -26,8 +26,9 @@ BƯỚC 3 — MẠCH KỊCH BẢN PHÂN CẢNH:
 
 YÊU CẦU ĐẦU RA:
 - Trả đúng một JSON hợp lệ, không Markdown, không bình luận, có đúng một phần tử modelingDirections.
-- Viết toàn bộ nội dung bằng tiếng Việt.
-- modelingDirections phải có các trường title, coreConcept, script, characterDesign, setting, artStyle, sourceMechanism, whatIsPreserved, whatIsChanged, targetMarketAdaptation, similarityRisk, whyWorthDeveloping.
+- Viết các trường phân tích bằng tiếng Việt; riêng postText phải viết đúng ngôn ngữ của kênh.
+- modelingDirections phải có các trường title, coreConcept, script, characterDesign, setting, artStyle, sourceMechanism, whatIsPreserved, whatIsChanged, targetMarketAdaptation, similarityRisk, whyWorthDeveloping, postText.
+- postText là caption ngắn sẵn sàng đăng kèm video, viết đúng ngôn ngữ channelDNA.language và có cách diễn đạt phù hợp channelDNA.targetCountry. Nội dung phải bám sát tình huống video mới, tự nhiên, thu hút và không chứa hashtag vì hashtag kênh sẽ được ghép riêng.
 - script, characterDesign và setting phải đủ chi tiết để bước sau có thể chuyển thẳng thành storyboard và prompt tạo ảnh/video.
 - Không nêu tên, bắt chước hoặc ám chỉ studio, thương hiệu, nghệ sĩ, thương hiệu phong cách hay nhân vật có bản quyền; chỉ dùng thuộc tính hình ảnh chung.
 
@@ -177,7 +178,7 @@ const modelingIdeasResponseSchema: Record<string, unknown> = {
   type: "OBJECT",
   properties: {
     schemaVersion: { type: "STRING" },
-    modelingDirections: { type: "ARRAY", minItems: 1, maxItems: 1, items: { type: "OBJECT", properties: { title: { type: "STRING" }, coreConcept: { type: "STRING" }, script: { type: "STRING" }, characterDesign: { type: "STRING" }, setting: { type: "STRING" }, artStyle: { type: "STRING" }, sourceMechanism: { type: "STRING" }, whatIsPreserved: { type: "ARRAY", items: { type: "STRING" } }, whatIsChanged: { type: "ARRAY", items: { type: "STRING" } }, targetMarketAdaptation: { type: "STRING" }, similarityRisk: { type: "STRING" }, whyWorthDeveloping: { type: "STRING" } }, required: ["title", "coreConcept", "script", "characterDesign", "setting", "artStyle", "sourceMechanism", "whatIsPreserved", "whatIsChanged", "targetMarketAdaptation", "similarityRisk", "whyWorthDeveloping"] } },
+    modelingDirections: { type: "ARRAY", minItems: 1, maxItems: 1, items: { type: "OBJECT", properties: { title: { type: "STRING" }, coreConcept: { type: "STRING" }, script: { type: "STRING" }, characterDesign: { type: "STRING" }, setting: { type: "STRING" }, artStyle: { type: "STRING" }, sourceMechanism: { type: "STRING" }, whatIsPreserved: { type: "ARRAY", items: { type: "STRING" } }, whatIsChanged: { type: "ARRAY", items: { type: "STRING" } }, targetMarketAdaptation: { type: "STRING" }, similarityRisk: { type: "STRING" }, whyWorthDeveloping: { type: "STRING" }, postText: { type: "STRING" } }, required: ["title", "coreConcept", "script", "characterDesign", "setting", "artStyle", "sourceMechanism", "whatIsPreserved", "whatIsChanged", "targetMarketAdaptation", "similarityRisk", "whyWorthDeveloping", "postText"] } },
   },
   required: ["schemaVersion", "modelingDirections"],
 };
@@ -280,6 +281,7 @@ function normalizeModelingIdeas(value: unknown): unknown {
       targetMarketAdaptation: text(sourceItem.targetMarketAdaptation),
       similarityRisk: sourceItem.similarityRisk === "high" || sourceItem.similarityRisk === "medium" ? sourceItem.similarityRisk : "low",
       whyWorthDeveloping: text(sourceItem.whyWorthDeveloping, sourceItem.reason),
+      postText: text(sourceItem.postText, sourceItem.caption, sourceItem.socialCaption, sourceItem.title),
     }],
   };
 }

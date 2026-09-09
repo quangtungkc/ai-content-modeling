@@ -22,7 +22,7 @@ type Dashboard = {
     };
   }>;
 };
-type ChannelOption = { id: string; name: string; mainCharacterImageUrl?: string | null; mainCharacterImageName?: string };
+type ChannelOption = { id: string; name: string; targetCountry?: string; language?: string; hashtags?: string | null; mainCharacterImageUrl?: string | null; mainCharacterImageName?: string };
 type CompetitorOption = { id: string; handle: string; displayName: string | null; platform: string; url: string };
 type SyncProgress = {
   syncId: string;
@@ -70,10 +70,10 @@ type VideoAnalysisResult = {
     whyItWorks: string[];
   };
 };
-type ModelingIdeaResult = { id: string; title: string; coreConcept: string; script: string; characterDesign: string; setting: string; artStyle: string; sourceMechanism: string; whatIsPreserved: string[]; whatIsChanged: string[]; targetMarketAdaptation: string; similarityRisk: "low" | "medium" | "high"; whyWorthDeveloping: string };
+type ModelingIdeaResult = { id: string; title: string; coreConcept: string; script: string; characterDesign: string; setting: string; artStyle: string; sourceMechanism: string; whatIsPreserved: string[]; whatIsChanged: string[]; targetMarketAdaptation: string; similarityRisk: "low" | "medium" | "high"; whyWorthDeveloping: string; postText: string };
 type ContentProjectResult = { id: string; artDirection: Record<string, unknown>; characterDesign: Record<string, unknown>; backgroundDesign: Record<string, unknown>; scenes: Array<{ sceneNumber: number; visualBlock: string; actionBlock: string; audioBlock: string; englishPrompt: string }> };
 type AutomationStep = { key: string; label: string; status: "pending" | "running" | "completed" | "failed"; detail?: string; error?: string; startedAt?: string; completedAt?: string };
-type AutomationSettings = { artStyle: string; aspectRatio: "9:16" | "16:9" | "1:1" | "4:5" };
+type AutomationSettings = { artStyle: string; aspectRatio: "9:16" | "16:9" | "1:1" | "4:5"; postText?: string; hashtags?: string; language?: string; targetCountry?: string };
 type AutomationRunResult = { id: string; status: "RUNNING" | "SUCCEEDED" | "FAILED"; steps: AutomationStep[] };
 type SelectedModelingVideo = { videoId: string; modelingUrl: string; sourceUrl: string };
 const accents = [
@@ -691,7 +691,7 @@ export function ViralDashboard() {
     if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể tạo phiên chạy tự động.");
     return body.data;
   }
-  async function updateAutomationRun(runId: string, steps: AutomationStep[], fields: { status?: "RUNNING" | "SUCCEEDED" | "FAILED"; ideaId?: string; projectId?: string; error?: string | null } = {}) {
+  async function updateAutomationRun(runId: string, steps: AutomationStep[], fields: { status?: "RUNNING" | "SUCCEEDED" | "FAILED"; ideaId?: string; projectId?: string; error?: string | null; settings?: AutomationSettings } = {}) {
     const response = await fetch("/api/v1/automations", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: runId, steps, ...fields }) });
     const body = await response.json() as { data?: AutomationRunResult; error?: { message?: string } };
     if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể cập nhật lịch sử chạy.");
@@ -726,7 +726,16 @@ export function ViralDashboard() {
       const idea = await generateModelingIdea();
       if (!idea) throw new Error("Không tạo được Modeling Idea.");
       await changeStep(activeStep, "completed", `Đã tạo: ${idea.title}`);
-      await updateAutomationRun(runId, currentSteps, { ideaId: idea.id });
+      const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
+      const selectedChannel = channels.find((channel) => channel.id === selectedChannelId);
+      const publishingSettings: AutomationSettings = {
+        ...settings,
+        postText: idea.postText,
+        hashtags: selectedChannel?.hashtags?.trim() ?? "",
+        language: selectedChannel?.language ?? "",
+        targetCountry: selectedChannel?.targetCountry ?? "",
+      };
+      await updateAutomationRun(runId, currentSteps, { ideaId: idea.id, settings: publishingSettings });
 
       activeStep = "content-project";
       await changeStep(activeStep, "running", "Đang phát triển ý tưởng thành Content Project...");

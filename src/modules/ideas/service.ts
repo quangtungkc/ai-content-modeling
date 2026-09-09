@@ -14,7 +14,7 @@ export async function generateIdeasFromVideo(videoId: string, userId: string, ar
   if (!analysisRecord) throw new AppError("ANALYSIS_REQUIRED", "Video cần được phân tích trước khi tạo modeling ideas.", 409);
   const analysis = videoAnalysisSchema.parse(analysisRecord.content);
   const channel = video.competitor.channel;
-  const channelDNA: ChannelDNA = { name: channel.name, topic: channel.topic, subTopic: channel.subTopic, targetCountry: channel.targetCountry, language: channel.language, audience: channel.audience, contentStyle: channel.contentStyle, visualStyle: channel.visualStyle, videoDuration: channel.videoDurationSec, hasDialogue: channel.hasDialogue, creativeInstructions: channel.creativeInstructions, mainCharacterImageAvailable: Boolean(channel.mainCharacterImageKey), mainCharacterImageName: channel.mainCharacterImageName, timezone: channel.timezone };
+  const channelDNA: ChannelDNA = { name: channel.name, topic: channel.topic, subTopic: channel.subTopic, targetCountry: channel.targetCountry, language: channel.language, audience: channel.audience, contentStyle: channel.contentStyle, visualStyle: channel.visualStyle, videoDuration: channel.videoDurationSec, hasDialogue: channel.hasDialogue, creativeInstructions: channel.creativeInstructions, hashtags: channel.hashtags, mainCharacterImageAvailable: Boolean(channel.mainCharacterImageKey), mainCharacterImageName: channel.mainCharacterImageName, timezone: channel.timezone };
   const videoContext: VideoContext = { id: video.id, url: video.url, caption: video.caption, thumbnailUrl: video.thumbnailUrl, publishedAt: video.publishedAt?.toISOString(), duration: video.duration };
   let aiService = provider;
   if (!aiService) {

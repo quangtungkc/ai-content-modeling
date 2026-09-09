@@ -136,6 +136,7 @@ model Channel {
   videoDurationSec      Int?
   hasDialogue           Boolean      @default(false)
   creativeInstructions  String?
+  hashtags              String?
   mainCharacterImageKey String?
   mainCharacterImageName String?
   mainCharacterImageMimeType String?

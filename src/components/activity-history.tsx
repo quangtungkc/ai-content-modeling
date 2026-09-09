@@ -17,7 +17,7 @@ type AutomationRun = {
   ideaId: string | null;
   projectId: string | null;
   status: "RUNNING" | "SUCCEEDED" | "FAILED";
-  settings: { artStyle: string; aspectRatio: string };
+  settings: { artStyle: string; aspectRatio: string; postText?: string; hashtags?: string; language?: string; targetCountry?: string };
   steps: ActivityStep[];
   error: string | null;
   startedAt: string;
@@ -32,6 +32,7 @@ export function ActivityHistory() {
   const [expandedStepKey, setExpandedStepKey] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [copiedRunId, setCopiedRunId] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -80,6 +81,14 @@ export function ActivityHistory() {
     } finally {
       setIsDeleting(false);
     }
+  }
+
+  async function copyPublishingContent(run: AutomationRun) {
+    const content = [run.settings.postText?.trim(), run.settings.hashtags?.trim()].filter(Boolean).join("\n\n");
+    if (!content) return;
+    await navigator.clipboard.writeText(content);
+    setCopiedRunId(run.id);
+    window.setTimeout(() => setCopiedRunId((id) => id === run.id ? "" : id), 1800);
   }
 
   return (
@@ -155,6 +164,20 @@ export function ActivityHistory() {
                           {selectedRun.sourceVideoUrl && <a href={selectedRun.sourceVideoUrl} target="_blank" rel="noreferrer" className="rounded-lg border border-emerald-300 px-3 py-2 text-xs font-bold text-emerald-800">Mở video gốc</a>}
                           <a href={`${selectedRun.finalVideoUrl}&download=1`} download="video-modeling.mp4" className="rounded-lg border border-emerald-300 px-3 py-2 text-xs font-bold text-emerald-800">Tải video</a>
                         </div>
+                        {(selectedRun.settings.postText || selectedRun.settings.hashtags) && <div className="mt-4 rounded-lg border border-emerald-200 bg-white p-3">
+                          <div>
+                            <p className="text-xs font-extrabold uppercase tracking-wide text-[#6883aa]">Text ngắn đăng kèm video</p>
+                            <p className="mt-1 whitespace-pre-wrap text-sm text-[#0b3262]">{selectedRun.settings.postText || "Chưa có nội dung."}</p>
+                            {(selectedRun.settings.language || selectedRun.settings.targetCountry) && <p className="mt-1 text-xs text-[#7990b0]">{[selectedRun.settings.language, selectedRun.settings.targetCountry].filter(Boolean).join(" · ")}</p>}
+                          </div>
+                          <div className="mt-3">
+                            <p className="text-xs font-extrabold uppercase tracking-wide text-[#6883aa]">Hashtag kênh</p>
+                            <p className="mt-1 whitespace-pre-wrap text-sm font-semibold text-violet-700">{selectedRun.settings.hashtags || "Chưa khai báo hashtag cho kênh."}</p>
+                          </div>
+                          <button type="button" onClick={() => void copyPublishingContent(selectedRun)} className="mt-3 rounded-lg bg-violet-600 px-3 py-2 text-xs font-bold text-white">
+                            {copiedRunId === selectedRun.id ? "Đã sao chép" : "Sao chép text + hashtag"}
+                          </button>
+                        </div>}
                       </div>}
                     </div>}
                   </div>
