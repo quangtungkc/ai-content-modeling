@@ -344,6 +344,19 @@ function createFlowWindow() {
   return flowWindow;
 }
 
+function closeFlowWindow() {
+  const window = flowWindow;
+  flowWindow = undefined;
+  flowLoadPromise = undefined;
+  if (window && !window.isDestroyed()) window.close();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.focus();
+  }
+}
+
 function waitForGeminiLoad(window) {
   if (window.webContents.isLoading() && geminiLoadPromise) return geminiLoadPromise;
   return Promise.resolve();
@@ -1343,7 +1356,7 @@ ipcMain.handle("flow-browser:run-image-job", async (event, value) => {
   if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || !Array.isArray(slots) || slots.length === 0) {
     throw new Error("Yêu cầu tạo ảnh bằng Google Flow không hợp lệ.");
   }
-  return runFlowImageJob(event, projectId, slots);
+  return runFlowImageJob(event, projectId, slots).finally(() => closeFlowWindow());
 });
 
 ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
@@ -1352,7 +1365,7 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
   if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || !Array.isArray(slots) || slots.length === 0) {
     throw new Error("Yêu cầu tạo video không hợp lệ.");
   }
-  return runFlowVideoJob(event, projectId, slots);
+  return runFlowVideoJob(event, projectId, slots).finally(() => closeFlowWindow());
 });
 
 ipcMain.handle("gemini-browser:open-flow", async () => {
