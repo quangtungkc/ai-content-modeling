@@ -58,6 +58,7 @@
   "build": {
     "appId": "vn.sabretn.ai-content-modeling",
     "productName": "Modeling AI",
+    "artifactName": "Modeling.AI.Setup.${version}.${ext}",
     "directories": {
       "output": "release2"
     },
