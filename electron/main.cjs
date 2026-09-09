@@ -5,6 +5,7 @@ const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
+const os = require("node:os");
 const path = require("node:path");
 
 // Keep development Electron and the packaged desktop app on the same local data store.
@@ -451,6 +452,77 @@ function saveGeminiVideo(projectId, sceneNumber, buffer) {
   return `/api/v1/projects/${projectId}/videos?sceneNumber=${sceneNumber}`;
 }
 
+function findFfmpegPath() {
+  const configured = process.env.MODELING_AI_FFMPEG_PATH;
+  if (configured && fs.existsSync(configured)) return configured;
+
+  const bundled = path.join(process.resourcesPath || "", "ffmpeg", "ffmpeg.exe");
+  if (fs.existsSync(bundled)) return bundled;
+
+  const capCutApps = path.join(process.env.LOCALAPPDATA || "", "CapCut", "Apps");
+  if (fs.existsSync(capCutApps)) {
+    const candidates = fs.readdirSync(capCutApps, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(capCutApps, entry.name, "ffmpeg.exe"))
+      .filter((candidate) => fs.existsSync(candidate))
+      .sort()
+      .reverse();
+    if (candidates[0]) return candidates[0];
+  }
+  throw new Error("Chưa tìm thấy bộ xử lý video. Hãy cài CapCut hoặc liên hệ hỗ trợ để cài runtime video.");
+}
+
+function runFfmpeg(args, allowFailure = false) {
+  const executable = findFfmpegPath();
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, { windowsHide: true });
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { output += chunk.toString(); });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0 || allowFailure) return resolve(output);
+      const detail = output.trim().slice(-1200);
+      reject(new Error(`Không thể xuất video. ${detail || `FFmpeg dừng với mã ${code}.`}`));
+    });
+  });
+}
+
+async function renderFinalVideo(event, projectId, sceneNumbers) {
+  const videoRoot = path.join(app.getPath("userData"), "generated-videos", projectId);
+  const sourceFiles = sceneNumbers.map((sceneNumber) => path.join(videoRoot, `scene-${sceneNumber}.mp4`));
+  for (const source of sourceFiles) {
+    if (!fs.existsSync(source) || fs.statSync(source).size < 1024) throw new Error("Thiếu video của một hoặc nhiều phân cảnh. Hãy tạo lại cảnh bị thiếu trước khi ghép.");
+  }
+
+  const finalPath = path.join(videoRoot, "final.mp4");
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "modeling-ai-edit-"));
+  try {
+    event.sender.send("video-editor:progress", { stage: "normalize", processed: 0, total: sourceFiles.length, label: "Đang chuẩn hóa video..." });
+    const normalized = [];
+    for (let index = 0; index < sourceFiles.length; index += 1) {
+      const target = path.join(temporaryRoot, `scene-${index + 1}.mp4`);
+      await runFfmpeg(["-y", "-hide_banner", "-i", sourceFiles[index], "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30", "-c:v", "h264_mf", "-b:v", "4500k", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", target]);
+      normalized.push(target);
+      event.sender.send("video-editor:progress", { stage: "normalize", processed: index + 1, total: sourceFiles.length, label: `Đã chuẩn hóa cảnh ${sceneNumbers[index]}.` });
+    }
+
+    event.sender.send("video-editor:progress", { stage: "render", processed: 0, total: 1, label: "Đang ghép các phân cảnh..." });
+    if (normalized.length === 1) {
+      fs.copyFileSync(normalized[0], finalPath);
+    } else {
+      const playlistPath = path.join(temporaryRoot, "playlist.txt");
+      fs.writeFileSync(playlistPath, normalized.map((file) => `file '${file.replace(/'/g, "'\\\\''")}'`).join("\n"), "utf8");
+      await runFfmpeg(["-y", "-hide_banner", "-f", "concat", "-safe", "0", "-i", playlistPath, "-c", "copy", "-movflags", "+faststart", finalPath]);
+    }
+    if (!fs.existsSync(finalPath) || fs.statSync(finalPath).size < 1024) throw new Error("Video cuối không hợp lệ sau khi xuất.");
+    event.sender.send("video-editor:progress", { stage: "completed", processed: 1, total: 1, label: "Đã xuất video hoàn chỉnh." });
+    return { status: "completed", video: `/api/v1/projects/${projectId}/videos?final=1&v=${Date.now()}` };
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
 async function dispatchBrowserClick(window, point) {
   const x = Math.round(point.x);
   const y = Math.round(point.y);
@@ -620,6 +692,8 @@ async function configureFlowVideo(window) {
   if (qualityPoint) { await dispatchBrowserClick(window, qualityPoint); await delay(350); }
   await clickFlowControl(window, ["6 giây", "6 seconds", "6s"], false);
   await clickFlowControl(window, ["x1"], true);
+  // Flow exposes the Start/End frame inputs after the other settings are set.
+  await clickFlowControl(window, ["Frames"], true);
   await dispatchBrowserEscape(window);
 }
 
@@ -667,9 +741,12 @@ async function reloadFlowProject(window, projectUrl) {
     const timeout = setTimeout(() => reject(new Error("Google Flow tải lại quá lâu.")), 60_000);
     window.webContents.once("did-finish-load", () => { clearTimeout(timeout); resolve(); });
   });
-  window.webContents.reload();
+  // Opening a generated clip leaves Flow in its video viewer. A browser reload
+  // preserves that viewer, so the next scene cannot find the video controls.
+  // Navigate to the original project URL instead to restore the composer.
+  await window.webContents.loadURL(targetUrl);
   await flowLoadPromise;
-  if (!window.webContents.getURL().includes("flow.google.com/project/")) {
+  if (!window.webContents.getURL().startsWith(targetUrl)) {
     await window.webContents.loadURL(targetUrl);
     await waitForFlowLoad(window);
   }
@@ -688,7 +765,9 @@ async function inspectFlowVideo(window, beforeSources = []) {
     "  const resourceSources = performance.getEntriesByType('resource').map((entry) => entry.name).filter((source) => /flow-content\\.google\\/video\\//i.test(source) && !before.has(source));",
     "  const thumbnail = roots.flatMap((root) => [...root.querySelectorAll('img[alt=\"Generated video thumbnail\"]')]).find((element) => { const bounds = element.getBoundingClientRect(); return bounds.width > 0 && bounds.height > 0; });",
     "  const text = document.body?.innerText || '';",
-    "  return { videoSource: video ? sourceFor(video) : (resourceSources[resourceSources.length - 1] || null), duration: video && Number.isFinite(video.duration) ? video.duration : null, videoCard: Boolean(thumbnail), failed: /không thành công|không tải được video|failed|couldn't load video|could not load video|generation failed/i.test(text) };",
+    "  const playButton = roots.flatMap((root) => [...root.querySelectorAll('button[aria-label=\"Play\"], button[aria-label=\"Phát\"]')]).find((element) => { const bounds = element.getBoundingClientRect(); return bounds.width > 0 && bounds.height > 0; });",
+    "  const playCircle = roots.flatMap((root) => [...root.querySelectorAll('[role=\"button\"]')]).find((element) => { const bounds = element.getBoundingClientRect(); return bounds.width > 0 && bounds.height > 0 && element.querySelector('mat-icon')?.textContent?.trim() === 'play_circle'; });",
+    "  return { videoSource: video ? sourceFor(video) : (resourceSources[resourceSources.length - 1] || null), duration: video && Number.isFinite(video.duration) ? video.duration : null, videoCard: Boolean(thumbnail), playButton: Boolean(playButton), playCircle: Boolean(playCircle), failed: /không thành công|không tải được video|failed|couldn't load video|could not load video|generation failed/i.test(text) };",
     "})()",
   ].join("\n");
   return window.webContents.executeJavaScript(expression, true);
@@ -699,9 +778,9 @@ async function waitForFlowVideo(window, beforeSources, timeout = 600_000) {
   for (let elapsed = 0; elapsed < timeout; elapsed += 2_000) {
     const state = await inspectFlowVideo(window, beforeSources);
     if (state?.videoSource) return state;
-    if (state?.videoCard && !openedVideoCard) {
+    if ((state?.videoCard || state?.playButton || state?.playCircle) && !openedVideoCard) {
       openedVideoCard = true;
-      await window.webContents.executeJavaScript("document.querySelector('img[alt=\"Generated video thumbnail\"]')?.click();", true);
+      await window.webContents.executeJavaScript("document.querySelector('img[alt=\"Generated video thumbnail\"]')?.click() || document.querySelector('button[aria-label=\"Play\"], button[aria-label=\"Phát\"]')?.click() || [...document.querySelectorAll('[role=\"button\"]')].find((element) => element.querySelector('mat-icon')?.textContent?.trim() === 'play_circle')?.click();", true);
       await delay(1_000);
       continue;
     }
@@ -943,7 +1022,7 @@ async function runFlowVideoJob(event, projectId, slots) {
   const videos = {};
   for (let index = 0; index < slots.length; index += 1) {
     if (index > 0) {
-      event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang tải lại project Google Flow trước cảnh tiếp theo..." });
+      event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang quay về màn hình tạo video Google Flow trước cảnh tiếp theo..." });
       await reloadFlowProject(window, projectUrl);
     }
     const slot = slots[index];
@@ -1030,6 +1109,28 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
     throw new Error("Yêu cầu tạo video không hợp lệ.");
   }
   return runFlowVideoJob(event, projectId, slots);
+});
+
+ipcMain.handle("gemini-browser:open-flow", async () => {
+  const window = createFlowWindow();
+  await waitForFlowLoad(window);
+  window.show();
+  window.focus();
+  return { status: "opened" };
+});
+
+ipcMain.handle("video-editor:render-final", async (event, value) => {
+  const projectId = value?.projectId;
+  const sceneNumbers = value?.sceneNumbers;
+  const isValidSceneList = Array.isArray(sceneNumbers)
+    && sceneNumbers.length > 0
+    && sceneNumbers.length <= 30
+    && sceneNumbers.every((sceneNumber) => Number.isInteger(sceneNumber) && sceneNumber > 0)
+    && new Set(sceneNumbers).size === sceneNumbers.length;
+  if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || !isValidSceneList) {
+    throw new Error("Yêu cầu ghép video không hợp lệ.");
+  }
+  return renderFinalVideo(event, projectId, sceneNumbers);
 });
 
 ipcMain.handle("gemini-browser:import-images", async (_event, value) => {

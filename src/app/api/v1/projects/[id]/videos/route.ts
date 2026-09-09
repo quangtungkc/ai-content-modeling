@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getRequiredSession } from "@/lib/auth/provider";
 import { AppError, toErrorResponse } from "@/lib/errors";
-import { readProjectVideo } from "@/modules/assets/image-generation-service";
+import { readProjectFinalVideo, readProjectVideo } from "@/modules/assets/image-generation-service";
 
 type Context = { params: Promise<{ id: string }> };
 const normalize = (error: unknown) => error instanceof Error && error.message === "AUTHENTICATION_REQUIRED" ? new AppError("AUTHENTICATION_REQUIRED", "Yêu cầu đăng nhập.", 401) : error;
@@ -11,7 +11,12 @@ export async function GET(request: Request, context: Context) {
   try {
     const session = await getRequiredSession();
     const { id } = await context.params;
-    const sceneNumber = Number(new URL(request.url).searchParams.get("sceneNumber"));
+    const searchParams = new URL(request.url).searchParams;
+    if (searchParams.get("final") === "1") {
+      const video = await readProjectFinalVideo(id, session.userId);
+      return new Response(video, { headers: { "Content-Type": "video/mp4", "Cache-Control": "private, max-age=3600", "Accept-Ranges": "bytes" } });
+    }
+    const sceneNumber = Number(searchParams.get("sceneNumber"));
     if (!Number.isInteger(sceneNumber) || sceneNumber < 1) throw new AppError("VALIDATION_ERROR", "Số phân cảnh không hợp lệ.", 400);
     const video = await readProjectVideo(id, session.userId, sceneNumber);
     return new Response(video, { headers: { "Content-Type": "video/mp4", "Cache-Control": "private, max-age=3600", "Accept-Ranges": "bytes" } });

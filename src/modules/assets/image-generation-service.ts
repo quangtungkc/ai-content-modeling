@@ -7,8 +7,12 @@ import { decryptSecret } from "@/lib/secrets";
 import { GeminiProvider } from "@/services/ai/gemini";
 
 export type GeneratedImageKind = "character" | "background" | "scene";
-const root = () => path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "Modeling AI", "generated-images");
-const videoRoot = () => path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "Modeling AI", "generated-videos");
+const appDataRoot = () => path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "ai-content-modeling");
+const legacyAppDataRoot = () => path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "Modeling AI");
+const root = () => path.join(appDataRoot(), "generated-images");
+const videoRoot = () => path.join(appDataRoot(), "generated-videos");
+const legacyImageRoot = () => path.join(legacyAppDataRoot(), "generated-images");
+const legacyVideoRoot = () => path.join(legacyAppDataRoot(), "generated-videos");
 const filePath = (projectId: string, kind: GeneratedImageKind, sceneNumber?: number, extension = ".png") => path.join(root(), projectId, `${kind}-${sceneNumber ?? 0}${extension}`);
 const imageFormats = [
   { extension: ".png", mimeType: "image/png" },
@@ -39,12 +43,15 @@ export async function generateProjectImage(projectId: string, userId: string, in
 
 export async function readProjectImage(projectId: string, userId: string, kind: GeneratedImageKind, sceneNumber?: number) {
   await ownedProject(projectId, userId);
-  for (const format of imageFormats) {
-    try {
-      await access(filePath(projectId, kind, sceneNumber, format.extension));
-      return { data: await readFile(filePath(projectId, kind, sceneNumber, format.extension)), mimeType: format.mimeType };
-    } catch {
-      // Try the next supported image format.
+  for (const imageRoot of [root(), legacyImageRoot()]) {
+    for (const format of imageFormats) {
+      const target = path.join(imageRoot, projectId, `${kind}-${sceneNumber ?? 0}${format.extension}`);
+      try {
+        await access(target);
+        return { data: await readFile(target), mimeType: format.mimeType };
+      } catch {
+        // Try the next supported image format.
+      }
     }
   }
   throw new AppError("IMAGE_NOT_FOUND", "Chưa có ảnh cho mục này.", 404);
@@ -52,11 +59,28 @@ export async function readProjectImage(projectId: string, userId: string, kind: 
 
 export async function readProjectVideo(projectId: string, userId: string, sceneNumber: number) {
   await ownedProject(projectId, userId);
-  const target = path.join(videoRoot(), projectId, `scene-${sceneNumber}.mp4`);
-  try {
-    await access(target);
-    return await readFile(target);
-  } catch {
-    throw new AppError("VIDEO_NOT_FOUND", "Chưa có video cho phân cảnh này.", 404);
+  for (const rootPath of [videoRoot(), legacyVideoRoot()]) {
+    const target = path.join(rootPath, projectId, `scene-${sceneNumber}.mp4`);
+    try {
+      await access(target);
+      return await readFile(target);
+    } catch {
+      // Try the legacy data location when necessary.
+    }
   }
+  throw new AppError("VIDEO_NOT_FOUND", "Chưa có video cho phân cảnh này.", 404);
+}
+
+export async function readProjectFinalVideo(projectId: string, userId: string) {
+  await ownedProject(projectId, userId);
+  for (const rootPath of [videoRoot(), legacyVideoRoot()]) {
+    const target = path.join(rootPath, projectId, "final.mp4");
+    try {
+      await access(target);
+      return await readFile(target);
+    } catch {
+      // Try the legacy data location when necessary.
+    }
+  }
+  throw new AppError("VIDEO_NOT_FOUND", "Chưa có video hoàn chỉnh.", 404);
 }

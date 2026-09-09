@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld("desktopFacebook", {
 
 contextBridge.exposeInMainWorld("desktopGemini", {
   open: (prompt) => ipcRenderer.invoke("gemini-browser:open", prompt),
+  openFlow: () => ipcRenderer.invoke("gemini-browser:open-flow"),
   copy: (prompt) => ipcRenderer.invoke("gemini-browser:copy", prompt),
   importImages: (projectId, slots) => ipcRenderer.invoke("gemini-browser:import-images", { projectId, slots }),
   runJob: (projectId, slots, onProgress) => {
@@ -35,6 +36,14 @@ contextBridge.exposeInMainWorld("desktopGemini", {
     const handler = (_event, progress) => onProgress?.(progress);
     ipcRenderer.on("gemini-browser:video-progress", handler);
     return ipcRenderer.invoke("gemini-browser:run-video-job", { projectId, slots }).finally(() => ipcRenderer.removeListener("gemini-browser:video-progress", handler));
+  },
+});
+
+contextBridge.exposeInMainWorld("desktopVideoEditor", {
+  renderFinal: (projectId, sceneNumbers, onProgress) => {
+    const handler = (_event, progress) => onProgress?.(progress);
+    ipcRenderer.on("video-editor:progress", handler);
+    return ipcRenderer.invoke("video-editor:render-final", { projectId, sceneNumbers }).finally(() => ipcRenderer.removeListener("video-editor:progress", handler));
   },
 });
 

@@ -50,6 +50,9 @@ type DesktopGemini = {
   runJob: (projectId: string, slots: ImageSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; images: Record<string, string> }>;
   runVideoJob: (projectId: string, slots: VideoSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; videos: Record<string, string> }>;
 };
+type DesktopVideoEditor = {
+  renderFinal: (projectId: string, sceneNumbers: number[], onProgress?: (progress: { stage: string; processed: number; total: number; label: string }) => void) => Promise<{ status: string; video: string }>;
+};
 type VideoAnalysisResult = {
   analysis: {
     summary: string;
@@ -128,6 +131,9 @@ export function ViralDashboard() {
   const [showGeneratedVideos, setShowGeneratedVideos] = useState(false);
   const [geminiVideoMessage, setGeminiVideoMessage] = useState("");
   const [geminiVideoProgress, setGeminiVideoProgress] = useState({ processed: 0, total: 0 });
+  const [isRenderingFinalVideo, setIsRenderingFinalVideo] = useState(false);
+  const [finalVideoUrl, setFinalVideoUrl] = useState("");
+  const [finalVideoMessage, setFinalVideoMessage] = useState("");
   const [analysisFilter, setAnalysisFilter] = useState<"all" | "analyzed" | "unanalyzed">("all");
   const [videoPage, setVideoPage] = useState(1);
   const [autoSyncRequested, setAutoSyncRequested] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("autoSync") === "1");
@@ -507,6 +513,28 @@ export function ViralDashboard() {
       setIsGeneratingVideos(false);
     }
   }
+  async function renderFinalProjectVideo() {
+    if (!contentProject) return;
+    const sceneNumbers = contentProject.scenes.map((scene) => scene.sceneNumber);
+    if (sceneNumbers.some((sceneNumber) => !generatedVideos[`scene-${sceneNumber}`])) {
+      setContentProjectError("Hãy tạo đầy đủ video phân cảnh trước khi ghép.");
+      return;
+    }
+    setIsRenderingFinalVideo(true);
+    setContentProjectError("");
+    setFinalVideoMessage("Đang chuẩn bị ghép video...");
+    try {
+      const editor = (window as Window & { desktopVideoEditor?: DesktopVideoEditor }).desktopVideoEditor;
+      if (!editor) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
+      const result = await editor.renderFinal(contentProject.id, sceneNumbers, (progress) => setFinalVideoMessage(progress.label));
+      setFinalVideoUrl(result.video);
+      setFinalVideoMessage("Đã ghép và xuất video hoàn chỉnh 9:16, 720p, 30fps.");
+    } catch (caught) {
+      setContentProjectError(caught instanceof Error ? caught.message : "Không thể ghép video.");
+    } finally {
+      setIsRenderingFinalVideo(false);
+    }
+  }
   async function copyAnalysis() {
     if (!analysisResult) return;
     const analysis = analysisResult.analysis;
@@ -686,6 +714,9 @@ export function ViralDashboard() {
                   </button>
                   {geminiVideoMessage && <p className="mt-2 text-sm font-semibold text-[#6d28d9]">{geminiVideoMessage}</p>}
                   {Object.keys(generatedVideos).length > 0 && <button type="button" onClick={() => setShowGeneratedVideos((visible) => !visible)} className="ml-2 rounded-lg border border-[#7c3aed] px-4 py-2.5 text-sm font-bold text-[#6d28d9]">{showGeneratedVideos ? "Ẩn video" : "Xem video"}</button>}
+                  {contentProject.scenes.every((scene) => generatedVideos[`scene-${scene.sceneNumber}`]) && <button type="button" onClick={() => void renderFinalProjectVideo()} disabled={isRenderingFinalVideo} className="ml-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isRenderingFinalVideo ? "Đang ghép video..." : "Ghép & xuất video hoàn chỉnh"}</button>}
+                  {finalVideoMessage && <p className="mt-2 text-sm font-semibold text-emerald-700">{finalVideoMessage}</p>}
+                  {finalVideoUrl && <figure className="mt-4 max-w-md"><video controls preload="metadata" src={finalVideoUrl} className="w-full rounded-lg border border-emerald-200" /><figcaption className="mt-1 text-sm font-semibold">Video hoàn chỉnh</figcaption></figure>}
                   {showGeneratedVideos && <div className="mt-4 grid gap-4 sm:grid-cols-2">{contentProject.scenes.map((scene) => generatedVideos[`scene-${scene.sceneNumber}`] && <figure key={`video-${scene.sceneNumber}`}><video controls preload="metadata" src={generatedVideos[`scene-${scene.sceneNumber}`]} className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Video cảnh {scene.sceneNumber}</figcaption></figure>)}</div>}
                 </div>
               )}
