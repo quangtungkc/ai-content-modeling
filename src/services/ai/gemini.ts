@@ -5,6 +5,58 @@ import { finalReviewSchema } from "./review-schemas";
 import { assetValidationSchema } from "./asset-schemas";
 import type { AIInput, AIProvider, ModelingDirection, VideoAnalysis, VideoUnderstandingInput, VisualBreakdown, FinalReviewInput, FinalReview, AssetValidationInput, AssetValidation, DevelopedIdea } from "./types";
 
+function modelingIdeaInstruction(artStyle?: string) {
+  return `Bạn đang ở bước TẠO MODELING IDEA cho một video hài hình ảnh ngắn. Hãy "bắt mạch" bản gốc trước khi sáng tạo, dựa trên dữ liệu phân tích được cung cấp.
+
+BƯỚC 1 — PHÂN TÍCH VÀ BẮT MẠCH BẢN GỐC (DECONSTRUCTION):
+- Xác định rõ điểm gây cười cốt lõi (The Gag): tiếng cười đến từ sự ngớ ngẩn, tương tác vật lý lố bịch, biểu cảm vô tri, hay khoảng lặng chưng hửng.
+- Bảo tồn sự tối giản của nguyên tác. Giữ tinh thần góc máy, nhịp điệu, khoảng lặng và sự trần trụi cần thiết để gag tự phát huy; không tự ý thêm drama, giải thích dài, tình tiết điện ảnh hoặc tuyến phụ làm hỏng mạch hài.
+- Chỉ kế thừa cơ chế gây cười và nguyên tắc nhịp điệu; phải tạo nhân vật, bối cảnh, chi tiết bề mặt và cách thể hiện mới, không sao chép nguyên tác.
+
+BƯỚC 2 — NÂNG CẤP NGHỆ THUẬT (ART DIRECTION & PHYSICS):
+- Tạo hình từng nhân vật phải được mô tả cụ thể và có chủ đích gây cười ngay từ cái nhìn đầu tiên. Ưu tiên hình tượng dị biệt, bựa, vô tri, ngớ ngẩn hoặc tương phản bất thường; nét mặt, hình dáng, tỷ lệ, trang phục và đạo cụ phải hỗ trợ hài hình ảnh theo phong cách hài được ưa chuộng.
+- Áp dụng vật lý hoạt hình Squash & Stretch một cách nhất quán cho nhân vật, đạo cụ và môi trường khi phù hợp: co giãn đàn hồi, nảy, phập phồng, méo, va đập và rơi xuống phải tạo ra tiếng cười thị giác nhưng vẫn đọc được hành động.
+- Mô tả tổng thể không gian thật rõ: bố cục, vật thể chính, khoảng trống, ánh sáng, màu sắc và cảm giác mà bối cảnh mang lại.
+
+BƯỚC 3 — MẠCH KỊCH BẢN PHÂN CẢNH:
+- Trường script phải mô tả chi tiết các phân cảnh nối tiếp nhau chặt chẽ, không rời rạc hoặc "nối bịch". Mỗi cảnh phải kế thừa vị trí, trạng thái, đạo cụ và hậu quả của cảnh trước; có mở đầu, tích lũy, va chạm/gag và kết rõ ràng.
+- Mỗi phân cảnh phải làm rõ: tổng thể không gian; tư thế, biểu cảm và trạng thái của từng nhân vật; diễn biến hành động theo thứ tự; vật lý/va chạm; điểm gây cười; và âm thanh hoặc khoảng lặng tương ứng.
+- Không làm phức tạp hóa video. Nếu nguyên tác là hài vô ngôn/slapstick, ưu tiên hành động dễ hiểu, ít lời và nhịp hài trực diện.
+
+YÊU CẦU ĐẦU RA:
+- Trả đúng một JSON hợp lệ, không Markdown, không bình luận, có đúng một phần tử modelingDirections.
+- Viết toàn bộ nội dung bằng tiếng Việt.
+- modelingDirections phải có các trường title, coreConcept, script, characterDesign, setting, artStyle, sourceMechanism, whatIsPreserved, whatIsChanged, targetMarketAdaptation, similarityRisk, whyWorthDeveloping.
+- script, characterDesign và setting phải đủ chi tiết để bước sau có thể chuyển thẳng thành storyboard và prompt tạo ảnh/video.
+- Không nêu tên, bắt chước hoặc ám chỉ studio, thương hiệu, nghệ sĩ, thương hiệu phong cách hay nhân vật có bản quyền; chỉ dùng thuộc tính hình ảnh chung.
+
+Phong cách mỹ thuật được chọn: ${artStyle ?? "Dùng phong cách hiện có của kênh"}.`;
+}
+
+function developedIdeaInstruction(aspectRatio?: string) {
+  return `Phát triển Modeling Idea này thành gói sản xuất sẵn sàng triển khai cho video hài hình ảnh ngắn. Trước khi viết storyboard, bắt buộc thực hiện đủ ba bước sau:
+
+BƯỚC 1 — PHÂN TÍCH VÀ BẮT MẠCH BẢN GỐC (DECONSTRUCTION):
+- Trong deconstruction, chỉ ra điểm gây cười cốt lõi (The Gag), bằng chứng từ phân tích, góc máy, nhịp điệu, khoảng lặng và phần tối giản cần bảo tồn.
+- Không tự ý thêm drama, lời giải thích, tuyến phụ hoặc thủ pháp điện ảnh rườm rà nếu không phục vụ gag. Giữ nguyên tinh thần đơn giản của nguyên tác nhưng tạo cách thể hiện, nhân vật và bối cảnh mới.
+
+BƯỚC 2 — NÂNG CẤP NGHỆ THUẬT (ART DIRECTION & PHYSICS):
+- Trong artDirection, mô tả tổng thể không gian, bố cục, ánh sáng, màu sắc, cảm giác bối cảnh, phong cách hài thị giác và ngôn ngữ máy quay.
+- Áp dụng Squash & Stretch nhất quán cho nhân vật, đạo cụ và môi trường khi phù hợp: co giãn, phập phồng, nảy, méo, va đập và rơi xuống phải đồng bộ với gag.
+- Trong characterDesign, mô tả riêng từng nhân vật với silhouette, tỷ lệ, khuôn mặt, ánh mắt, trang phục, đạo cụ, tư thế và trạng thái. Nhân vật phải dị biệt, bựa, vô tri, ngớ ngẩn hoặc tương phản bất thường để bản thân tạo hình đã gây cười; không dùng nhân vật có bản quyền.
+- Trong backgroundDesign, mô tả rõ không gian và cảm giác bối cảnh, đồng thời nêu quy tắc giữ bối cảnh nhất quán giữa các cảnh.
+
+BƯỚC 3 — STORYBOARD SCRIPT NỐI TIẾP CHẶT CHẼ:
+- storyboard phải gồm các cảnh nối tiếp hợp lý, không rời rạc. Cảnh sau bắt đầu từ trạng thái, vị trí, đạo cụ và hậu quả ở cuối cảnh trước; không tự ý đổi không gian hoặc reset nhân vật.
+- Mỗi cảnh phải tuân thủ đúng ba khối rạch ròi:
+  1. visualBlock: ghi rõ [HÌNH ẢNH / KHÔNG GIAN / TƯ THẾ / TRẠNG THÁI], gồm tổng thể không gian, cảm giác bối cảnh, ánh sáng, vị trí vật thể và tư thế/trạng thái ban đầu của từng nhân vật.
+  2. actionBlock: liệt kê theo thứ tự 1, 2, 3... toàn bộ diễn biến hành động, tương tác vật lý, chuyển động cơ thể, va đập, co giãn, nảy lên, rơi xuống và điểm gag.
+  3. audioBlock: liệt kê Foley đồng bộ 100% với từng hành động; ghi rõ nhịp, cao trào và khoảng lặng. Sự im lặng cũng được coi là một loại âm thanh để tấu hài.
+- englishPrompt phải chuyển đầy đủ visualBlock và các quy tắc liên tục nhân vật/bối cảnh sang tiếng Anh để dùng tạo ảnh/video, không được rút gọn thành mô tả chung.
+
+Trả đúng JSON có schemaVersion là chuỗi "1.0", gồm deconstruction, artDirection, characterDesign, backgroundDesign, storyboard và safetyReview. Viết các trường mô tả bằng tiếng Việt, trừ englishPrompt. Khung hình đã chọn: ${aspectRatio ?? "9:16"}. Chỉ dùng mô tả hình ảnh nguyên bản, không nêu tên hoặc bắt chước studio, thương hiệu, nghệ sĩ hay nhân vật có bản quyền.`;
+}
+
 export class GeminiProvider implements AIProvider {
   readonly name = "gemini";
   constructor(
@@ -21,8 +73,8 @@ export class GeminiProvider implements AIProvider {
       videoAnalysisResponseSchema,
     );
   }
-  generateIdeas(input: AIInput & { analysis: VideoAnalysis; artStyle?: string }) { return this.request(`Generate exactly ONE original modeling idea based on the source video's successful mechanism. Do not copy surface-level details, characters, setting, wording, or sequence. Never name, imitate, or refer to any studio, franchise, artist, or copyrighted character; describe art styles only with generic visual attributes. Return only JSON with one modelingDirections item containing title, coreConcept, script, characterDesign, setting, artStyle, sourceMechanism, whatIsPreserved, whatIsChanged, targetMarketAdaptation, similarityRisk, and whyWorthDeveloping. The selected art style is: ${input.artStyle ?? "Use the channel's existing art style"}. Write all content in Vietnamese.`, input, modelingIdeasSchema, normalizeModelingIdeas, modelingIdeasResponseSchema); }
-  developIdea(input: AIInput & { analysis: VideoAnalysis; idea: ModelingDirection; aspectRatio?: string }) { return this.request(`Develop this modeling idea into a production-ready package. Keep the same character identity and the same background continuity across every scene. Use the selected frame size ${input.aspectRatio ?? "9:16"}. Use only an original visual treatment: never name, imitate, or refer to any studio, franchise, artist, or copyrighted character. Return only structured JSON with deconstruction, artDirection, characterDesign, backgroundDesign, storyboard, and safetyReview. In storyboard, write each scene clearly with visualBlock, actionBlock, audioBlock, and englishPrompt. The schemaVersion must be the string "1.0".`, input, { parse: (value: unknown) => normalizeDevelopedIdea(value) as DevelopedIdea }, normalizeDevelopedIdea, developedIdeaResponseSchema); }
+  generateIdeas(input: AIInput & { analysis: VideoAnalysis; artStyle?: string }) { return this.request(modelingIdeaInstruction(input.artStyle), input, modelingIdeasSchema, normalizeModelingIdeas, modelingIdeasResponseSchema); }
+  developIdea(input: AIInput & { analysis: VideoAnalysis; idea: ModelingDirection; aspectRatio?: string }) { return this.request(developedIdeaInstruction(input.aspectRatio), input, { parse: (value: unknown) => normalizeDevelopedIdea(value) as DevelopedIdea }, normalizeDevelopedIdea, developedIdeaResponseSchema); }
   async understandVideo(input: VideoUnderstandingInput): Promise<VisualBreakdown> {
     if (!this.apiKey) throw new AIProviderNotConfiguredError(this.name);
     const systemPrompt = input.instruction ?? "Analyze this short-form competitor video. Do not propose a new idea yet. Return structured JSON with videoSummary, openingHook, timeline with MM:SS timestamps, characters, setting, visualGag, escalation, twist, payoff, cameraPattern, audioPattern, whyItLikelyWorks. Focus on observable evidence and distinguish evidence from inference.";

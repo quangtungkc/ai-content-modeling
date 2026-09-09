@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 const items = [
   ["▦", "Tổng quan", "/"],
   ["◉", "Kênh của tôi", "/channels"],
+  ["◷", "Lịch sử hoạt động", "/activity"],
   ["⚙", "Cài đặt AI", "/settings"],
 ] as const;
 

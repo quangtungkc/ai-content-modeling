@@ -699,9 +699,45 @@ async function clearFlowComposer(window) {
   }
 }
 
+async function ensureFlowMode(window, mode) {
+  const wanted = mode.toLowerCase();
+  for (let elapsed = 0; elapsed < 15_000; elapsed += 500) {
+    const state = await window.webContents.executeJavaScript(`(() => {
+      const roots = [document];
+      const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll('*')) {
+          if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        }
+      }
+      const isVisible = (element) => {
+        const bounds = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return bounds.width > 0 && bounds.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const labelsFor = (element) => [element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent]
+        .filter(Boolean).map((value) => value.replace(/\\s+/g, ' ').trim().toLowerCase());
+      const candidate = roots.flatMap((root) => [...root.querySelectorAll('[role="radio"]')])
+        .find((element) => isVisible(element) && labelsFor(element).some((label) => label === ${JSON.stringify(wanted)} || label.endsWith(' ' + ${JSON.stringify(wanted)}) || label.endsWith(${JSON.stringify(wanted)})));
+      if (!candidate) return { selected: false, point: null };
+      const bounds = candidate.getBoundingClientRect();
+      return { selected: candidate.getAttribute('aria-checked') === 'true', point: { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 } };
+    })()`, true);
+    if (state?.selected) return;
+    if (state?.point) {
+      await dispatchBrowserClick(window, state.point);
+      await delay(350);
+      return;
+    }
+    await delay(500);
+  }
+  throw new Error('Không tìm thấy chế độ ' + mode + ' trong cài đặt Google Flow.');
+}
+
 async function configureFlowVideo(window) {
   await clickFlowControl(window, ["Điều kiện kích hoạt cài đặt", "Video settings", "Settings"], false);
-  await clickFlowControl(window, ["9:16"], false);
+  await ensureFlowMode(window, "Video");
+  await clickFlowControl(window, ["9:16"], true);
   await clickFlowControl(window, ["Chọn nhóm mô hình", "Select model", "Model"], false);
   await clickFlowControl(window, ["Veo 3.1 - Lite [Lower Priority]"], true, 15_000);
   const qualityPoint = await findFlowControlPoint(window, ["720p"], true);
@@ -777,9 +813,39 @@ async function reloadFlowProject(window, projectUrl) {
     await waitForFlowLoad(window);
   }
   await delay(1_500);
+  await waitForFlowComposer(window);
 }
 
-async function inspectFlowVideo(window, beforeSources = []) {
+async function waitForFlowComposer(window, timeout = 20_000) {
+  for (let elapsed = 0; elapsed < timeout; elapsed += 500) {
+    const ready = await window.webContents.executeJavaScript(`(() => {
+      const roots = [document];
+      const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll('*')) {
+          if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        }
+      }
+      const isVisible = (element) => {
+        const bounds = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return bounds.width > 100 && bounds.height >= 20 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      return roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable="true"]')]).some(isVisible);
+    })()`, true);
+    if (ready) return;
+    const backPoint = await findFlowControlPoint(window, ["Back button to go to previous page", "Quay lại", "Back", "arrow_back"], false, 1_000).catch(() => null);
+    if (backPoint) {
+      await dispatchBrowserClick(window, backPoint);
+      await delay(800);
+      continue;
+    }
+    await delay(500);
+  }
+  throw new Error("Google Flow chưa quay về màn hình soạn lệnh.");
+}
+
+async function inspectFlowVideo(window, beforeSources = [], beforeCardCount = 0) {
   const expression = [
     "(() => {",
     "  const before = new Set(" + JSON.stringify(beforeSources) + ");",
@@ -789,24 +855,35 @@ async function inspectFlowVideo(window, beforeSources = []) {
     "  const sourceFor = (video) => video.currentSrc || video.src || video.querySelector('source')?.src || '';",
     "  const video = videos.reverse().find((candidate) => { const source = sourceFor(candidate); return source && !before.has(source) && candidate.readyState >= 2 && Number.isFinite(candidate.duration) && candidate.duration > 0; });",
     "  const resourceSources = performance.getEntriesByType('resource').map((entry) => entry.name).filter((source) => /flow-content\\.google\\/video\\//i.test(source) && !before.has(source));",
-    "  const thumbnail = roots.flatMap((root) => [...root.querySelectorAll('img[alt=\"Generated video thumbnail\"]')]).find((element) => { const bounds = element.getBoundingClientRect(); return bounds.width > 0 && bounds.height > 0; });",
+    "  const videoCards = roots.flatMap((root) => [...root.querySelectorAll('img[alt=\"Generated video thumbnail\"]')]).filter((element) => { const bounds = element.getBoundingClientRect(); return bounds.width > 0 && bounds.height > 0; });",
+    "  const thumbnail = videoCards[0] || null;",
     "  const text = document.body?.innerText || '';",
     "  const playButton = roots.flatMap((root) => [...root.querySelectorAll('button[aria-label=\"Play\"], button[aria-label=\"Phát\"]')]).find((element) => { const bounds = element.getBoundingClientRect(); return bounds.width > 0 && bounds.height > 0; });",
     "  const playCircle = roots.flatMap((root) => [...root.querySelectorAll('[role=\"button\"]')]).find((element) => { const bounds = element.getBoundingClientRect(); return bounds.width > 0 && bounds.height > 0 && element.querySelector('mat-icon')?.textContent?.trim() === 'play_circle'; });",
-    "  return { videoSource: video ? sourceFor(video) : (resourceSources[resourceSources.length - 1] || null), duration: video && Number.isFinite(video.duration) ? video.duration : null, videoCard: Boolean(thumbnail), playButton: Boolean(playButton), playCircle: Boolean(playCircle), failed: /không thành công|không tải được video|failed|couldn't load video|could not load video|generation failed/i.test(text) };",
+    "  const thumbnailBounds = thumbnail?.getBoundingClientRect();",
+    "  const playButtonBounds = playButton?.getBoundingClientRect();",
+    "  const playCircleBounds = playCircle?.getBoundingClientRect();",
+    "  return { videoSource: video ? sourceFor(video) : (resourceSources[resourceSources.length - 1] || null), duration: video && Number.isFinite(video.duration) ? video.duration : null, videoCardCount: videoCards.length, videoCard: Boolean(thumbnail), thumbnailPoint: thumbnailBounds ? { x: thumbnailBounds.left + thumbnailBounds.width / 2, y: thumbnailBounds.top + thumbnailBounds.height / 2 } : null, playButton: Boolean(playButton), playButtonPoint: playButtonBounds ? { x: playButtonBounds.left + playButtonBounds.width / 2, y: playButtonBounds.top + playButtonBounds.height / 2 } : null, playCircle: Boolean(playCircle), playCirclePoint: playCircleBounds ? { x: playCircleBounds.left + playCircleBounds.width / 2, y: playCircleBounds.top + playCircleBounds.height / 2 } : null, failed: /không thành công|không tải được video|failed|couldn't load video|could not load video|generation failed/i.test(text) };",
     "})()",
   ].join("\n");
-  return window.webContents.executeJavaScript(expression, true);
+  return window.webContents.executeJavaScript(expression, true).then((state) => ({ ...state, beforeCardCount }));
 }
 
-async function waitForFlowVideo(window, beforeSources, timeout = 600_000) {
+async function waitForFlowVideo(window, beforeSources, beforeCardCount = 0, timeout = 600_000) {
   let openedVideoCard = false;
+  let startedPlayback = false;
   for (let elapsed = 0; elapsed < timeout; elapsed += 2_000) {
-    const state = await inspectFlowVideo(window, beforeSources);
+    const state = await inspectFlowVideo(window, beforeSources, beforeCardCount);
     if (state?.videoSource) return state;
-    if ((state?.videoCard || state?.playButton || state?.playCircle) && !openedVideoCard) {
+    if (state?.videoCardCount > beforeCardCount && !openedVideoCard) {
       openedVideoCard = true;
-      await window.webContents.executeJavaScript("document.querySelector('img[alt=\"Generated video thumbnail\"]')?.click() || document.querySelector('button[aria-label=\"Play\"], button[aria-label=\"Phát\"]')?.click() || [...document.querySelectorAll('[role=\"button\"]')].find((element) => element.querySelector('mat-icon')?.textContent?.trim() === 'play_circle')?.click();", true);
+      if (state.thumbnailPoint) await dispatchBrowserClick(window, state.thumbnailPoint);
+      await delay(1_000);
+      continue;
+    }
+    if (!startedPlayback && (state?.playButtonPoint || state?.playCirclePoint)) {
+      startedPlayback = true;
+      await dispatchBrowserClick(window, state.playButtonPoint || state.playCirclePoint);
       await delay(1_000);
       continue;
     }
@@ -828,15 +905,15 @@ async function getFlowVideoBuffer(window, result) {
   return Buffer.from(match[1], "base64");
 }
 
-async function waitForFlowVideoWithRecovery(window, projectUrl, beforeSources) {
-  let state = await waitForFlowVideo(window, beforeSources);
+async function waitForFlowVideoWithRecovery(window, projectUrl, beforeSources, beforeCardCount = 0) {
+  let state = await waitForFlowVideo(window, beforeSources, beforeCardCount);
   if (state?.videoSource && !state?.failed) return state;
   await reloadFlowProject(window, projectUrl);
-  state = await waitForFlowVideo(window, beforeSources, 30_000);
+  state = await waitForFlowVideo(window, beforeSources, beforeCardCount, 30_000);
   if (state?.failed) {
     const retryPoint = await waitForFlowControlPoint(window, ["Thử lại", "Try again", "Retry"], true, 15_000);
     await dispatchBrowserClick(window, retryPoint);
-    state = await waitForFlowVideo(window, beforeSources);
+    state = await waitForFlowVideo(window, beforeSources, beforeCardCount);
     if (state?.videoSource && !state?.failed) return state;
     if (state?.videoSource && state?.failed) throw new Error("Google Flow vẫn báo tạo video không thành công sau khi gửi tạo lại.");
     throw new Error("Google Flow vẫn không tạo được video sau khi gửi tạo lại.");
@@ -1115,7 +1192,10 @@ async function runFlowImageJob(event, projectId, slots) {
       throw new Error("Dữ liệu ảnh tạo bằng Google Flow không hợp lệ.");
     }
     event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: slot.label || "Ảnh " + (index + 1) });
-    await clearFlowComposer(window);
+    let slotError = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await clearFlowComposer(window);
     event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang cấu hình Google Flow cho " + (slot.label || "ảnh") + "..." });
     await configureFlowImage(window, slot.aspectRatio || "9:16");
 
@@ -1155,6 +1235,16 @@ async function runFlowImageJob(event, projectId, slots) {
     const sceneNumber = Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0;
     images[`${slot.kind}-${sceneNumber}`] = `${url}&v=${Date.now()}`;
     event.sender.send("flow-browser:image-progress", { processed: index + 1, total: slots.length, label: slot.label || "Ảnh " + (index + 1) });
+        slotError = null;
+        break;
+      } catch (error) {
+        slotError = error;
+        if (attempt === 1) throw error;
+        event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang tải lại Google Flow để thử lại ảnh..." });
+        await reloadFlowProject(window, projectUrl);
+      }
+    }
+    if (slotError) throw slotError;
   }
   return { status: "completed", images };
 }
@@ -1195,13 +1285,14 @@ async function runFlowVideoJob(event, projectId, slots) {
       "  }",
       "  const videos = roots.flatMap((root) => [...root.querySelectorAll('video')]);",
       "  const beforeSources = videos.map((video) => video.currentSrc || video.src || video.querySelector('source')?.src).filter(Boolean);",
+      "  const beforeCardCount = roots.flatMap((root) => [...root.querySelectorAll('img[alt=\"Generated video thumbnail\"]')]).filter((element) => { const bounds = element.getBoundingClientRect(); return bounds.width > 0 && bounds.height > 0; }).length;",
       "  const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable=\"true\"]')]).find((element) => { const bounds = element.getBoundingClientRect(); return bounds.width > 100 && bounds.height >= 20; });",
       "  if (!input) return { error: 'Không tìm thấy ô nhập prompt Google Flow.' };",
       "  input.focus();",
       "  if (input.tagName === 'TEXTAREA') { const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, ''); }",
       "  else { document.execCommand('selectAll', false); document.execCommand('delete', false); }",
       "  input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));",
-      "  return { beforeSources };",
+      "  return { beforeSources, beforeCardCount };",
       "})()",
     ].join("\n"), true);
     if (prepared?.error) throw new Error(prepared.error);
@@ -1236,7 +1327,7 @@ async function runFlowVideoJob(event, projectId, slots) {
     await delay(1_200);
 
     event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang chờ Google Flow tạo video cảnh " + sceneNumber + "..." });
-    const result = await waitForFlowVideoWithRecovery(window, projectUrl, prepared.beforeSources ?? []);
+    const result = await waitForFlowVideoWithRecovery(window, projectUrl, prepared.beforeSources ?? [], prepared.beforeCardCount ?? 0);
     const buffer = await getFlowVideoBuffer(window, result);
     const url = saveGeminiVideo(projectId, sceneNumber, buffer);
     videos["scene-" + sceneNumber] = url + "&v=" + Date.now();
