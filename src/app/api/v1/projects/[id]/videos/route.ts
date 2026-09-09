@@ -12,9 +12,10 @@ export async function GET(request: Request, context: Context) {
     const session = await getRequiredSession();
     const { id } = await context.params;
     const searchParams = new URL(request.url).searchParams;
+    const isDownload = searchParams.get("download") === "1";
     if (searchParams.get("final") === "1") {
       const video = await readProjectFinalVideo(id, session.userId);
-      return new Response(video, { headers: { "Content-Type": "video/mp4", "Cache-Control": "private, max-age=3600", "Accept-Ranges": "bytes" } });
+      return new Response(video, { headers: { "Content-Type": "video/mp4", "Cache-Control": "private, max-age=3600", "Accept-Ranges": "bytes", ...(isDownload ? { "Content-Disposition": "attachment; filename=\"video-modeling.mp4\"" } : {}) } });
     }
     const sceneNumber = Number(searchParams.get("sceneNumber"));
     if (!Number.isInteger(sceneNumber) || sceneNumber < 1) throw new AppError("VALIDATION_ERROR", "Số phân cảnh không hợp lệ.", 400);

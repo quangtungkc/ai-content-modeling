@@ -140,6 +140,7 @@ export function ViralDashboard() {
   const [videoPage, setVideoPage] = useState(1);
   const [autoSyncRequested, setAutoSyncRequested] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("autoSync") === "1");
   const [manualVideo, setManualVideo] = useState({ competitorId: "", url: "", publishedAt: new Date().toISOString().slice(0, 16), views: "", likes: "0", comments: "0", shares: "0", caption: "" });
+  const [selectedModelingVideoUrl, setSelectedModelingVideoUrl] = useState("");
   useEffect(() => {
     const controller = new AbortController();
     setIsLoading(true);
@@ -920,14 +921,13 @@ export function ViralDashboard() {
                       Mở video
                     </a>
                     {video.modelingVideoUrl && (
-                      <a
-                        href={video.modelingVideoUrl}
-                        target="_blank"
-                        rel="noreferrer"
+                      <button
+                        type="button"
+                        onClick={() => setSelectedModelingVideoUrl(video.modelingVideoUrl ?? "")}
                         className="mr-4 text-xs font-bold text-[#7c3aed]"
                       >
                         Video modeling
-                      </a>
+                      </button>
                     )}
                     <button onClick={() => video.analysis ? viewStoredAnalysis(video) : void analyzeVideo(video.id)} disabled={analyzingVideoId === video.id} className="text-xs font-bold text-[#0b5799] disabled:cursor-wait disabled:opacity-60">
                       {analyzingVideoId === video.id ? "Đang phân tích..." : video.analysis ? "Xem phân tích" : "Phân tích"}
@@ -951,8 +951,40 @@ export function ViralDashboard() {
         </div>
         {videos.length > pageSize && <div className="mt-4 flex items-center justify-center gap-2"><button type="button" onClick={() => setVideoPage((page) => Math.max(1, page - 1))} disabled={videoPage === 1} className="rounded-lg border border-[#cbd9ea] px-3 py-2 text-sm font-bold text-[#0b5799] disabled:opacity-40">‹</button>{Array.from({ length: pageCount }, (_, index) => index + 1).map((page) => <button type="button" key={page} onClick={() => setVideoPage(page)} className={`rounded-lg px-3 py-2 text-sm font-bold ${page === videoPage ? "bg-[#0b5799] text-white" : "border border-[#cbd9ea] text-[#0b5799]"}`}>{page}</button>)}<button type="button" onClick={() => setVideoPage((page) => Math.min(pageCount, page + 1))} disabled={videoPage === pageCount} className="rounded-lg border border-[#cbd9ea] px-3 py-2 text-sm font-bold text-[#0b5799] disabled:opacity-40">›</button></div>}
       </section>
+      {selectedModelingVideoUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setSelectedModelingVideoUrl("");
+          }}
+        >
+          <section role="dialog" aria-modal="true" aria-label="Video modeling" className="w-full max-w-3xl rounded-2xl bg-white p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-extrabold tracking-[0.16em] text-violet-600">VIDEO MODELING</p>
+                <h2 className="mt-1 text-xl font-extrabold text-[#0b3262]">Video modeling đã hoàn thiện</h2>
+              </div>
+              <button type="button" onClick={() => setSelectedModelingVideoUrl("")} className="text-xl text-[#6883aa]" aria-label="Đóng">×</button>
+            </div>
+            <video controls autoPlay preload="metadata" src={selectedModelingVideoUrl} className="mt-5 max-h-[70vh] w-full rounded-lg bg-black" />
+            <div className="mt-4 flex justify-end gap-3">
+              <a
+                href={withDownloadFlag(selectedModelingVideoUrl)}
+                download="video-modeling.mp4"
+                className="rounded-lg bg-[#7c3aed] px-4 py-2.5 text-sm font-bold text-white"
+              >
+                Tải video
+              </a>
+              <button type="button" onClick={() => setSelectedModelingVideoUrl("")} className="rounded-lg border border-[#cbd9ea] px-4 py-2.5 text-sm font-bold text-[#0b3262]">Đóng</button>
+            </div>
+          </section>
+        </div>
+      )}
     </section>
   );
+}
+function withDownloadFlag(url: string) {
+  return `${url}${url.includes("?") ? "&" : "?"}download=1`;
 }
 function formatViews(value: number) {
   return value >= 1_000_000
