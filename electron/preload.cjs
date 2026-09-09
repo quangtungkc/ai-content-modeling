@@ -54,10 +54,11 @@ contextBridge.exposeInMainWorld("desktopFlow", {
 });
 
 contextBridge.exposeInMainWorld("desktopVideoEditor", {
-  renderFinal: (projectId, sceneNumbers, onProgress) => {
+  pickAudio: () => ipcRenderer.invoke("video-editor:pick-audio"),
+  renderFinal: (projectId, sceneNumbers, options, onProgress) => {
     const handler = (_event, progress) => onProgress?.(progress);
     ipcRenderer.on("video-editor:progress", handler);
-    return ipcRenderer.invoke("video-editor:render-final", { projectId, sceneNumbers }).finally(() => ipcRenderer.removeListener("video-editor:progress", handler));
+    return ipcRenderer.invoke("video-editor:render-final", { projectId, sceneNumbers, options }).finally(() => ipcRenderer.removeListener("video-editor:progress", handler));
   },
 });
 

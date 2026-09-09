@@ -517,9 +517,61 @@ function runFfmpeg(args, allowFailure = false) {
   });
 }
 
-async function renderFinalVideo(event, projectId, sceneNumbers) {
+function clampNumber(value, minimum, maximum, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, parsed));
+}
+
+function readMediaDuration(filePath) {
+  return runFfmpeg(["-hide_banner", "-i", filePath, "-f", "null", "-"], true).then((output) => {
+    const match = output.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i);
+    if (!match) throw new Error(`Không đọc được thời lượng video: ${path.basename(filePath)}.`);
+    const duration = (Number(match[1]) * 3600) + (Number(match[2]) * 60) + Number(match[3]);
+    if (!Number.isFinite(duration) || duration <= 0) throw new Error(`Video không có thời lượng hợp lệ: ${path.basename(filePath)}.`);
+    return duration;
+  });
+}
+
+function normalizeVideoEditOptions(value, sceneNumbers) {
+  const requestedScenes = Array.isArray(value?.scenes) && value.scenes.length > 0
+    ? value.scenes
+    : sceneNumbers.map((sceneNumber) => ({ sceneNumber, trimStart: 0, trimEnd: 0 }));
+  const requestedNumbers = requestedScenes.map((scene) => scene?.sceneNumber);
+  if (requestedScenes.length !== sceneNumbers.length
+    || requestedNumbers.some((sceneNumber) => !Number.isInteger(sceneNumber) || !sceneNumbers.includes(sceneNumber))
+    || new Set(requestedNumbers).size !== requestedNumbers.length) {
+    throw new Error("Danh sách phân cảnh chỉnh sửa không hợp lệ.");
+  }
+  const transition = value?.transition === "fade" ? "fade" : "none";
+  return {
+    scenes: requestedScenes.map((scene) => ({
+      sceneNumber: scene.sceneNumber,
+      trimStart: clampNumber(scene.trimStart, 0, 3600, 0),
+      trimEnd: clampNumber(scene.trimEnd, 0, 3600, 0),
+    })),
+    transition,
+    transitionDuration: clampNumber(value?.transitionDuration, 0.2, 0.4, 0.3),
+    originalVolume: clampNumber(value?.originalVolume, 0, 2, 1),
+    musicVolume: clampNumber(value?.musicVolume, 0, 2, 0.2),
+    musicPath: typeof value?.musicPath === "string" && value.musicPath.trim() ? value.musicPath : "",
+  };
+}
+
+function validateAudioFile(filePath) {
+  if (!filePath) return;
+  const allowedExtensions = new Set([".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"]);
+  if (!allowedExtensions.has(path.extname(filePath).toLowerCase())) throw new Error("Định dạng nhạc hoặc hiệu ứng âm thanh chưa được hỗ trợ.");
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) throw new Error("Không tìm thấy tệp nhạc hoặc hiệu ứng âm thanh đã chọn.");
+  if (fs.statSync(filePath).size > 200 * 1024 * 1024) throw new Error("Tệp nhạc hoặc hiệu ứng âm thanh phải nhỏ hơn 200 MB.");
+}
+
+async function renderFinalVideo(event, projectId, sceneNumbers, rawOptions = {}) {
+  const options = normalizeVideoEditOptions(rawOptions, sceneNumbers);
+  validateAudioFile(options.musicPath);
+  const orderedScenes = options.scenes;
   const videoRoot = path.join(app.getPath("userData"), "generated-videos", projectId);
-  const sourceFiles = sceneNumbers.map((sceneNumber) => path.join(videoRoot, `scene-${sceneNumber}.mp4`));
+  const sourceFiles = orderedScenes.map((scene) => path.join(videoRoot, `scene-${scene.sceneNumber}.mp4`));
   for (const source of sourceFiles) {
     if (!fs.existsSync(source) || fs.statSync(source).size < 1024) throw new Error("Thiếu video của một hoặc nhiều phân cảnh. Hãy tạo lại cảnh bị thiếu trước khi ghép.");
   }
@@ -529,20 +581,61 @@ async function renderFinalVideo(event, projectId, sceneNumbers) {
   try {
     event.sender.send("video-editor:progress", { stage: "normalize", processed: 0, total: sourceFiles.length, label: "Đang chuẩn hóa video..." });
     const normalized = [];
+    const durations = [];
     for (let index = 0; index < sourceFiles.length; index += 1) {
+      const sceneOptions = orderedScenes[index];
+      const sourceDuration = await readMediaDuration(sourceFiles[index]);
+      const targetDuration = sourceDuration - sceneOptions.trimStart - sceneOptions.trimEnd;
+      if (targetDuration < 0.2) throw new Error(`Cảnh ${sceneOptions.sceneNumber} còn quá ngắn sau khi cắt đầu/cuối.`);
       const target = path.join(temporaryRoot, `scene-${index + 1}.mp4`);
-      await runFfmpeg(["-y", "-hide_banner", "-i", sourceFiles[index], "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30", "-c:v", "h264_mf", "-b:v", "4500k", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", target]);
+      await runFfmpeg(["-y", "-hide_banner", "-ss", sceneOptions.trimStart.toFixed(3), "-i", sourceFiles[index], "-t", targetDuration.toFixed(3), "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30", "-c:v", "h264_mf", "-b:v", "4500k", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", target]);
       normalized.push(target);
-      event.sender.send("video-editor:progress", { stage: "normalize", processed: index + 1, total: sourceFiles.length, label: `Đã chuẩn hóa cảnh ${sceneNumbers[index]}.` });
+      durations.push(targetDuration);
+      event.sender.send("video-editor:progress", { stage: "normalize", processed: index + 1, total: sourceFiles.length, label: `Đã chuẩn hóa cảnh ${sceneOptions.sceneNumber}.` });
     }
 
     event.sender.send("video-editor:progress", { stage: "render", processed: 0, total: 1, label: "Đang ghép các phân cảnh..." });
+    const assembledPath = path.join(temporaryRoot, "assembled.mp4");
     if (normalized.length === 1) {
-      fs.copyFileSync(normalized[0], finalPath);
+      fs.copyFileSync(normalized[0], assembledPath);
+    } else if (options.transition === "fade") {
+      const transitionDuration = options.transitionDuration;
+      const filters = [];
+      let videoLabel = "0:v";
+      let audioLabel = "0:a";
+      let accumulatedDuration = durations[0];
+      for (let index = 1; index < normalized.length; index += 1) {
+        const offset = Math.max(0.01, accumulatedDuration - transitionDuration);
+        const nextVideoLabel = `video${index}`;
+        const nextAudioLabel = `audio${index}`;
+        filters.push(`[${videoLabel}][${index}:v]xfade=transition=fade:duration=${transitionDuration.toFixed(3)}:offset=${offset.toFixed(3)}[${nextVideoLabel}]`);
+        filters.push(`[${audioLabel}][${index}:a]acrossfade=d=${transitionDuration.toFixed(3)}:c1=tri:c2=tri[${nextAudioLabel}]`);
+        videoLabel = nextVideoLabel;
+        audioLabel = nextAudioLabel;
+        accumulatedDuration += durations[index] - transitionDuration;
+      }
+      await runFfmpeg(["-y", "-hide_banner", ...normalized.flatMap((file) => ["-i", file]), "-filter_complex", filters.join(";"), "-map", `[${videoLabel}]`, "-map", `[${audioLabel}]`, "-c:v", "h264_mf", "-b:v", "4500k", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", assembledPath]);
     } else {
       const playlistPath = path.join(temporaryRoot, "playlist.txt");
       fs.writeFileSync(playlistPath, normalized.map((file) => `file '${file.replace(/'/g, "'\\\\''")}'`).join("\n"), "utf8");
-      await runFfmpeg(["-y", "-hide_banner", "-f", "concat", "-safe", "0", "-i", playlistPath, "-c", "copy", "-movflags", "+faststart", finalPath]);
+      await runFfmpeg(["-y", "-hide_banner", "-f", "concat", "-safe", "0", "-i", playlistPath, "-c", "copy", "-movflags", "+faststart", assembledPath]);
+    }
+
+    if (options.musicPath || options.originalVolume !== 1) {
+      event.sender.send("video-editor:progress", { stage: "audio", processed: 0, total: 1, label: options.musicPath ? "Đang trộn âm thanh Flow với nhạc/hiệu ứng..." : "Đang điều chỉnh âm thanh Flow..." });
+      const audioFilters = [`[0:a]volume=${options.originalVolume.toFixed(3)}[original]`];
+      const audioInputs = ["-i", assembledPath];
+      let audioMap = "[original]";
+      if (options.musicPath) {
+        audioInputs.push("-stream_loop", "-1", "-i", options.musicPath);
+        audioFilters.push(`[1:a]volume=${options.musicVolume.toFixed(3)}[music]`);
+        audioFilters.push("[original][music]amix=inputs=2:duration=first:dropout_transition=2[mixed]");
+        audioMap = "[mixed]";
+      }
+      await runFfmpeg(["-y", "-hide_banner", ...audioInputs, "-filter_complex", audioFilters.join(";"), "-map", "0:v", "-map", audioMap, "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest", "-movflags", "+faststart", finalPath]);
+      event.sender.send("video-editor:progress", { stage: "audio", processed: 1, total: 1, label: "Đã xử lý âm thanh." });
+    } else {
+      fs.copyFileSync(assembledPath, finalPath);
     }
     if (!fs.existsSync(finalPath) || fs.statSync(finalPath).size < 1024) throw new Error("Video cuối không hợp lệ sau khi xuất.");
     event.sender.send("video-editor:progress", { stage: "completed", processed: 1, total: 1, label: "Đã xuất video hoàn chỉnh." });
@@ -755,7 +848,7 @@ async function configureFlowVideo(window) {
   await clickFlowControl(window, ["Veo 3.1 - Lite [Lower Priority]"], true, 15_000);
   const qualityPoint = await findFlowControlPoint(window, ["720p"], true);
   if (qualityPoint) { await dispatchBrowserClick(window, qualityPoint); await delay(350); }
-  await clickFlowControl(window, ["6 giây", "6 seconds", "6s"], false);
+  await clickFlowControl(window, ["4 giây", "4 seconds", "4s"], false);
   await clickFlowControl(window, ["x1"], true);
   // Flow exposes the Start/End frame inputs after the other settings are set.
   await clickFlowControl(window, ["Frames"], true);
@@ -789,7 +882,20 @@ async function createFlowProject(window) {
     if (!requestedWorkspace) {
       const enterFlowPoint = await findFlowControlPoint(window, ["Create with Google Flow", "Tạo bằng Google Flow"], true);
       if (enterFlowPoint) {
-        await dispatchBrowserClick(window, enterFlowPoint);
+        const clicked = await window.webContents.executeJavaScript(`(() => {
+          const labels = ["Create with Google Flow", "Tạo bằng Google Flow"];
+          const wanted = labels.map((value) => value.toLowerCase());
+          const button = [...document.querySelectorAll("button, [role=\"button\"]")].find((element) => {
+            const values = [element.getAttribute("aria-label"), element.textContent]
+              .filter(Boolean)
+              .map((value) => value.replace(/\\s+/g, " ").trim().toLowerCase());
+            return values.some((value) => wanted.includes(value));
+          });
+          if (!button) return false;
+          button.click();
+          return true;
+        })()`, true);
+        if (!clicked) await dispatchBrowserClick(window, enterFlowPoint);
         requestedWorkspace = true;
         await delay(1_000);
         continue;
@@ -1265,18 +1371,15 @@ async function runFlowImageJob(event, projectId, slots) {
 async function runFlowVideoJob(event, projectId, slots) {
   event.sender.send("gemini-browser:video-progress", { processed: 0, total: slots.length, label: "Đang mở Google Flow..." });
   const window = createFlowWindow();
-  const projectUrl = await createFlowProject(window);
   const videos = {};
   for (let index = 0; index < slots.length; index += 1) {
-    if (index > 0) {
-      event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang quay về màn hình tạo video Google Flow trước cảnh tiếp theo..." });
-      await reloadFlowProject(window, projectUrl);
-    }
     const slot = slots[index];
     if (!Number.isInteger(slot?.sceneNumber) || typeof slot.visualBlock !== "string" || typeof slot.actionBlock !== "string" || typeof slot.audioBlock !== "string") {
       throw new Error("Dữ liệu phân cảnh tạo video không hợp lệ.");
     }
     const sceneNumber = slot.sceneNumber;
+    event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: `Đang mở project Google Flow riêng cho cảnh ${sceneNumber}...` });
+    const projectUrl = await createFlowProject(window);
     const imagePath = findSceneImagePath(projectId, sceneNumber);
     event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: slot.label || "Cảnh " + sceneNumber });
 
@@ -1311,7 +1414,7 @@ async function runFlowVideoJob(event, projectId, slots) {
     if (prepared?.error) throw new Error(prepared.error);
 
     const videoFormat = "vertical 9:16";
-    const prompt = "Create one 6-second " + videoFormat + " video from the attached scene image only. Use this exact scene image as the Start frame for scene " + sceneNumber + ". Do not use an End frame, character reference, or separate background image. Preserve the exact scene composition, environment, lighting, and art style. Animate only this scene. Action: " + slot.actionBlock + ". Camera and visual direction: " + slot.visualBlock + ". Audio and sound direction: " + slot.audioBlock + ". Generate one final video with audio.";
+    const prompt = "Create one 4-second " + videoFormat + " video from the attached scene image only. Use this exact scene image as the Start frame for scene " + sceneNumber + ". Do not use an End frame, character reference, or separate background image. Preserve the exact scene composition, environment, lighting, and art style. Animate only this scene. Action: " + slot.actionBlock + ". Camera and visual direction: " + slot.visualBlock + ". Audio and sound direction: " + slot.audioBlock + ". Generate one final video with audio.";
     const promptResult = await window.webContents.executeJavaScript([
       "(() => {",
       "  const prompt = " + JSON.stringify(prompt) + ";",
@@ -1344,7 +1447,7 @@ async function runFlowVideoJob(event, projectId, slots) {
     const buffer = await getFlowVideoBuffer(window, result);
     const url = saveGeminiVideo(projectId, sceneNumber, buffer);
     videos["scene-" + sceneNumber] = url + "&v=" + Date.now();
-    event.sender.send("gemini-browser:video-progress", { processed: index + 1, total: slots.length, label: slot.label || "Cảnh " + sceneNumber });
+    event.sender.send("gemini-browser:video-progress", { processed: index + 1, total: slots.length, label: `Đã tải và lưu thành công video cảnh ${sceneNumber}.` });
   }
   return { status: "completed", videos };
 }
@@ -1376,6 +1479,16 @@ ipcMain.handle("gemini-browser:open-flow", async () => {
   return { status: "opened" };
 });
 
+ipcMain.handle("video-editor:pick-audio", async () => {
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: "Chọn nhạc nền hoặc hiệu ứng âm thanh",
+    properties: ["openFile"],
+    filters: [{ name: "Tệp âm thanh", extensions: ["mp3", "wav", "m4a", "aac", "ogg", "flac"] }],
+  });
+  if (selection.canceled || !selection.filePaths[0]) return { status: "cancelled" };
+  return { status: "selected", path: selection.filePaths[0], name: path.basename(selection.filePaths[0]) };
+});
+
 ipcMain.handle("video-editor:render-final", async (event, value) => {
   const projectId = value?.projectId;
   const sceneNumbers = value?.sceneNumbers;
@@ -1387,7 +1500,7 @@ ipcMain.handle("video-editor:render-final", async (event, value) => {
   if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || !isValidSceneList) {
     throw new Error("Yêu cầu ghép video không hợp lệ.");
   }
-  return renderFinalVideo(event, projectId, sceneNumbers);
+  return renderFinalVideo(event, projectId, sceneNumbers, value?.options);
 });
 
 ipcMain.handle("gemini-browser:import-images", async (_event, value) => {

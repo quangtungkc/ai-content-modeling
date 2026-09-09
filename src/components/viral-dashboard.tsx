@@ -1,6 +1,6 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type DragEvent } from "react";
 
 type Dashboard = {
   channel: { id: string; name: string } | null;
@@ -52,8 +52,11 @@ type DesktopFlow = {
   runVideoJob: (projectId: string, slots: VideoSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; videos: Record<string, string> }>;
 };
 type DesktopVideoEditor = {
-  renderFinal: (projectId: string, sceneNumbers: number[], onProgress?: (progress: { stage: string; processed: number; total: number; label: string }) => void) => Promise<{ status: string; video: string }>;
+  pickAudio: () => Promise<{ status: "cancelled" | "selected"; path?: string; name?: string }>;
+  renderFinal: (projectId: string, sceneNumbers: number[], options: VideoEditOptions, onProgress?: (progress: { stage: string; processed: number; total: number; label: string }) => void) => Promise<{ status: string; video: string }>;
 };
+type VideoEditScene = { sceneNumber: number; trimStart: number; trimEnd: number; duration?: number };
+type VideoEditOptions = { scenes: VideoEditScene[]; transition: "none" | "fade"; transitionDuration: number; originalVolume: number; musicVolume: number; musicPath?: string };
 type VideoAnalysisResult = {
   analysis: {
     summary: string;
@@ -139,6 +142,17 @@ export function ViralDashboard() {
   const [isRenderingFinalVideo, setIsRenderingFinalVideo] = useState(false);
   const [finalVideoUrl, setFinalVideoUrl] = useState("");
   const [finalVideoMessage, setFinalVideoMessage] = useState("");
+  const [showVideoEditor, setShowVideoEditor] = useState(false);
+  const [videoEditScenes, setVideoEditScenes] = useState<VideoEditScene[]>([]);
+  const [draggingSceneNumber, setDraggingSceneNumber] = useState<number | null>(null);
+  const [videoEditAudioPath, setVideoEditAudioPath] = useState("");
+  const [videoEditAudioName, setVideoEditAudioName] = useState("");
+  const [videoEditOriginalVolume, setVideoEditOriginalVolume] = useState(100);
+  const [videoEditMusicVolume, setVideoEditMusicVolume] = useState(20);
+  const [videoEditTransition, setVideoEditTransition] = useState<"none" | "fade">("fade");
+  const [videoEditTransitionDuration, setVideoEditTransitionDuration] = useState(0.3);
+  const [videoEditProgress, setVideoEditProgress] = useState({ stage: "", processed: 0, total: 0, label: "" });
+  const [videoEditError, setVideoEditError] = useState("");
   const [analysisFilter, setAnalysisFilter] = useState<"all" | "analyzed" | "unanalyzed">("all");
   const [videoPage, setVideoPage] = useState(1);
   const [autoSyncRequested, setAutoSyncRequested] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("autoSync") === "1");
@@ -528,7 +542,7 @@ export function ViralDashboard() {
       });
       setGeneratedVideos(result.videos);
       setShowGeneratedVideos(true);
-      setGeminiVideoMessage("Đã tạo và lưu toàn bộ video theo đúng thứ tự phân cảnh.");
+      setGeminiVideoMessage("Đã tạo và lưu toàn bộ video 4 giây theo đúng thứ tự phân cảnh.");
       return result.videos;
     } catch (caught) {
       setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo video bằng Google Flow.");
@@ -537,25 +551,83 @@ export function ViralDashboard() {
       setIsGeneratingVideos(false);
     }
   }
-  async function renderFinalProjectVideo(project = contentProject, videos = generatedVideos): Promise<string | null> {
+  function defaultVideoEditScenes(project: ContentProjectResult): VideoEditScene[] {
+    return project.scenes.map((scene) => ({ sceneNumber: scene.sceneNumber, trimStart: 0, trimEnd: 0 }));
+  }
+  function openVideoEditor(project = contentProject) {
+    if (!project) return;
+    const defaults = defaultVideoEditScenes(project);
+    setVideoEditScenes((current) => current.length === defaults.length && current.every((scene, index) => scene.sceneNumber === defaults[index].sceneNumber) ? current : defaults);
+    setVideoEditError("");
+    setShowVideoEditor(true);
+  }
+  function updateVideoEditScene(sceneNumber: number, patch: Partial<VideoEditScene>) {
+    setVideoEditScenes((current) => current.map((scene) => scene.sceneNumber === sceneNumber ? { ...scene, ...patch } : scene));
+  }
+  function handleVideoEditDrop(event: DragEvent<HTMLDivElement>, targetSceneNumber: number) {
+    event.preventDefault();
+    if (draggingSceneNumber === null || draggingSceneNumber === targetSceneNumber) return;
+    setVideoEditScenes((current) => {
+      const sourceIndex = current.findIndex((scene) => scene.sceneNumber === draggingSceneNumber);
+      const targetIndex = current.findIndex((scene) => scene.sceneNumber === targetSceneNumber);
+      if (sourceIndex < 0 || targetIndex < 0) return current;
+      const reordered = [...current];
+      const [moved] = reordered.splice(sourceIndex, 1);
+      reordered.splice(targetIndex, 0, moved);
+      return reordered;
+    });
+    setDraggingSceneNumber(null);
+  }
+  async function chooseVideoEditAudio() {
+    try {
+      const editor = (window as Window & { desktopVideoEditor?: DesktopVideoEditor }).desktopVideoEditor;
+      if (!editor) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
+      const result = await editor.pickAudio();
+      if (result.status === "selected" && result.path) {
+        setVideoEditAudioPath(result.path);
+        setVideoEditAudioName(result.name ?? result.path.split(/[\\/]/).pop() ?? "Tệp âm thanh");
+        setVideoEditError("");
+      }
+    } catch (caught) {
+      setVideoEditError(caught instanceof Error ? caught.message : "Không thể chọn tệp âm thanh.");
+    }
+  }
+  async function renderFinalProjectVideo(project = contentProject, videos = generatedVideos, editOptions?: VideoEditOptions): Promise<string | null> {
     if (!project) return null;
-    const sceneNumbers = project.scenes.map((scene) => scene.sceneNumber);
+    const scenes = editOptions?.scenes?.length ? editOptions.scenes : videoEditScenes.length ? videoEditScenes : defaultVideoEditScenes(project);
+    const sceneNumbers = scenes.map((scene) => scene.sceneNumber);
     if (sceneNumbers.some((sceneNumber) => !videos[`scene-${sceneNumber}`])) {
       setContentProjectError("Hãy tạo đầy đủ video phân cảnh trước khi ghép.");
       return null;
     }
+    const options: VideoEditOptions = {
+      scenes: scenes.map((scene) => ({ sceneNumber: scene.sceneNumber, trimStart: scene.trimStart, trimEnd: scene.trimEnd })),
+      transition: editOptions?.transition ?? videoEditTransition,
+      transitionDuration: editOptions?.transitionDuration ?? videoEditTransitionDuration,
+      originalVolume: (editOptions?.originalVolume ?? videoEditOriginalVolume) / 100,
+      musicVolume: (editOptions?.musicVolume ?? videoEditMusicVolume) / 100,
+      musicPath: editOptions?.musicPath ?? (videoEditAudioPath || undefined),
+    };
     setIsRenderingFinalVideo(true);
     setContentProjectError("");
-    setFinalVideoMessage("Đang chuẩn bị ghép video...");
+    setVideoEditError("");
+    setFinalVideoUrl("");
+    setFinalVideoMessage("Đang chuẩn bị ghép và edit video...");
+    setVideoEditProgress({ stage: "prepare", processed: 0, total: 1, label: "Đang chuẩn bị ghép và edit video..." });
     try {
       const editor = (window as Window & { desktopVideoEditor?: DesktopVideoEditor }).desktopVideoEditor;
       if (!editor) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
-      const result = await editor.renderFinal(project.id, sceneNumbers, (progress) => setFinalVideoMessage(progress.label));
+      const result = await editor.renderFinal(project.id, sceneNumbers, options, (progress) => {
+        setVideoEditProgress(progress);
+        setFinalVideoMessage(progress.label);
+      });
       setFinalVideoUrl(result.video);
       setFinalVideoMessage("Đã ghép và xuất video hoàn chỉnh 9:16, 720p, 30fps.");
       return result.video;
     } catch (caught) {
-      setContentProjectError(caught instanceof Error ? caught.message : "Không thể ghép video.");
+      const message = caught instanceof Error ? caught.message : "Không thể ghép và edit video.";
+      setVideoEditError(`${message} Bạn có thể bấm chạy lại.`);
+      setContentProjectError(message);
       return null;
     } finally {
       setIsRenderingFinalVideo(false);
@@ -855,7 +927,46 @@ export function ViralDashboard() {
                   </button>
                   {geminiVideoMessage && <p className="mt-2 text-sm font-semibold text-[#6d28d9]">{geminiVideoMessage}</p>}
                   {Object.keys(generatedVideos).length > 0 && <button type="button" onClick={() => setShowGeneratedVideos((visible) => !visible)} className="ml-2 rounded-lg border border-[#7c3aed] px-4 py-2.5 text-sm font-bold text-[#6d28d9]">{showGeneratedVideos ? "Ẩn video" : "Xem video"}</button>}
-                   {contentProject.scenes.every((scene) => generatedVideos[`scene-${scene.sceneNumber}`]) && <button type="button" onClick={() => void renderFinalProjectVideo()} disabled={isRenderingFinalVideo || isAutomaticRunning} className="ml-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isRenderingFinalVideo ? "Đang ghép video..." : "Ghép & xuất video hoàn chỉnh"}</button>}
+                  {contentProject.scenes.every((scene) => generatedVideos[`scene-${scene.sceneNumber}`]) && <>
+                    <button type="button" onClick={() => showVideoEditor ? setShowVideoEditor(false) : openVideoEditor()} disabled={isAutomaticRunning} className="ml-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{showVideoEditor ? "Ẩn trình edit video" : "Ghép & Edit video"}</button>
+                    {showVideoEditor && <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/40 p-4">
+                      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+                        <div><p className="font-extrabold text-[#0b3262]">Ghép & Edit video</p><p className="mt-1 text-sm leading-6 text-[#6883aa]">Kéo thả để đổi thứ tự. Âm thanh gốc từ Google Flow luôn được giữ lại; nhạc nền hoặc hiệu ứng chỉ là lớp trộn thêm.</p></div>
+                        <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-emerald-700">{videoEditScenes.length} cảnh</span>
+                      </div>
+                      <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                        <label className="text-sm font-semibold text-[#0b3262]">Chuyển cảnh<select value={videoEditTransition} onChange={(event) => setVideoEditTransition(event.target.value as "none" | "fade")} disabled={isRenderingFinalVideo} className="mt-1 w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-2.5 font-normal"><option value="fade">Fade mềm</option><option value="none">Không chuyển cảnh</option></select></label>
+                        <label className="text-sm font-semibold text-[#0b3262]">Thời lượng chuyển cảnh<select value={videoEditTransitionDuration} onChange={(event) => setVideoEditTransitionDuration(Number(event.target.value))} disabled={isRenderingFinalVideo || videoEditTransition === "none"} className="mt-1 w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-2.5 font-normal"><option value="0.2">0,2 giây</option><option value="0.3">0,3 giây</option><option value="0.4">0,4 giây</option></select></label>
+                        <div className="flex items-end"><button type="button" onClick={() => void chooseVideoEditAudio()} disabled={isRenderingFinalVideo} className="w-full rounded-lg border border-[#0b5799] bg-white px-3 py-2.5 text-sm font-bold text-[#0b5799]">{videoEditAudioName ? "Đổi nhạc / hiệu ứng" : "Thêm nhạc / hiệu ứng"}</button></div>
+                      </div>
+                      {videoEditAudioName && <div className="mt-2 flex items-center justify-between gap-3 rounded-lg bg-white px-3 py-2 text-sm text-[#0b3262]"><span className="truncate">Âm thanh thêm: <strong>{videoEditAudioName}</strong></span><button type="button" onClick={() => { setVideoEditAudioPath(""); setVideoEditAudioName(""); }} disabled={isRenderingFinalVideo} className="shrink-0 font-bold text-rose-600">Bỏ chọn</button></div>}
+                      <div className="mt-4 grid gap-4 rounded-lg border border-emerald-100 bg-white p-3 sm:grid-cols-2">
+                        <label className="text-sm font-semibold text-[#0b3262]">Âm thanh gốc Flow: {videoEditOriginalVolume}%<input type="range" min="0" max="200" step="5" value={videoEditOriginalVolume} onChange={(event) => setVideoEditOriginalVolume(Number(event.target.value))} disabled={isRenderingFinalVideo} className="mt-2 w-full" /></label>
+                        <label className="text-sm font-semibold text-[#0b3262]">Âm lượng nhạc / hiệu ứng: {videoEditMusicVolume}%<input type="range" min="0" max="200" step="5" value={videoEditMusicVolume} onChange={(event) => setVideoEditMusicVolume(Number(event.target.value))} disabled={isRenderingFinalVideo || !videoEditAudioPath} className="mt-2 w-full" /></label>
+                      </div>
+                      <div className="mt-4 space-y-3">
+                        {videoEditScenes.map((scene, index) => {
+                          const availableDuration = scene.duration ?? 0;
+                          const maxStart = availableDuration > 0 ? Math.max(0, availableDuration - scene.trimEnd - 0.1) : 3600;
+                          const maxEnd = availableDuration > 0 ? Math.max(0, availableDuration - scene.trimStart - 0.1) : 3600;
+                          return <div key={scene.sceneNumber} draggable={!isRenderingFinalVideo} onDragStart={() => setDraggingSceneNumber(scene.sceneNumber)} onDragEnd={() => setDraggingSceneNumber(null)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => handleVideoEditDrop(event, scene.sceneNumber)} className={`rounded-lg border bg-white p-3 ${draggingSceneNumber === scene.sceneNumber ? "border-emerald-500 opacity-60" : "border-[#d8e3f1]"}`}>
+                            <div className="flex items-center justify-between gap-3"><p className="font-bold text-[#0b5799]">☷ Cảnh {index + 1} · Phân cảnh {scene.sceneNumber}</p><span className="text-xs font-semibold text-[#7990b0]">Kéo để sắp xếp</span></div>
+                            <div className="mt-3 grid gap-3 md:grid-cols-[220px_1fr]">
+                              <video controls preload="metadata" src={generatedVideos[`scene-${scene.sceneNumber}`]} onLoadedMetadata={(event) => { const duration = event.currentTarget.duration; if (Number.isFinite(duration) && duration > 0 && scene.duration !== duration) updateVideoEditScene(scene.sceneNumber, { duration }); }} className="aspect-video w-full rounded-lg border border-[#d8e3f1] bg-black object-contain" />
+                              <div className="grid gap-3 sm:grid-cols-2">
+                                <label className="text-sm font-semibold text-[#0b3262]">Cắt đầu (giây)<input type="number" min="0" max={maxStart} step="0.1" value={scene.trimStart} onChange={(event) => updateVideoEditScene(scene.sceneNumber, { trimStart: Math.max(0, Number(event.target.value) || 0) })} disabled={isRenderingFinalVideo} className="mt-1 w-full rounded-lg border border-[#cbd9ea] px-3 py-2.5 font-normal" /></label>
+                                <label className="text-sm font-semibold text-[#0b3262]">Cắt cuối (giây)<input type="number" min="0" max={maxEnd} step="0.1" value={scene.trimEnd} onChange={(event) => updateVideoEditScene(scene.sceneNumber, { trimEnd: Math.max(0, Number(event.target.value) || 0) })} disabled={isRenderingFinalVideo} className="mt-1 w-full rounded-lg border border-[#cbd9ea] px-3 py-2.5 font-normal" /></label>
+                                <p className="text-xs leading-5 text-[#7990b0] sm:col-span-2">Cắt cuối được tính từ cuối video. Thời lượng gốc: {availableDuration > 0 ? `${availableDuration.toFixed(1)} giây` : "đang đọc..."}.</p>
+                              </div>
+                            </div>
+                          </div>;
+                        })}
+                      </div>
+                      {videoEditProgress.total > 0 && <div className="mt-4 rounded-lg bg-white p-3"><div className="flex justify-between gap-3 text-sm font-semibold text-[#0b3262]"><span>{videoEditProgress.label}</span><span>{videoEditProgress.total > 0 ? Math.round((videoEditProgress.processed / videoEditProgress.total) * 100) : 0}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-[#d8e3f1]"><div className="h-full rounded-full bg-emerald-600 transition-all" style={{ width: `${Math.min(100, Math.max(0, videoEditProgress.total > 0 ? (videoEditProgress.processed / videoEditProgress.total) * 100 : 0))}%` }} /></div></div>}
+                      {videoEditError && <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{videoEditError}</p>}
+                      <div className="mt-4 flex flex-wrap items-center gap-3"><button type="button" onClick={() => void renderFinalProjectVideo()} disabled={isRenderingFinalVideo || isAutomaticRunning} className="rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60">{isRenderingFinalVideo ? "Đang xuất video..." : videoEditError ? "Chạy lại xuất video" : "Xuất video hoàn chỉnh"}</button><span className="text-xs text-[#6883aa]">Video sẽ xuất ở 720p, khung 9:16, 30fps.</span></div>
+                    </div>}
+                  </>}
                   {finalVideoMessage && <p className="mt-2 text-sm font-semibold text-emerald-700">{finalVideoMessage}</p>}
                   {finalVideoUrl && <figure className="mt-4 max-w-md"><video controls preload="metadata" src={finalVideoUrl} className="w-full rounded-lg border border-emerald-200" /><figcaption className="mt-1 text-sm font-semibold">Video hoàn chỉnh</figcaption></figure>}
                   {showGeneratedVideos && <div className="mt-4 grid gap-4 sm:grid-cols-2">{contentProject.scenes.map((scene) => generatedVideos[`scene-${scene.sceneNumber}`] && <figure key={`video-${scene.sceneNumber}`}><video controls preload="metadata" src={generatedVideos[`scene-${scene.sceneNumber}`]} className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Video cảnh {scene.sceneNumber}</figcaption></figure>)}</div>}
