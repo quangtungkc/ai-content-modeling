@@ -430,6 +430,22 @@ function saveGeminiImage(projectId, slot, dataUrl) {
   return `/api/v1/projects/${projectId}/images?kind=${slot.kind}&sceneNumber=${sceneNumber}`;
 }
 
+function saveFlowImage(projectId, slot, buffer, mimeType = "image/png") {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 1024) throw new Error("Google Flow không trả về ảnh hợp lệ.");
+  if (buffer.length > 20 * 1024 * 1024) throw new Error("Ảnh Google Flow vượt quá giới hạn 20 MB.");
+  const mimeToExtension = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif", "image/bmp": ".bmp", "image/avif": ".avif" };
+  const extension = mimeToExtension[mimeType.toLowerCase()] || ".png";
+  const imageRoot = path.join(app.getPath("userData"), "generated-images", projectId);
+  fs.mkdirSync(imageRoot, { recursive: true });
+  const sceneNumber = Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0;
+  for (const oldExtension of Object.values(mimeToExtension)) {
+    const oldTarget = path.join(imageRoot, `${slot.kind}-${sceneNumber}${oldExtension}`);
+    if (fs.existsSync(oldTarget)) fs.rmSync(oldTarget);
+  }
+  fs.writeFileSync(path.join(imageRoot, `${slot.kind}-${sceneNumber}${extension}`), buffer);
+  return `/api/v1/projects/${projectId}/images?kind=${slot.kind}&sceneNumber=${sceneNumber}`;
+}
+
 function findGeneratedImagePath(projectId, kind, sceneNumber = 0) {
   const imageRoot = path.join(app.getPath("userData"), "generated-images", projectId);
   for (const extension of [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif"]) {
@@ -697,6 +713,16 @@ async function configureFlowVideo(window) {
   await dispatchBrowserEscape(window);
 }
 
+async function configureFlowImage(window, aspectRatio) {
+  await clickFlowControl(window, ["Điều kiện kích hoạt cài đặt", "Video settings", "Settings"], false);
+  await clickFlowControl(window, ["Image", "Ảnh"], false);
+  const supportedAspectRatios = new Set(["16:9", "4:3", "1:1", "3:4", "9:16"]);
+  const flowAspectRatio = supportedAspectRatios.has(aspectRatio) ? aspectRatio : "9:16";
+  await clickFlowControl(window, [flowAspectRatio], true);
+  await clickFlowControl(window, ["x1"], true);
+  await dispatchBrowserEscape(window);
+}
+
 async function createFlowProject(window) {
   await window.webContents.loadURL("https://flow.google.com/?pli=1");
   await waitForFlowLoad(window);
@@ -818,6 +844,65 @@ async function waitForFlowVideoWithRecovery(window, projectUrl, beforeSources) {
   if (state?.videoSource) return state;
   if (!state?.failed) throw new Error("Google Flow không trả về video sau khi tải lại trang.");
   throw new Error("Google Flow vẫn báo tạo video không thành công sau khi tải lại và gửi tạo lại.");
+}
+
+async function inspectFlowImage(window, beforeSources = []) {
+  const expression = [
+    "(() => {",
+    "  const before = new Set(" + JSON.stringify(beforeSources) + ");",
+    "  const roots = [document]; const seen = new Set(roots);",
+    "  for (let index = 0; index < roots.length; index += 1) { for (const element of roots[index].querySelectorAll('*')) { if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); } } }",
+    "  const images = roots.flatMap((root) => [...root.querySelectorAll('img')]).filter((image) => { const bounds = image.getBoundingClientRect(); return bounds.width > 0 && bounds.height > 0; });",
+    "  const sourceFor = (image) => image.currentSrc || image.src || image.querySelector('source')?.src || '';",
+    "  const image = images.reverse().find((candidate) => { const source = sourceFor(candidate); return source && !before.has(source) && candidate.complete && (candidate.naturalWidth || candidate.width) >= 128 && (candidate.naturalHeight || candidate.height) >= 128 && (/flow-content\\.google\\/image\\//i.test(source) || /tile displaying a user's image/i.test(candidate.alt || '')); });",
+    "  const resourceSources = performance.getEntriesByType('resource').map((entry) => entry.name).filter((source) => /flow-content\\.google\\/image\\//i.test(source) && !before.has(source));",
+    "  const text = document.body?.innerText || '';",
+    "  return { imageSource: image ? sourceFor(image) : (resourceSources[resourceSources.length - 1] || null), failed: /không thành công|không tải được ảnh|failed|couldn't load image|could not load image|generation failed/i.test(text) };",
+    "})()",
+  ].join("\n");
+  return window.webContents.executeJavaScript(expression, true);
+}
+
+async function waitForFlowImage(window, beforeSources, timeout = 600_000) {
+  for (let elapsed = 0; elapsed < timeout; elapsed += 2_000) {
+    const state = await inspectFlowImage(window, beforeSources);
+    if (state?.imageSource) return state;
+    if (state?.failed) return state;
+    await delay(2_000);
+  }
+  return { failed: false, timedOut: true };
+}
+
+async function getFlowImageBuffer(window, result) {
+  if (typeof result?.imageSource === "string" && result.imageSource && !result.imageSource.startsWith("blob:")) {
+    const response = await window.webContents.session.fetch(result.imageSource);
+    if (!response.ok) throw new Error("Google Flow không cho phép tải ảnh vừa tạo.");
+    const mimeType = (response.headers.get("content-type") || "image/png").split(";")[0].toLowerCase();
+    if (!mimeType.startsWith("image/")) throw new Error("Google Flow không trả về tệp ảnh hợp lệ.");
+    return { buffer: Buffer.from(await response.arrayBuffer()), mimeType };
+  }
+  const dataUrl = await window.webContents.executeJavaScript("(async () => { const image = [...document.querySelectorAll('img')].reverse().find((candidate) => (candidate.currentSrc || candidate.src || '').startsWith('blob:')); if (!image) return null; const response = await window.fetch(image.currentSrc || image.src); const blob = await response.blob(); return await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); }); })()", true);
+  const match = typeof dataUrl === "string" ? /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(dataUrl) : null;
+  if (!match) throw new Error("Không tìm thấy dữ liệu ảnh Google Flow để tải về app.");
+  return { buffer: Buffer.from(match[2], "base64"), mimeType: match[1].toLowerCase() };
+}
+
+async function waitForFlowImageWithRecovery(window, projectUrl, beforeSources) {
+  let state = await waitForFlowImage(window, beforeSources);
+  if (state?.imageSource && !state?.failed) return state;
+  await reloadFlowProject(window, projectUrl);
+  state = await waitForFlowImage(window, beforeSources, 30_000);
+  if (state?.failed) {
+    const retryPoint = await waitForFlowControlPoint(window, ["Thử lại", "Try again", "Retry"], true, 15_000);
+    await dispatchBrowserClick(window, retryPoint);
+    state = await waitForFlowImage(window, beforeSources);
+    if (state?.imageSource && !state?.failed) return state;
+    if (state?.imageSource && state?.failed) throw new Error("Google Flow vẫn báo tạo ảnh không thành công sau khi gửi tạo lại.");
+    throw new Error("Google Flow vẫn không tạo được ảnh sau khi gửi tạo lại.");
+  }
+  if (state?.imageSource) return state;
+  if (!state?.failed) throw new Error("Google Flow không trả về ảnh sau khi tải lại trang.");
+  throw new Error("Google Flow vẫn báo tạo ảnh không thành công sau khi tải lại và gửi tạo lại.");
 }
 
 async function captureGeminiImage(window, rect) {
@@ -1015,6 +1100,65 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
   return { status: "completed", images };
 });
 
+async function runFlowImageJob(event, projectId, slots) {
+  event.sender.send("flow-browser:image-progress", { processed: 0, total: slots.length, label: "Đang mở Google Flow..." });
+  const window = createFlowWindow();
+  const projectUrl = await createFlowProject(window);
+  const images = {};
+  for (let index = 0; index < slots.length; index += 1) {
+    if (index > 0) {
+      event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang quay về màn hình tạo ảnh Google Flow trước ảnh tiếp theo..." });
+      await reloadFlowProject(window, projectUrl);
+    }
+    const slot = slots[index];
+    if (!slot || !["character", "background", "scene"].includes(slot.kind) || typeof slot.prompt !== "string" || !slot.prompt.trim()) {
+      throw new Error("Dữ liệu ảnh tạo bằng Google Flow không hợp lệ.");
+    }
+    event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: slot.label || "Ảnh " + (index + 1) });
+    await clearFlowComposer(window);
+    event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang cấu hình Google Flow cho " + (slot.label || "ảnh") + "..." });
+    await configureFlowImage(window, slot.aspectRatio || "9:16");
+
+    const prepared = await window.webContents.executeJavaScript([
+      "(() => {",
+      "  const roots = [document];",
+      "  const seen = new Set(roots);",
+      "  for (let index = 0; index < roots.length; index += 1) {",
+      "    for (const element of roots[index].querySelectorAll('*')) {",
+      "      if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }",
+      "    }",
+      "  }",
+      "  const allImages = () => roots.flatMap((root) => [...root.querySelectorAll('img')]);",
+      "  const beforeSources = allImages().map((image) => image.currentSrc || image.src).filter(Boolean);",
+      "  const beforeResources = performance.getEntriesByType('resource').map((entry) => entry.name).filter((source) => /flow-content\\.google\\/image\\//i.test(source));",
+      "  const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable=\"true\"]')]).find((element) => { const bounds = element.getBoundingClientRect(); return bounds.width > 100 && bounds.height >= 20; });",
+      "  if (!input) return { error: 'Không tìm thấy ô nhập prompt Google Flow.' };",
+      "  const prompt = " + JSON.stringify(slot.prompt) + ";",
+      "  input.focus();",
+      "  if (input.tagName === 'TEXTAREA') { const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, prompt); }",
+      "  else { document.execCommand('selectAll', false); document.execCommand('insertText', false, prompt); }",
+      "  input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));",
+      "  input.dispatchEvent(new Event('change', { bubbles: true }));",
+      "  return { beforeSources: [...beforeSources, ...beforeResources] };",
+      "})()",
+    ].join("\n"), true);
+    if (prepared?.error) throw new Error(prepared.error);
+
+    event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang gửi lệnh tạo " + (slot.label || "ảnh") + "..." });
+    const sendPoint = await waitForFlowControlPoint(window, ["Bắt đầu tạo", "Tạo ảnh", "Generate", "Create", "Start generation"], false, 30_000);
+    await dispatchBrowserClick(window, sendPoint);
+    await delay(1_200);
+    event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang chờ Google Flow tạo " + (slot.label || "ảnh") + "..." });
+    const result = await waitForFlowImageWithRecovery(window, projectUrl, prepared.beforeSources ?? []);
+    const { buffer, mimeType } = await getFlowImageBuffer(window, result);
+    const url = saveFlowImage(projectId, slot, buffer, mimeType);
+    const sceneNumber = Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0;
+    images[`${slot.kind}-${sceneNumber}`] = `${url}&v=${Date.now()}`;
+    event.sender.send("flow-browser:image-progress", { processed: index + 1, total: slots.length, label: slot.label || "Ảnh " + (index + 1) });
+  }
+  return { status: "completed", images };
+}
+
 async function runFlowVideoJob(event, projectId, slots) {
   event.sender.send("gemini-browser:video-progress", { processed: 0, total: slots.length, label: "Đang mở Google Flow..." });
   const window = createFlowWindow();
@@ -1101,6 +1245,15 @@ async function runFlowVideoJob(event, projectId, slots) {
   return { status: "completed", videos };
 }
 
+
+ipcMain.handle("flow-browser:run-image-job", async (event, value) => {
+  const projectId = value?.projectId;
+  const slots = value?.slots;
+  if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || !Array.isArray(slots) || slots.length === 0) {
+    throw new Error("Yêu cầu tạo ảnh bằng Google Flow không hợp lệ.");
+  }
+  return runFlowImageJob(event, projectId, slots);
+});
 
 ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
   const projectId = value?.projectId;

@@ -44,10 +44,10 @@ type DesktopFacebook = {
   open: () => Promise<{ status: string }>;
   scan: (entries: Array<{ id: string; url: string }>, onProgress?: (progress: FacebookScanProgress) => void) => Promise<FacebookScanResult[]>;
 };
-type ImageSlot = { kind: "character" | "background" | "scene"; sceneNumber?: number; label: string; prompt: string };
+type ImageSlot = { kind: "character" | "background" | "scene"; sceneNumber?: number; label: string; prompt: string; aspectRatio: string };
 type VideoSlot = { sceneNumber: number; label: string; visualBlock: string; actionBlock: string; audioBlock: string; aspectRatio: string };
-type DesktopGemini = {
-  runJob: (projectId: string, slots: ImageSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; images: Record<string, string> }>;
+type DesktopFlow = {
+  runImageJob: (projectId: string, slots: ImageSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; images: Record<string, string> }>;
   runVideoJob: (projectId: string, slots: VideoSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; videos: Record<string, string> }>;
 };
 type DesktopVideoEditor = {
@@ -75,10 +75,11 @@ const accents = [
   "border-l-blue-600",
 ];
 
-// Gemini on the consumer web blocks prompts that name a third-party studio/style.
+// Keep prompts compatible with consumer image-generation surfaces while
+// preserving the approved visual direction of existing Content Projects.
 // Existing projects may have been created before that rule was added, so sanitize
 // immediately before the prompt is sent instead of requiring the user to recreate a project.
-function toGeminiSafePrompt(prompt: string) {
+function toFlowSafePrompt(prompt: string) {
   return prompt
     .replace(/\b(?:3D\s+)?Pixar(?:[-\s]style)?\b/gi, "original expressive 3D animated film style")
     .replace(/\bDisney(?:[-\s]style)?\b/gi, "original family animation style")
@@ -123,9 +124,9 @@ export function ViralDashboard() {
   const [generatedImages, setGeneratedImages] = useState<Record<string, string>>({});
   const [isGeneratingImages, setIsGeneratingImages] = useState(false);
   const [showGeneratedImages, setShowGeneratedImages] = useState(false);
-  const [geminiImageSlots, setGeminiImageSlots] = useState<ImageSlot[]>([]);
-  const [geminiImageMessage, setGeminiImageMessage] = useState("");
-  const [geminiImageProgress, setGeminiImageProgress] = useState({ processed: 0, total: 0 });
+  const [flowImageSlots, setFlowImageSlots] = useState<ImageSlot[]>([]);
+  const [flowImageMessage, setFlowImageMessage] = useState("");
+  const [flowImageProgress, setFlowImageProgress] = useState({ processed: 0, total: 0 });
   const [generatedVideos, setGeneratedVideos] = useState<Record<string, string>>({});
   const [isGeneratingVideos, setIsGeneratingVideos] = useState(false);
   const [showGeneratedVideos, setShowGeneratedVideos] = useState(false);
@@ -449,8 +450,8 @@ export function ViralDashboard() {
       if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể tạo thiết kế và phân cảnh.");
       setContentProject(body.data);
       setGeneratedImages({});
-      setGeminiImageSlots([]);
-      setGeminiImageMessage("");
+      setFlowImageSlots([]);
+      setFlowImageMessage("");
       setShowGeneratedImages(false);
       setGeneratedVideos({});
       setGeminiVideoMessage("");
@@ -461,12 +462,12 @@ export function ViralDashboard() {
       setIsCreatingProject(false);
     }
   }
-  function buildGeminiImageSlots(): ImageSlot[] {
+  function buildFlowImageSlots(): ImageSlot[] {
     if (!contentProject) return [];
     return [
-      { kind: "character", label: "Nhân vật", prompt: toGeminiSafePrompt(`Create a consistent character reference sheet. Art direction: ${JSON.stringify(contentProject.artDirection)}. Character design: ${JSON.stringify(contentProject.characterDesign)}. Make the visual treatment entirely original. Aspect ratio: ${aspectRatio}. Generate one final image only.`) },
-      { kind: "background", label: "Bối cảnh", prompt: toGeminiSafePrompt(`Create a consistent background reference image. Art direction: ${JSON.stringify(contentProject.artDirection)}. Background design: ${JSON.stringify(contentProject.backgroundDesign)}. Make the visual treatment entirely original. Aspect ratio: ${aspectRatio}. Generate one final image only.`) },
-      ...contentProject.scenes.map((scene) => ({ kind: "scene" as const, sceneNumber: scene.sceneNumber, label: `Cảnh ${scene.sceneNumber}`, prompt: toGeminiSafePrompt(`${scene.englishPrompt}\nVisual: ${scene.visualBlock}\nAction: ${scene.actionBlock}\nKeep the approved character and background designs consistent. Make the visual treatment entirely original. Aspect ratio: ${aspectRatio}. Generate one final image only.`) })),
+      { kind: "character", label: "Nhân vật", aspectRatio, prompt: toFlowSafePrompt(`Create a consistent character reference sheet. Art direction: ${JSON.stringify(contentProject.artDirection)}. Character design: ${JSON.stringify(contentProject.characterDesign)}. Make the visual treatment entirely original. Aspect ratio: ${aspectRatio}. Generate one final image only.`) },
+      { kind: "background", label: "Bối cảnh", aspectRatio, prompt: toFlowSafePrompt(`Create a consistent background reference image. Art direction: ${JSON.stringify(contentProject.artDirection)}. Background design: ${JSON.stringify(contentProject.backgroundDesign)}. Make the visual treatment entirely original. Aspect ratio: ${aspectRatio}. Generate one final image only.`) },
+      ...contentProject.scenes.map((scene) => ({ kind: "scene" as const, sceneNumber: scene.sceneNumber, label: `Cảnh ${scene.sceneNumber}`, aspectRatio, prompt: toFlowSafePrompt(`${scene.englishPrompt}\nVisual: ${scene.visualBlock}\nAction: ${scene.actionBlock}\nKeep the approved character and background designs consistent. Make the visual treatment entirely original. Aspect ratio: ${aspectRatio}. Generate one final image only.`) })),
     ];
   }
   async function generateAllProjectImages() {
@@ -474,16 +475,16 @@ export function ViralDashboard() {
     setIsGeneratingImages(true);
     setContentProjectError("");
     try {
-      const slots = buildGeminiImageSlots();
-      const gemini = (window as Window & { desktopGemini?: DesktopGemini }).desktopGemini;
-      if (!gemini) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
-      setGeminiImageSlots(slots);
-      setGeminiImageProgress({ processed: 0, total: slots.length });
-      const result = await gemini.runJob(contentProject.id, slots, (progress) => { setGeminiImageProgress({ processed: progress.processed, total: progress.total }); setGeminiImageMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`); });
+      const slots = buildFlowImageSlots();
+      const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
+      if (!flow) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
+      setFlowImageSlots(slots);
+      setFlowImageProgress({ processed: 0, total: slots.length });
+      const result = await flow.runImageJob(contentProject.id, slots, (progress) => { setFlowImageProgress({ processed: progress.processed, total: progress.total }); setFlowImageMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`); });
       setGeneratedImages(result.images);
       setShowGeneratedImages(true);
-      setGeminiImageMessage("Đã tạo và đưa toàn bộ ảnh vào app theo đúng thứ tự.");
-    } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể mở Gemini Ultra."); }
+      setFlowImageMessage("Đã tạo và đưa toàn bộ ảnh từ Google Flow vào app theo đúng thứ tự.");
+    } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo ảnh bằng Google Flow."); }
     finally { setIsGeneratingImages(false); }
   }
   async function generateAllProjectVideos() {
@@ -498,9 +499,9 @@ export function ViralDashboard() {
     setGeminiVideoProgress({ processed: 0, total: sceneSlots.length });
     setGeminiVideoMessage("Đang mở Google Flow...");
     try {
-      const gemini = (window as Window & { desktopGemini?: DesktopGemini }).desktopGemini;
-      if (!gemini) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
-      const result = await gemini.runVideoJob(contentProject.id, sceneSlots, (progress) => {
+      const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
+      if (!flow) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
+      const result = await flow.runVideoJob(contentProject.id, sceneSlots, (progress) => {
         setGeminiVideoProgress({ processed: progress.processed, total: progress.total });
         setGeminiVideoMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`);
       });
@@ -706,7 +707,12 @@ export function ViralDashboard() {
               {modelingIdea && <div className="mt-5 space-y-4 border-t border-[#d8e3f1] pt-4 text-sm leading-6 text-[#0b3262]"><AnalysisBlock label="Ý tưởng" value={`${modelingIdea.title}\n${modelingIdea.coreConcept}`} /><AnalysisBlock label="Kịch bản" value={modelingIdea.script} /><AnalysisBlock label="Xây dựng hình tượng nhân vật" value={modelingIdea.characterDesign} /><AnalysisBlock label="Bối cảnh" value={modelingIdea.setting} /><AnalysisBlock label="Phong cách mỹ thuật" value={modelingIdea.artStyle} />
                 <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Tạo hình và phân cảnh</p><p className="mt-1 text-sm text-[#6883aa]">Giữ nhân vật và bối cảnh đồng nhất trong toàn bộ video.</p><div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end"><label className="flex-1 text-sm font-semibold text-[#0b3262]">Kích thước khung hình<select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)} className="mt-1 w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-2.5 font-normal"><option value="9:16">9:16 · Dọc</option><option value="16:9">16:9 · Ngang</option><option value="1:1">1:1 · Vuông</option><option value="4:5">4:5 · Dọc mạng xã hội</option></select></label><button type="button" onClick={() => void createContentProject()} disabled={isCreatingProject} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isCreatingProject ? "Đang tạo..." : "Tạo hình tượng & phân cảnh"}</button></div>{contentProjectError && <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{contentProjectError}</p>}{contentProject && <div className="mt-5 space-y-4 border-t border-[#d8e3f1] pt-4"><AnalysisBlock label="Thiết kế nhân vật đồng nhất" value={JSON.stringify(contentProject.characterDesign, null, 2)} /><AnalysisBlock label="Bối cảnh đồng nhất" value={JSON.stringify(contentProject.backgroundDesign, null, 2)} /><AnalysisBlock label="Khung hình" value={String(contentProject.artDirection.aspectRatio ?? aspectRatio)} /><div><p className="font-extrabold text-[#0b3262]">Các phân cảnh</p><div className="mt-2 space-y-3">{contentProject.scenes.map((scene) => <div key={scene.sceneNumber} className="rounded-lg border border-[#d8e3f1] bg-white p-3"><p className="font-bold text-[#0b5799]">Cảnh {scene.sceneNumber}</p><p className="mt-1"><strong>Hình ảnh:</strong> {scene.visualBlock}</p><p className="mt-1"><strong>Hành động:</strong> {scene.actionBlock}</p><p className="mt-1"><strong>Âm thanh:</strong> {scene.audioBlock}</p></div>)}</div></div></div>}</div>
               </div>}
-              {contentProject && <div className="mt-4 space-y-3"><button type="button" onClick={() => void generateAllProjectImages()} disabled={isGeneratingImages} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isGeneratingImages ? `Đang tạo ảnh ${geminiImageProgress.processed}/${geminiImageProgress.total}...` : "Tự động tạo toàn bộ ảnh bằng Gemini Ultra"}</button>{geminiImageSlots.length > 0 && <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Quy trình Gemini Ultra</p><p className="mt-1 text-sm leading-6 text-[#6883aa]">App tự gửi từng prompt, chờ ảnh hoàn tất, lưu ảnh về Content Project rồi mới gửi prompt kế tiếp.</p>{geminiImageMessage && <p className="mt-2 text-sm font-semibold text-[#0b5799]">{geminiImageMessage}</p>}<p className="mt-2 text-xs text-[#6883aa]">Nếu lần đầu dùng, đăng nhập Gemini trong cửa sổ mở ra. Không xử lý CAPTCHA tự động.</p></div>}{Object.keys(generatedImages).length > 0 && <button type="button" onClick={() => setShowGeneratedImages((visible) => !visible)} className="ml-2 rounded-lg border border-[#0b5799] px-4 py-2.5 text-sm font-bold text-[#0b5799]">{showGeneratedImages ? "Ẩn ảnh" : "Xem ảnh"}</button>}{showGeneratedImages && <div className="mt-4 grid gap-4 sm:grid-cols-2">{generatedImages["character-0"] && <figure><img src={generatedImages["character-0"]} alt="Hình tượng nhân vật" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Nhân vật</figcaption></figure>}{generatedImages["background-0"] && <figure><img src={generatedImages["background-0"]} alt="Bối cảnh đồng nhất" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Bối cảnh</figcaption></figure>}{contentProject.scenes.map((scene) => generatedImages[`scene-${scene.sceneNumber}`] && <figure key={`image-${scene.sceneNumber}`}><img src={generatedImages[`scene-${scene.sceneNumber}`]} alt={`Ảnh cảnh ${scene.sceneNumber}`} className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Cảnh {scene.sceneNumber}</figcaption></figure>)}</div>}</div>}
+              {contentProject && <div className="mt-4 space-y-3">
+                <button type="button" onClick={() => void generateAllProjectImages()} disabled={isGeneratingImages} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isGeneratingImages ? `Đang tạo ảnh ${flowImageProgress.processed}/${flowImageProgress.total}...` : "Tự động tạo toàn bộ ảnh bằng Google Flow"}</button>
+                {flowImageSlots.length > 0 && <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Quy trình Google Flow</p><p className="mt-1 text-sm leading-6 text-[#6883aa]">App tự gửi từng prompt vào Google Flow, chờ ảnh hoàn tất, tải ảnh về Content Project rồi mới gửi prompt kế tiếp.</p>{flowImageMessage && <p className="mt-2 text-sm font-semibold text-[#0b5799]">{flowImageMessage}</p>}<p className="mt-2 text-xs text-[#6883aa]">Nếu lần đầu dùng, hãy đăng nhập Google Flow trong cửa sổ mở ra. Không xử lý CAPTCHA tự động.</p></div>}
+                {Object.keys(generatedImages).length > 0 && <button type="button" onClick={() => setShowGeneratedImages((visible) => !visible)} className="ml-2 rounded-lg border border-[#0b5799] px-4 py-2.5 text-sm font-bold text-[#0b5799]">{showGeneratedImages ? "Ẩn ảnh" : "Xem ảnh"}</button>}
+                {showGeneratedImages && <div className="mt-4 grid gap-4 sm:grid-cols-2">{generatedImages["character-0"] && <figure><img src={generatedImages["character-0"]} alt="Hình tượng nhân vật" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Nhân vật</figcaption></figure>}{generatedImages["background-0"] && <figure><img src={generatedImages["background-0"]} alt="Bối cảnh đồng nhất" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Bối cảnh</figcaption></figure>}{contentProject.scenes.map((scene) => generatedImages[`scene-${scene.sceneNumber}`] && <figure key={`image-${scene.sceneNumber}`}><img src={generatedImages[`scene-${scene.sceneNumber}`]} alt={`Ảnh cảnh ${scene.sceneNumber}`} className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Cảnh {scene.sceneNumber}</figcaption></figure>)}</div>}
+              </div>}
               {contentProject && contentProject.scenes.every((scene) => generatedImages[`scene-${scene.sceneNumber}`]) && (
                 <div className="mt-5 border-t border-[#d8e3f1] pt-4">
                   <button type="button" onClick={() => void generateAllProjectVideos()} disabled={isGeneratingVideos} className="rounded-lg bg-[#7c3aed] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">
