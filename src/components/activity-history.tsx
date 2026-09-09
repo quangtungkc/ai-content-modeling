@@ -22,6 +22,7 @@ type AutomationRun = {
   error: string | null;
   startedAt: string;
   completedAt: string | null;
+  sourceVideoUrl: string | null;
   finalVideoUrl: string | null;
 };
 
@@ -30,6 +31,7 @@ export function ActivityHistory() {
   const [selectedRunId, setSelectedRunId] = useState("");
   const [expandedStepKey, setExpandedStepKey] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -61,6 +63,24 @@ export function ActivityHistory() {
       ?? selectedRun.steps[selectedRun.steps.length - 1];
     setExpandedStepKey(preferredStep?.key ?? "");
   }, [selectedRunId, selectedRun]);
+
+  async function deleteSelectedProject() {
+    if (!selectedRun || !window.confirm("Xóa project modeling, toàn bộ ảnh/video đã tạo và phiên lịch sử này? Dữ liệu không thể khôi phục.")) return;
+    setIsDeleting(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/v1/automations?id=${encodeURIComponent(selectedRun.id)}`, { method: "DELETE" });
+      const body = await response.json() as { data?: { deletedRunId?: string }; error?: { message?: string } };
+      if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể xóa project.");
+      const remaining = runs.filter((run) => run.id !== selectedRun.id);
+      setRuns(remaining);
+      setSelectedRunId(remaining[0]?.id ?? "");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Không thể xóa project.");
+    } finally {
+      setIsDeleting(false);
+    }
+  }
 
   return (
     <section className="mx-auto max-w-[1150px]">
@@ -95,7 +115,10 @@ export function ActivityHistory() {
                   <h2 className="mt-1 text-xl font-extrabold text-[#0b3262]">Video modeling tự động</h2>
                   <p className="mt-1 text-xs text-[#6883aa]">Bắt đầu: {formatDate(selectedRun.startedAt)}</p>
                 </div>
-                <StatusBadge status={selectedRun.status} />
+                <div className="flex items-center gap-2">
+                  <StatusBadge status={selectedRun.status} />
+                  <button type="button" onClick={() => void deleteSelectedProject()} disabled={isDeleting} className="rounded-lg border border-rose-200 px-3 py-2 text-xs font-extrabold text-rose-700 disabled:opacity-50">{isDeleting ? "Đang xóa..." : "Xóa dự án"}</button>
+                </div>
               </div>
               <div className="mt-4 rounded-lg border border-violet-100 bg-violet-50 px-4 py-3 text-sm text-violet-900">
                 <p className="font-extrabold">Tiến độ: {completedSteps}/{selectedRun.steps.length} bước đã hoàn tất</p>
@@ -129,6 +152,7 @@ export function ActivityHistory() {
                         <video controls preload="metadata" src={selectedRun.finalVideoUrl} className="mt-3 max-h-[420px] w-full rounded-lg bg-black" />
                         <div className="mt-3 flex flex-wrap gap-2">
                           <a href={selectedRun.finalVideoUrl} target="_blank" rel="noreferrer" className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white">Mở video kết quả</a>
+                          {selectedRun.sourceVideoUrl && <a href={selectedRun.sourceVideoUrl} target="_blank" rel="noreferrer" className="rounded-lg border border-emerald-300 px-3 py-2 text-xs font-bold text-emerald-800">Mở video gốc</a>}
                           <a href={`${selectedRun.finalVideoUrl}&download=1`} download="video-modeling.mp4" className="rounded-lg border border-emerald-300 px-3 py-2 text-xs font-bold text-emerald-800">Tải video</a>
                         </div>
                       </div>}

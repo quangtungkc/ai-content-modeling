@@ -5,6 +5,7 @@ import { getRequiredSession } from "@/lib/auth/provider";
 import { AppError, toErrorResponse } from "@/lib/errors";
 import { db } from "@/lib/db";
 import { hasProjectFinalVideo } from "@/modules/assets/image-generation-service";
+import { deleteAutomationRunWithProject } from "@/modules/projects/deletion-service";
 
 const stepSchema = z.object({
   key: z.string().min(1).max(80),
@@ -105,13 +106,29 @@ export async function GET() {
     const session = await getRequiredSession();
     await ensureAutomationRunTable();
     const runs = await db.automationRun.findMany({ where: { userId: session.userId }, orderBy: { startedAt: "desc" }, take: 50 });
+    const sourceVideos = await db.competitorVideo.findMany({ where: { id: { in: runs.map((run) => run.sourceVideoId) }, competitor: { channel: { userId: session.userId } } }, select: { id: true, url: true } });
+    const sourceVideoUrls = new Map(sourceVideos.map((video) => [video.id, video.url]));
     const data = await Promise.all(runs.map(async (run) => ({
       ...run,
+      sourceVideoUrl: sourceVideoUrls.get(run.sourceVideoId) ?? null,
       finalVideoUrl: run.status === "SUCCEEDED" && run.projectId && await hasProjectFinalVideo(run.projectId)
         ? `/api/v1/projects/${run.projectId}/videos?final=1`
         : null,
     })));
     return Response.json({ data, requestId });
+  } catch (error) {
+    return toErrorResponse(normalize(error), requestId);
+  }
+}
+
+export async function DELETE(request: Request) {
+  const requestId = randomUUID();
+  try {
+    const session = await getRequiredSession();
+    await ensureAutomationRunTable();
+    const id = new URL(request.url).searchParams.get("id");
+    if (!id) throw new AppError("VALIDATION_ERROR", "Thiếu mã dự án cần xóa.", 400);
+    return Response.json({ data: await deleteAutomationRunWithProject(id, session.userId), requestId });
   } catch (error) {
     return toErrorResponse(normalize(error), requestId);
   }

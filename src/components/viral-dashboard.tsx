@@ -75,6 +75,7 @@ type ContentProjectResult = { id: string; artDirection: Record<string, unknown>;
 type AutomationStep = { key: string; label: string; status: "pending" | "running" | "completed" | "failed"; detail?: string; error?: string; startedAt?: string; completedAt?: string };
 type AutomationSettings = { artStyle: string; aspectRatio: "9:16" | "16:9" | "1:1" | "4:5" };
 type AutomationRunResult = { id: string; status: "RUNNING" | "SUCCEEDED" | "FAILED"; steps: AutomationStep[] };
+type SelectedModelingVideo = { videoId: string; modelingUrl: string; sourceUrl: string };
 const accents = [
   "border-l-emerald-600",
   "border-l-teal-500",
@@ -161,7 +162,7 @@ export function ViralDashboard() {
   const [isAutomaticRunning, setIsAutomaticRunning] = useState(false);
   const [automationRunId, setAutomationRunId] = useState("");
   const [automationSteps, setAutomationSteps] = useState<AutomationStep[]>([]);
-  const [selectedModelingVideoUrl, setSelectedModelingVideoUrl] = useState("");
+  const [selectedModelingVideo, setSelectedModelingVideo] = useState<SelectedModelingVideo | null>(null);
   useEffect(() => {
     const controller = new AbortController();
     setIsLoading(true);
@@ -312,6 +313,39 @@ export function ViralDashboard() {
       setAppliedFilters((current) => ({ ...current }));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Không thể xoá dữ liệu video.");
+    }
+  }
+  async function deleteVideo(videoId: string) {
+    if (!window.confirm("Xóa video gốc khỏi app, video modeling, project và lịch sử chạy liên quan? Dữ liệu này không thể khôi phục.")) return;
+    setError("");
+    setMessage("Đang xóa video gốc và toàn bộ video modeling liên quan...");
+    try {
+      const response = await fetch(`/api/v1/videos/${videoId}`, { method: "DELETE" });
+      const body = await response.json() as { data?: { deletedProjects?: number }; error?: { message?: string } };
+      if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể xóa video.");
+      setDashboard((current) => {
+        if (!current) return current;
+        const removed = current.videos.find((video) => video.id === videoId);
+        return {
+          ...current,
+          stats: {
+            ...current.stats,
+            newVideos: Math.max(0, current.stats.newVideos - (removed ? 1 : 0)),
+            viralVideos: Math.max(0, current.stats.viralVideos - (removed?.score && removed.score >= 80 ? 1 : 0)),
+          },
+          videos: current.videos.filter((video) => video.id !== videoId),
+        };
+      });
+      if (analysisVideoId === videoId) {
+        setAnalysisVideoId("");
+        setAnalysisResult(null);
+        setModelingIdea(null);
+        setContentProject(null);
+      }
+      if (selectedModelingVideo?.videoId === videoId) setSelectedModelingVideo(null);
+      setMessage(`Đã xóa video gốc và ${body.data.deletedProjects ?? 0} project modeling liên quan.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Không thể xóa video.");
     }
   }
   useEffect(() => {
@@ -1176,7 +1210,7 @@ export function ViralDashboard() {
                     {video.modelingVideoUrl && (
                       <button
                         type="button"
-                        onClick={() => setSelectedModelingVideoUrl(video.modelingVideoUrl ?? "")}
+                        onClick={() => setSelectedModelingVideo({ videoId: video.id, modelingUrl: video.modelingVideoUrl ?? "", sourceUrl: video.url })}
                         className="mr-4 text-xs font-bold text-[#7c3aed]"
                       >
                         Video modeling
@@ -1185,6 +1219,7 @@ export function ViralDashboard() {
                     <button onClick={() => video.analysis ? viewStoredAnalysis(video) : void analyzeVideo(video.id)} disabled={analyzingVideoId === video.id} className="text-xs font-bold text-[#0b5799] disabled:cursor-wait disabled:opacity-60">
                       {analyzingVideoId === video.id ? "Đang phân tích..." : video.analysis ? "Xem phân tích" : "Phân tích"}
                     </button>
+                    <button type="button" onClick={() => void deleteVideo(video.id)} className="ml-4 text-xs font-bold text-rose-600">Xóa</button>
                   </td>
                 </tr>
               ))}
@@ -1204,11 +1239,11 @@ export function ViralDashboard() {
         </div>
         {videos.length > pageSize && <div className="mt-4 flex items-center justify-center gap-2"><button type="button" onClick={() => setVideoPage((page) => Math.max(1, page - 1))} disabled={videoPage === 1} className="rounded-lg border border-[#cbd9ea] px-3 py-2 text-sm font-bold text-[#0b5799] disabled:opacity-40">‹</button>{Array.from({ length: pageCount }, (_, index) => index + 1).map((page) => <button type="button" key={page} onClick={() => setVideoPage(page)} className={`rounded-lg px-3 py-2 text-sm font-bold ${page === videoPage ? "bg-[#0b5799] text-white" : "border border-[#cbd9ea] text-[#0b5799]"}`}>{page}</button>)}<button type="button" onClick={() => setVideoPage((page) => Math.min(pageCount, page + 1))} disabled={videoPage === pageCount} className="rounded-lg border border-[#cbd9ea] px-3 py-2 text-sm font-bold text-[#0b5799] disabled:opacity-40">›</button></div>}
       </section>
-      {selectedModelingVideoUrl && (
+      {selectedModelingVideo && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setSelectedModelingVideoUrl("");
+            if (event.target === event.currentTarget) setSelectedModelingVideo(null);
           }}
         >
           <section role="dialog" aria-modal="true" aria-label="Video modeling" className="w-full max-w-3xl rounded-2xl bg-white p-5 shadow-2xl">
@@ -1217,18 +1252,20 @@ export function ViralDashboard() {
                 <p className="text-xs font-extrabold tracking-[0.16em] text-violet-600">VIDEO MODELING</p>
                 <h2 className="mt-1 text-xl font-extrabold text-[#0b3262]">Video modeling đã hoàn thiện</h2>
               </div>
-              <button type="button" onClick={() => setSelectedModelingVideoUrl("")} className="text-xl text-[#6883aa]" aria-label="Đóng">×</button>
+              <button type="button" onClick={() => setSelectedModelingVideo(null)} className="text-xl text-[#6883aa]" aria-label="Đóng">×</button>
             </div>
-            <video controls autoPlay preload="metadata" src={selectedModelingVideoUrl} className="mt-5 max-h-[70vh] w-full rounded-lg bg-black" />
-            <div className="mt-4 flex justify-end gap-3">
+            <video controls autoPlay preload="metadata" src={selectedModelingVideo.modelingUrl} className="mt-5 max-h-[70vh] w-full rounded-lg bg-black" />
+            <div className="mt-4 flex flex-wrap justify-end gap-3">
+              <a href={selectedModelingVideo.sourceUrl} target="_blank" rel="noreferrer" className="rounded-lg border border-emerald-300 px-4 py-2.5 text-sm font-bold text-emerald-700">Mở video gốc</a>
               <a
-                href={withDownloadFlag(selectedModelingVideoUrl)}
+                href={withDownloadFlag(selectedModelingVideo.modelingUrl)}
                 download="video-modeling.mp4"
                 className="rounded-lg bg-[#7c3aed] px-4 py-2.5 text-sm font-bold text-white"
               >
                 Tải video
               </a>
-              <button type="button" onClick={() => setSelectedModelingVideoUrl("")} className="rounded-lg border border-[#cbd9ea] px-4 py-2.5 text-sm font-bold text-[#0b3262]">Đóng</button>
+              <button type="button" onClick={() => void deleteVideo(selectedModelingVideo.videoId)} className="rounded-lg border border-rose-300 px-4 py-2.5 text-sm font-bold text-rose-700">Xóa cả hai video</button>
+              <button type="button" onClick={() => setSelectedModelingVideo(null)} className="rounded-lg border border-[#cbd9ea] px-4 py-2.5 text-sm font-bold text-[#0b3262]">Đóng</button>
             </div>
           </section>
         </div>
