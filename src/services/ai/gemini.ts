@@ -12,6 +12,7 @@ BƯỚC 1 — PHÂN TÍCH VÀ BẮT MẠCH BẢN GỐC (DECONSTRUCTION):
 - Xác định rõ điểm gây cười cốt lõi (The Gag): tiếng cười đến từ sự ngớ ngẩn, tương tác vật lý lố bịch, biểu cảm vô tri, hay khoảng lặng chưng hửng.
 - Bảo tồn sự tối giản của nguyên tác. Giữ tinh thần góc máy, nhịp điệu, khoảng lặng và sự trần trụi cần thiết để gag tự phát huy; không tự ý thêm drama, giải thích dài, tình tiết điện ảnh hoặc tuyến phụ làm hỏng mạch hài.
 - Chỉ kế thừa cơ chế gây cười và nguyên tắc nhịp điệu; phải tạo nhân vật, bối cảnh, chi tiết bề mặt và cách thể hiện mới, không sao chép nguyên tác.
+- Nếu Channel DNA có ảnh nhân vật chính cố định, đó là nhân vật trung tâm bắt buộc của mọi hướng modeling; không được thay bằng nhân vật mới. Mọi cảnh phải có thể dùng cùng ảnh tham chiếu đó để giữ đúng nhận diện.
 
 BƯỚC 2 — NÂNG CẤP NGHỆ THUẬT (ART DIRECTION & PHYSICS):
 - Tạo hình từng nhân vật phải được mô tả cụ thể và có chủ đích gây cười ngay từ cái nhìn đầu tiên. Ưu tiên hình tượng dị biệt, bựa, vô tri, ngớ ngẩn hoặc tương phản bất thường; nét mặt, hình dáng, tỷ lệ, trang phục và đạo cụ phải hỗ trợ hài hình ảnh theo phong cách hài được ưa chuộng.
@@ -53,6 +54,7 @@ BƯỚC 3 — STORYBOARD SCRIPT NỐI TIẾP CHẶT CHẼ:
   2. actionBlock: liệt kê theo thứ tự 1, 2, 3... toàn bộ diễn biến hành động, tương tác vật lý, chuyển động cơ thể, va đập, co giãn, nảy lên, rơi xuống và điểm gag.
   3. audioBlock: liệt kê Foley đồng bộ 100% với từng hành động; ghi rõ nhịp, cao trào và khoảng lặng. Sự im lặng cũng được coi là một loại âm thanh để tấu hài.
 - englishPrompt phải chuyển đầy đủ visualBlock và các quy tắc liên tục nhân vật/bối cảnh sang tiếng Anh để dùng tạo ảnh/video, không được rút gọn thành mô tả chung.
+- Trong mọi visualBlock và englishPrompt, phải ghi rõ nhân vật chính cố định của kênh được giữ nguyên nhận diện qua các cảnh; ảnh tham chiếu kênh sẽ được đính kèm ở bước tạo ảnh/video.
 
 Trả đúng JSON có schemaVersion là chuỗi "1.0", gồm deconstruction, artDirection, characterDesign, backgroundDesign, storyboard và safetyReview. Viết các trường mô tả bằng tiếng Việt, trừ englishPrompt. Khung hình đã chọn: ${aspectRatio ?? "9:16"}. Chỉ dùng mô tả hình ảnh nguyên bản, không nêu tên hoặc bắt chước studio, thương hiệu, nghệ sĩ hay nhân vật có bản quyền.`;
 }

@@ -22,7 +22,7 @@ type Dashboard = {
     };
   }>;
 };
-type ChannelOption = { id: string; name: string };
+type ChannelOption = { id: string; name: string; mainCharacterImageUrl?: string | null; mainCharacterImageName?: string };
 type CompetitorOption = { id: string; handle: string; displayName: string | null; platform: string; url: string };
 type SyncProgress = {
   syncId: string;
@@ -48,8 +48,8 @@ type DesktopFacebook = {
 type ImageSlot = { kind: "character" | "background" | "scene"; sceneNumber?: number; label: string; prompt: string; aspectRatio: string };
 type VideoSlot = { sceneNumber: number; label: string; visualBlock: string; actionBlock: string; audioBlock: string; aspectRatio: string };
 type DesktopFlow = {
-  runImageJob: (projectId: string, slots: ImageSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; images: Record<string, string> }>;
-  runVideoJob: (projectId: string, slots: VideoSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; videos: Record<string, string> }>;
+  runImageJob: (projectId: string, channelId: string, slots: ImageSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; images: Record<string, string> }>;
+  runVideoJob: (projectId: string, channelId: string, slots: VideoSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; videos: Record<string, string> }>;
 };
 type DesktopVideoEditor = {
   pickAudio: () => Promise<{ status: "cancelled" | "selected"; path?: string; name?: string }>;
@@ -498,10 +498,15 @@ export function ViralDashboard() {
   }
   function buildFlowImageSlots(project = contentProject): ImageSlot[] {
     if (!project) return [];
+    const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
+    const selectedChannel = channels.find((channel) => channel.id === selectedChannelId);
+    const referenceInstruction = selectedChannel?.mainCharacterImageUrl
+      ? `Use the attached fixed main-character reference image for the exact identity, silhouette, face, colors, clothing, and proportions of the channel's recurring protagonist. Never replace the protagonist with a newly invented character. The reference image is only an identity guide; compose the requested scene around it.`
+      : "No fixed main-character reference is available; keep the approved project character design consistent.";
     return [
-      { kind: "character", label: "Nhân vật", aspectRatio, prompt: toFlowSafePrompt(`Create a consistent character reference sheet. Art direction: ${JSON.stringify(project.artDirection)}. Character design: ${JSON.stringify(project.characterDesign)}. Make the visual treatment entirely original. Aspect ratio: ${aspectRatio}. Generate one final image only.`) },
-      { kind: "background", label: "Bối cảnh", aspectRatio, prompt: toFlowSafePrompt(`Create a consistent background reference image. Art direction: ${JSON.stringify(project.artDirection)}. Background design: ${JSON.stringify(project.backgroundDesign)}. Make the visual treatment entirely original. Aspect ratio: ${aspectRatio}. Generate one final image only.`) },
-      ...project.scenes.map((scene) => ({ kind: "scene" as const, sceneNumber: scene.sceneNumber, label: `Cảnh ${scene.sceneNumber}`, aspectRatio, prompt: toFlowSafePrompt(`${scene.englishPrompt}\nVisual: ${scene.visualBlock}\nAction: ${scene.actionBlock}\nKeep the approved character and background designs consistent. Make the visual treatment entirely original. Aspect ratio: ${aspectRatio}. Generate one final image only.`) })),
+      { kind: "character", label: "Nhân vật", aspectRatio, prompt: toFlowSafePrompt(`${referenceInstruction} Create a consistent character reference sheet based on the attached reference image. Art direction: ${JSON.stringify(project.artDirection)}. Character design: ${JSON.stringify(project.characterDesign)}. Make the visual treatment entirely original. Aspect ratio: ${aspectRatio}. Generate one final image only.`) },
+      { kind: "background", label: "Bối cảnh", aspectRatio, prompt: toFlowSafePrompt(`Create a consistent background reference image. Art direction: ${JSON.stringify(project.artDirection)}. Background design: ${JSON.stringify(project.backgroundDesign)}. ${referenceInstruction} Make the visual treatment entirely original. Aspect ratio: ${aspectRatio}. Generate one final image only.`) },
+      ...project.scenes.map((scene) => ({ kind: "scene" as const, sceneNumber: scene.sceneNumber, label: `Cảnh ${scene.sceneNumber}`, aspectRatio, prompt: toFlowSafePrompt(`${referenceInstruction}\n${scene.englishPrompt}\nVisual: ${scene.visualBlock}\nAction: ${scene.actionBlock}\nKeep the approved fixed main character and background designs consistent. Make the visual treatment entirely original. Aspect ratio: ${aspectRatio}. Generate one final image only.`) })),
     ];
   }
   async function generateAllProjectImages(project = contentProject): Promise<Record<string, string> | null> {
@@ -512,9 +517,11 @@ export function ViralDashboard() {
       const slots = buildFlowImageSlots(project);
       const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
       if (!flow) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
+      const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
+      if (!selectedChannelId) throw new Error("Hãy chọn kênh trước khi tạo ảnh.");
       setFlowImageSlots(slots);
       setFlowImageProgress({ processed: 0, total: slots.length });
-      const result = await flow.runImageJob(project.id, slots, (progress) => { setFlowImageProgress({ processed: progress.processed, total: progress.total }); setFlowImageMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`); });
+      const result = await flow.runImageJob(project.id, selectedChannelId, slots, (progress) => { setFlowImageProgress({ processed: progress.processed, total: progress.total }); setFlowImageMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`); });
       setGeneratedImages(result.images);
       setShowGeneratedImages(true);
       setFlowImageMessage("Đã tạo và đưa toàn bộ ảnh từ Google Flow vào app theo đúng thứ tự.");
@@ -536,7 +543,9 @@ export function ViralDashboard() {
     try {
       const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
       if (!flow) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
-      const result = await flow.runVideoJob(project.id, sceneSlots, (progress) => {
+      const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
+      if (!selectedChannelId) throw new Error("Hãy chọn kênh trước khi tạo video.");
+      const result = await flow.runVideoJob(project.id, selectedChannelId, sceneSlots, (progress) => {
         setGeminiVideoProgress({ processed: progress.processed, total: progress.total });
         setGeminiVideoMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`);
       });

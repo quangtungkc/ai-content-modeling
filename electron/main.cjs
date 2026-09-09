@@ -472,6 +472,15 @@ function findSceneImagePath(projectId, sceneNumber) {
   return findGeneratedImagePath(projectId, "scene", sceneNumber);
 }
 
+function findChannelMainCharacterImagePath(channelId) {
+  const characterRoot = path.join(app.getPath("userData"), "channel-characters");
+  for (const extension of [".png", ".jpg", ".webp", ".gif", ".bmp", ".avif"]) {
+    const target = path.join(characterRoot, `${channelId}${extension}`);
+    if (fs.existsSync(target)) return target;
+  }
+  return null;
+}
+
 function saveGeminiVideo(projectId, sceneNumber, buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length < 1024) throw new Error("Google Flow không trả về video hợp lệ.");
   if (buffer.length > 200 * 1024 * 1024) throw new Error("Video Google Flow vượt quá giới hạn 200 MB.");
@@ -1296,11 +1305,12 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
   return { status: "completed", images };
 });
 
-async function runFlowImageJob(event, projectId, slots) {
+async function runFlowImageJob(event, projectId, channelId, slots) {
   event.sender.send("flow-browser:image-progress", { processed: 0, total: slots.length, label: "Đang mở Google Flow..." });
   const window = createFlowWindow();
   const projectUrl = await createFlowProject(window);
   const images = {};
+  const characterReferencePath = findChannelMainCharacterImagePath(channelId);
   for (let index = 0; index < slots.length; index += 1) {
     if (index > 0) {
       event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang quay về màn hình tạo ảnh Google Flow trước ảnh tiếp theo..." });
@@ -1315,8 +1325,12 @@ async function runFlowImageJob(event, projectId, slots) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         await clearFlowComposer(window);
-    event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang cấu hình Google Flow cho " + (slot.label || "ảnh") + "..." });
-    await configureFlowImage(window, slot.aspectRatio || "9:16");
+        event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang cấu hình Google Flow cho " + (slot.label || "ảnh") + "..." });
+        await configureFlowImage(window, slot.aspectRatio || "9:16");
+        if (characterReferencePath) {
+          event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang gắn ảnh nhân vật chính làm tham chiếu..." });
+          await uploadFlowAsset(window, characterReferencePath);
+        }
 
     const prepared = await window.webContents.executeJavaScript([
       "(() => {",
@@ -1368,10 +1382,11 @@ async function runFlowImageJob(event, projectId, slots) {
   return { status: "completed", images };
 }
 
-async function runFlowVideoJob(event, projectId, slots) {
+async function runFlowVideoJob(event, projectId, channelId, slots) {
   event.sender.send("gemini-browser:video-progress", { processed: 0, total: slots.length, label: "Đang mở Google Flow..." });
   const window = createFlowWindow();
   const videos = {};
+  const characterReferencePath = findChannelMainCharacterImagePath(channelId);
   for (let index = 0; index < slots.length; index += 1) {
     const slot = slots[index];
     if (!Number.isInteger(slot?.sceneNumber) || typeof slot.visualBlock !== "string" || typeof slot.actionBlock !== "string" || typeof slot.audioBlock !== "string") {
@@ -1389,6 +1404,10 @@ async function runFlowVideoJob(event, projectId, slots) {
     event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang tải đúng ảnh cảnh " + sceneNumber + " lên Google Flow..." });
     await uploadFlowAsset(window, imagePath);
     await addFlowAssetToStart(window, imagePath);
+    if (characterReferencePath) {
+      event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang gắn ảnh nhân vật chính để giữ nhận diện..." });
+      await uploadFlowAsset(window, characterReferencePath);
+    }
 
     const prepared = await window.webContents.executeJavaScript([
       "(() => {",
@@ -1414,7 +1433,7 @@ async function runFlowVideoJob(event, projectId, slots) {
     if (prepared?.error) throw new Error(prepared.error);
 
     const videoFormat = "vertical 9:16";
-    const prompt = "Create one 4-second " + videoFormat + " video from the attached scene image only. Use this exact scene image as the Start frame for scene " + sceneNumber + ". Do not use an End frame, character reference, or separate background image. Preserve the exact scene composition, environment, lighting, and art style. Animate only this scene. Action: " + slot.actionBlock + ". Camera and visual direction: " + slot.visualBlock + ". Audio and sound direction: " + slot.audioBlock + ". Generate one final video with audio.";
+    const prompt = "Create one 4-second " + videoFormat + " video from the attached scene image and the fixed main-character reference image. Use this exact scene image as the Start frame for scene " + sceneNumber + ". The character reference is only for preserving the recurring protagonist's exact identity, silhouette, face, colors, clothing, and proportions; never use it as the Start frame or End frame. Do not use an End frame or a separate background image. Preserve the exact scene composition, environment, lighting, and art style. Animate only this scene. Action: " + slot.actionBlock + ". Camera and visual direction: " + slot.visualBlock + ". Audio and sound direction: " + slot.audioBlock + ". Generate one final video with audio.";
     const promptResult = await window.webContents.executeJavaScript([
       "(() => {",
       "  const prompt = " + JSON.stringify(prompt) + ";",
@@ -1455,20 +1474,22 @@ async function runFlowVideoJob(event, projectId, slots) {
 
 ipcMain.handle("flow-browser:run-image-job", async (event, value) => {
   const projectId = value?.projectId;
+  const channelId = value?.channelId;
   const slots = value?.slots;
-  if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || !Array.isArray(slots) || slots.length === 0) {
+  if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || typeof channelId !== "string" || !/^[A-Za-z0-9_-]+$/.test(channelId) || !Array.isArray(slots) || slots.length === 0) {
     throw new Error("Yêu cầu tạo ảnh bằng Google Flow không hợp lệ.");
   }
-  return runFlowImageJob(event, projectId, slots).finally(() => closeFlowWindow());
+  return runFlowImageJob(event, projectId, channelId, slots).finally(() => closeFlowWindow());
 });
 
 ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
   const projectId = value?.projectId;
+  const channelId = value?.channelId;
   const slots = value?.slots;
-  if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || !Array.isArray(slots) || slots.length === 0) {
+  if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || typeof channelId !== "string" || !/^[A-Za-z0-9_-]+$/.test(channelId) || !Array.isArray(slots) || slots.length === 0) {
     throw new Error("Yêu cầu tạo video không hợp lệ.");
   }
-  return runFlowVideoJob(event, projectId, slots).finally(() => closeFlowWindow());
+  return runFlowVideoJob(event, projectId, channelId, slots).finally(() => closeFlowWindow());
 });
 
 ipcMain.handle("gemini-browser:open-flow", async () => {

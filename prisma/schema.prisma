@@ -136,6 +136,9 @@ model Channel {
   videoDurationSec      Int?
   hasDialogue           Boolean      @default(false)
   creativeInstructions  String?
+  mainCharacterImageKey String?
+  mainCharacterImageName String?
+  mainCharacterImageMimeType String?
   mustKeep              Json         @default("[]")
   mustAvoid             Json         @default("[]")
   timezone              String

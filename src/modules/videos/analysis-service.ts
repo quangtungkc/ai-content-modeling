@@ -34,6 +34,8 @@ export async function analyzeCompetitorVideo(videoId: string, userId: string) {
     videoDuration: channel.videoDurationSec,
     hasDialogue: channel.hasDialogue,
     creativeInstructions: channel.creativeInstructions,
+    mainCharacterImageAvailable: Boolean(channel.mainCharacterImageKey),
+    mainCharacterImageName: channel.mainCharacterImageName,
     timezone: channel.timezone,
   };
   const latest = video.snapshots[0];

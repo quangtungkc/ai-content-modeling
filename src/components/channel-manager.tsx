@@ -17,6 +17,8 @@ type Channel = {
   hasDialogue: boolean;
   creativeInstructions: string;
   timezone: string;
+  mainCharacterImageUrl: string | null;
+  mainCharacterImageName: string;
 };
 type Competitor = {
   id: string;
@@ -45,10 +47,12 @@ const emptyChannel: Omit<Channel, "id"> = {
   hasDialogue: false,
   creativeInstructions: "",
   timezone: "UTC",
+  mainCharacterImageUrl: null,
+  mainCharacterImageName: "",
 };
 
 const fields: Array<
-  [keyof Omit<Channel, "id" | "hasDialogue">, string, string]
+  [keyof Omit<Channel, "id" | "hasDialogue" | "mainCharacterImageUrl" | "mainCharacterImageName">, string, string]
 > = [
   ["name", "Tên kênh", "Ví dụ: Funny Animals"],
   ["platform", "Nền tảng", "TikTok, YouTube..."],
@@ -80,12 +84,16 @@ function toUiChannel(value: Record<string, unknown>): Channel {
     hasDialogue: Boolean(value.hasDialogue),
     creativeInstructions: String(value.creativeInstructions ?? ""),
     timezone: String(value.timezone ?? "UTC"),
+    mainCharacterImageUrl: typeof value.mainCharacterImageUrl === "string" ? value.mainCharacterImageUrl : null,
+    mainCharacterImageName: String(value.mainCharacterImageName ?? ""),
   };
 }
 
 function toPayload(channel: Channel) {
-  const { id: _id, ...payload } = channel;
+  const { id: _id, mainCharacterImageUrl: _imageUrl, mainCharacterImageName: _imageName, ...payload } = channel;
   void _id;
+  void _imageUrl;
+  void _imageName;
   return {
     ...payload,
     videoDuration: channel.videoDuration
@@ -160,20 +168,27 @@ export function ChannelManager() {
   const [editing, setEditing] = useState<Channel | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [formError, setFormError] = useState("");
+  const [pendingCharacterImage, setPendingCharacterImage] = useState<File | null>(null);
 
   function openCreate() {
     setFormError("");
+    setPendingCharacterImage(null);
     setEditing({ id: crypto.randomUUID(), ...emptyChannel });
     setIsCreating(true);
   }
   function openEdit(channel: Channel) {
     setFormError("");
+    setPendingCharacterImage(null);
     setEditing({ ...channel });
     setIsCreating(false);
   }
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!editing?.name.trim()) return;
+    if (isCreating && !pendingCharacterImage) {
+      setFormError("Hãy tải ảnh nhân vật chính của kênh trước khi lưu.");
+      return;
+    }
     const duration = editing.videoDuration ? Number(editing.videoDuration) : undefined;
     if (editing.videoDuration && (!Number.isInteger(duration) || duration! <= 0)) {
       setFormError("Thời lượng video phải là một số giây dương, ví dụ: 30.");
@@ -189,18 +204,33 @@ export function ChannelManager() {
           body: JSON.stringify(toPayload(editing)),
         },
       );
-      const body = (await response.json()) as { data: Record<string, unknown> };
+      const body = (await response.json()) as { data: Record<string, unknown>; error?: { message?: string } };
       if (!response.ok) {
-        const failed = body as { error?: { message?: string } };
-        throw new Error(failed.error?.message ?? "Không thể lưu kênh.");
+        throw new Error(body.error?.message ?? "Không thể lưu kênh.");
       }
-      const saved = toUiChannel(body.data);
+      let saved = toUiChannel(body.data);
+      if (pendingCharacterImage) {
+        const formData = new FormData();
+        formData.append("file", pendingCharacterImage);
+        const imageResponse = await fetch(`/api/v1/channels/${saved.id}/character-image`, { method: "POST", body: formData });
+        const imageBody = await imageResponse.json() as { data?: { mainCharacterImageName?: string; mainCharacterImageUrl?: string }; error?: { message?: string } };
+        if (!imageResponse.ok || !imageBody.data) {
+          if (isCreating) {
+            setChannels((current) => [...current, saved]);
+            setEditing({ ...saved });
+            setIsCreating(false);
+          }
+          throw new Error(imageBody.error?.message ?? "Kênh đã lưu nhưng chưa tải được ảnh nhân vật chính. Hãy thử lại trong mục Sửa kênh.");
+        }
+        saved = { ...saved, mainCharacterImageName: imageBody.data.mainCharacterImageName ?? pendingCharacterImage.name, mainCharacterImageUrl: imageBody.data.mainCharacterImageUrl ?? `/api/v1/channels/${saved.id}/character-image` };
+      }
       setChannels((current) =>
         isCreating
           ? [...current, saved]
           : current.map((item) => (item.id === saved.id ? saved : item)),
       );
       setEditing(null);
+      setPendingCharacterImage(null);
       setNotice("");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Không thể lưu kênh.";
@@ -262,13 +292,17 @@ export function ChannelManager() {
             className="group rounded-xl border border-[#d8e3f1] bg-white p-5 shadow-sm transition hover:border-cyan-400/60 hover:shadow-md"
           >
             <div className="flex items-start justify-between gap-3">
-              <div>
-                <h3 className="font-semibold text-[#0b3262]">{channel.name}</h3>
-                <p className="mt-1 text-sm text-[#6883aa]">
-                  {channel.targetCountry}{" "}
-                  <span className="text-[#9ab0c9]">•</span> {channel.platform}{" "}
-                  <span className="text-[#9ab0c9]">•</span> {channel.topic}
-                </p>
+              <div className="flex min-w-0 items-start gap-3">
+                {channel.mainCharacterImageUrl ? <img src={channel.mainCharacterImageUrl} alt={`Nhân vật chính của ${channel.name}`} className="h-12 w-12 shrink-0 rounded-lg object-cover" /> : <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-[#eef6ff] text-lg text-[#0b5799]">★</div>}
+                <div className="min-w-0">
+                  <h3 className="font-semibold text-[#0b3262]">{channel.name}</h3>
+                  <p className="mt-1 text-sm text-[#6883aa]">
+                    {channel.targetCountry}{" "}
+                    <span className="text-[#9ab0c9]">•</span> {channel.platform}{" "}
+                    <span className="text-[#9ab0c9]">•</span> {channel.topic}
+                  </p>
+                  <p className="mt-1 truncate text-xs text-[#8aa0bd]">{channel.mainCharacterImageName ? `Nhân vật cố định: ${channel.mainCharacterImageName}` : "Chưa có ảnh nhân vật chính"}</p>
+                </div>
               </div>
               <span className="rounded-full bg-[#dff7f4] px-2 py-1 text-[11px] text-[#078f86]">
                 Đang hoạt động
@@ -315,6 +349,10 @@ export function ChannelManager() {
           title={isCreating ? "Tạo kênh mới" : "Chỉnh sửa kênh"}
           error={formError}
           onChange={setEditing}
+          onCharacterImageChange={(file) => {
+            setPendingCharacterImage(file);
+            if (file) setEditing((current) => current ? { ...current, mainCharacterImageName: file.name, mainCharacterImageUrl: URL.createObjectURL(file) } : current);
+          }}
           onClose={() => setEditing(null)}
           onSave={save}
         />
@@ -351,6 +389,7 @@ function ChannelModal({
   title,
   error,
   onChange,
+  onCharacterImageChange,
   onClose,
   onSave,
 }: {
@@ -358,6 +397,7 @@ function ChannelModal({
   title: string;
   error: string;
   onChange: (channel: Channel) => void;
+  onCharacterImageChange: (file: File | null) => void;
   onClose: () => void;
   onSave: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -404,6 +444,13 @@ function ChannelModal({
             </label>
           ))}
         </div>
+        <label className="mt-5 block rounded-xl border border-cyan-400/30 bg-cyan-400/5 p-4 text-sm text-slate-200">
+          <span className="font-semibold text-cyan-300">Ảnh nhân vật chính của kênh</span>
+          <span className="mt-1 block text-xs leading-5 text-slate-400">Ảnh này được lưu xuyên suốt kênh và dùng làm ảnh tham chiếu khi modeling phân cảnh, tạo ảnh và tạo video.</span>
+          <input type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif" required={!channel.mainCharacterImageUrl} onChange={(event) => onCharacterImageChange(event.target.files?.[0] ?? null)} className="mt-3 block w-full text-xs text-slate-300 file:mr-3 file:rounded-md file:border-0 file:bg-cyan-400 file:px-3 file:py-2 file:font-semibold file:text-slate-950 hover:file:bg-cyan-300" />
+          {channel.mainCharacterImageUrl && <img src={channel.mainCharacterImageUrl} alt="Xem trước nhân vật chính" className="mt-3 h-28 w-28 rounded-lg object-cover" />}
+          {channel.mainCharacterImageName && <span className="mt-2 block text-xs text-slate-400">Đang dùng: {channel.mainCharacterImageName}</span>}
+        </label>
         <div className="mt-3 flex flex-wrap gap-2"><span className="text-xs text-slate-400">Chọn nhanh thời lượng:</span>{[15, 30, 60, 180].map((seconds) => <button type="button" key={seconds} onClick={() => onChange({ ...channel, videoDuration: String(seconds) })} className="rounded border border-white/15 px-2 py-1 text-xs text-cyan-300 hover:bg-white/10">{seconds} giây</button>)}</div>
         <label className="mt-4 flex items-center gap-3 text-sm text-slate-300">
           <input
@@ -500,6 +547,10 @@ function ChannelDetails({
             </div>
           ))}
         </dl>
+        <div className="mt-6 rounded-lg bg-white/[.04] p-4">
+          <p className="text-xs text-slate-500">Nhân vật chính cố định của kênh</p>
+          {channel.mainCharacterImageUrl ? <div className="mt-3 flex items-center gap-3"><img src={channel.mainCharacterImageUrl} alt={`Nhân vật chính của ${channel.name}`} className="h-20 w-20 rounded-lg object-cover" /><p className="text-sm text-slate-300">{channel.mainCharacterImageName || "Ảnh tham chiếu đã lưu"}</p></div> : <p className="mt-1 text-sm text-amber-300">Chưa tải ảnh nhân vật chính.</p>}
+        </div>
         <div className="mt-6 rounded-lg bg-white/[.04] p-4">
           <p className="text-xs text-slate-500">Hướng dẫn sáng tạo</p>
           <p className="mt-1 text-sm leading-6 text-slate-300">

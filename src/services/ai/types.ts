@@ -10,6 +10,8 @@ export type ChannelDNA = {
   videoDuration?: number | null;
   hasDialogue: boolean;
   creativeInstructions?: string | null;
+  mainCharacterImageAvailable?: boolean;
+  mainCharacterImageName?: string | null;
   timezone: string;
 };
 

@@ -2,27 +2,37 @@ import { db } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { channelInputSchema, type ChannelInput } from "./schema";
 
+function serializeChannel<T extends { id: string; mainCharacterImageKey?: string | null }>(channel: T) {
+  return {
+    ...channel,
+    mainCharacterImageUrl: channel.mainCharacterImageKey
+      ? `/api/v1/channels/${channel.id}/character-image`
+      : null,
+  };
+}
+
 export async function listChannels(userId: string) {
-  return db.channel.findMany({ where: { userId, status: "ACTIVE" }, orderBy: { createdAt: "asc" } });
+  const channels = await db.channel.findMany({ where: { userId, status: "ACTIVE" }, orderBy: { createdAt: "asc" } });
+  return channels.map(serializeChannel);
 }
 
 export async function getChannel(id: string, userId: string) {
   const channel = await db.channel.findFirst({ where: { id, userId } });
   if (!channel) throw new AppError("CHANNEL_NOT_FOUND", "Không tìm thấy Channel.", 404);
-  return channel;
+  return serializeChannel(channel);
 }
 
 export async function createChannel(userId: string, input: unknown) {
   const data = channelInputSchema.parse(input);
   const { videoDuration, ...channelData } = data;
-  return db.channel.create({ data: { ...channelData, userId, videoDurationSec: videoDuration } });
+  return serializeChannel(await db.channel.create({ data: { ...channelData, userId, videoDurationSec: videoDuration } }));
 }
 
 export async function updateChannel(id: string, userId: string, input: unknown) {
   const parsed = channelInputSchema.parse(input) as ChannelInput;
   const { videoDuration, ...data } = parsed;
   await getChannel(id, userId);
-  return db.channel.update({ where: { id }, data: { ...data, videoDurationSec: videoDuration } });
+  return serializeChannel(await db.channel.update({ where: { id }, data: { ...data, videoDurationSec: videoDuration } }));
 }
 
 export async function deleteChannel(id: string, userId: string) {
