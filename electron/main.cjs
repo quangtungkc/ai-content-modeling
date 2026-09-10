@@ -751,23 +751,62 @@ async function findFlowFileInput(window) {
 
 async function waitForFlowAsset(window, filename) {
   for (let elapsed = 0; elapsed < 60_000; elapsed += 500) {
-    const ready = await window.webContents.executeJavaScript("(() => { const text = document.body?.innerText || ''; const target = " + JSON.stringify(filename) + "; const uploading = /đang tải lên|uploading|đang tải bản xem trước|loading preview/i.test(text); return text.toLowerCase().includes(target.toLowerCase()) && !uploading; })()", true);
+    const ready = await window.webContents.executeJavaScript("(() => { const text = document.body?.innerText || ''; const target = " + JSON.stringify(filename) + "; const uploading = /đang tải lên|uploading|đang tải bản xem trước|loading preview|\\b(?:[1-9]?\\d)%\\b/i.test(text); return text.toLowerCase().includes(target.toLowerCase()) && !uploading; })()", true);
     if (ready) return;
     await delay(500);
   }
   throw new Error("Google Flow chưa tải xong ảnh " + filename + ".");
 }
 
-async function uploadFlowAsset(window, filePath) {
+async function countFlowPromptAttachments(window) {
+  return window.webContents.executeJavaScript(`(() => {
+    const roots = [document];
+    const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) {
+      for (const element of roots[index].querySelectorAll('*')) {
+        if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      }
+    }
+    const visible = (element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return bounds.width > 0 && bounds.height > 0 && style.display !== 'none' && style.visibility !== 'hidden'; };
+    const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable="true"]')]).find((element) => visible(element) && element.getBoundingClientRect().width > 100);
+    if (!input) return 0;
+    let container = input;
+    for (let depth = 0; depth < 7 && container.parentElement; depth += 1) {
+      const parent = container.parentElement;
+      const bounds = parent.getBoundingClientRect();
+      if (bounds.width > input.getBoundingClientRect().width + 260 || bounds.height > 650) break;
+      container = parent;
+    }
+    return [...container.querySelectorAll('img')].filter((image) => {
+      if (!visible(image)) return false;
+      const bounds = image.getBoundingClientRect();
+      return bounds.width >= 28 && bounds.height >= 28 && bounds.width <= 180 && bounds.height <= 180;
+    }).length;
+  })()`, true);
+}
+
+async function attachFlowAssetToPrompt(window, filename, previousAttachmentCount) {
+  if (await countFlowPromptAttachments(window) > previousAttachmentCount) return;
+  await dispatchBrowserEscape(window);
+  await clickFlowControl(window, ["Add ingredients to the prompt box", "Thêm thành phần vào hộp câu lệnh", "Thêm thành phần vào ô nhập câu lệnh"], false);
+  const assetPoint = await waitForFlowControlPoint(window, [filename], false, 20_000);
+  await dispatchBrowserClick(window, assetPoint);
+  await clickFlowControl(window, ["Add to prompt", "Thêm vào câu lệnh", "Thêm vào prompt"], true, 15_000);
+  for (let elapsed = 0; elapsed < 15_000; elapsed += 500) {
+    if (await countFlowPromptAttachments(window) > previousAttachmentCount) return;
+    await delay(500);
+  }
+  throw new Error("Ảnh nhân vật chính chưa được gắn vào cùng prompt Google Flow.");
+}
+
+async function uploadFlowAsset(window, filePath, attachToPrompt = false) {
   const filename = path.basename(filePath);
+  const previousAttachmentCount = attachToPrompt ? await countFlowPromptAttachments(window) : 0;
   if (await findFlowAssetPoint(window, filename)) {
-    await clickFlowControl(window, ["Thêm thành phần vào ô nhập câu lệnh", "Add media to prompt", "Thêm nội dung nghe nhìn", "Add media"], false);
-    const existingAssetPoint = await waitForFlowControlPoint(window, [filename], false, 20_000);
-    await dispatchBrowserClick(window, existingAssetPoint);
-    await delay(700);
+    if (attachToPrompt) await attachFlowAssetToPrompt(window, filename, previousAttachmentCount);
     return;
   }
-  await clickFlowControl(window, ["Thêm thành phần vào ô nhập câu lệnh", "Add media to prompt", "Thêm nội dung nghe nhìn", "Add media"], false);
+  await clickFlowControl(window, ["Add ingredients to the prompt box", "Thêm thành phần vào hộp câu lệnh", "Thêm thành phần vào ô nhập câu lệnh"], false);
   const uploadPoint = await waitForFlowControlPoint(window, ["Tải nội dung nghe nhìn lên", "Upload media", "Upload files", "Upload"], false);
   if (!window.webContents.debugger.isAttached()) window.webContents.debugger.attach("1.3");
   let candidate;
@@ -787,7 +826,8 @@ async function uploadFlowAsset(window, filePath) {
     if (resolved?.object?.objectId) {
       await window.webContents.debugger.sendCommand("DOM.setFileInputFiles", { files: [filePath], objectId: resolved.object.objectId });
       await waitForFlowAsset(window, filename);
-      await dispatchBrowserEscape(window);
+      if (attachToPrompt) await attachFlowAssetToPrompt(window, filename, previousAttachmentCount);
+      else await dispatchBrowserEscape(window);
       return;
     }
   }
@@ -801,7 +841,8 @@ async function uploadFlowAsset(window, filePath) {
   await window.webContents.debugger.sendCommand("DOM.setFileInputFiles", { files: [filePath], objectId: candidate.result.objectId });
   await window.webContents.executeJavaScript("(() => { const input = document.querySelector('input[data-modeling-ai-flow-upload]'); input?.dispatchEvent(new Event('change', { bubbles: true })); return true; })()", true);
   await waitForFlowAsset(window, filename);
-  await dispatchBrowserEscape(window);
+  if (attachToPrompt) await attachFlowAssetToPrompt(window, filename, previousAttachmentCount);
+  else await dispatchBrowserEscape(window);
 }
 
 async function addFlowAssetToStart(window, filePath) {
@@ -895,10 +936,10 @@ async function createFlowProject(window) {
       continue;
     }
     if (!requestedWorkspace) {
-      const enterFlowPoint = await findFlowControlPoint(window, ["Create with Google Flow", "Tạo bằng Google Flow"], true);
+      const enterFlowPoint = await findFlowControlPoint(window, ["Create with Google Flow", "Tạo bằng Google Flow", "Try Google Flow", "Thử Google Flow"], true);
       if (enterFlowPoint) {
         const clicked = await window.webContents.executeJavaScript(`(() => {
-          const labels = ["Create with Google Flow", "Tạo bằng Google Flow"];
+          const labels = ["Create with Google Flow", "Tạo bằng Google Flow", "Try Google Flow", "Thử Google Flow"];
           const wanted = labels.map((value) => value.toLowerCase());
           const button = [...document.querySelectorAll("button, [role=\"button\"]")].find((element) => {
             const values = [element.getAttribute("aria-label"), element.textContent]
@@ -1332,7 +1373,7 @@ async function runFlowImageJob(event, projectId, channelId, slots) {
         await configureFlowImage(window);
         if (characterReferencePath) {
           event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang gắn ảnh nhân vật chính làm tham chiếu..." });
-          await uploadFlowAsset(window, characterReferencePath);
+          await uploadFlowAsset(window, characterReferencePath, true);
         }
 
     const prepared = await window.webContents.executeJavaScript([
@@ -1411,7 +1452,7 @@ async function runFlowVideoJob(event, projectId, channelId, slots) {
     await addFlowAssetToStart(window, imagePath);
     if (characterReferencePath) {
       event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang gắn ảnh nhân vật chính để giữ nhận diện..." });
-      await uploadFlowAsset(window, characterReferencePath);
+      await uploadFlowAsset(window, characterReferencePath, true);
     }
 
     const prepared = await window.webContents.executeJavaScript([
