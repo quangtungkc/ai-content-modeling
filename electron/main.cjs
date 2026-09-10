@@ -21,6 +21,7 @@ let geminiWindow;
 let geminiLoadPromise;
 let flowWindow;
 let flowLoadPromise;
+let flowRemoteClient;
 
 function notifyUpdate(event, payload = {}) {
   mainWindow?.webContents.send(`desktop-update:${event}`, payload);
@@ -199,6 +200,223 @@ function createFacebookWindow() {
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+function getRemoteDebuggingPort() {
+  const argument = process.argv.find((value) => value.startsWith("--remote-debugging-port="));
+  const port = Number(argument?.split("=")[1]);
+  return Number.isInteger(port) && port > 0 ? port : null;
+}
+
+function readRemoteDebuggingTargets(port) {
+  return new Promise((resolve, reject) => {
+    const request = http.get({ hostname: "127.0.0.1", port, path: "/json/list" }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => { body += chunk; });
+      response.on("end", () => {
+        try { resolve(JSON.parse(body)); } catch (error) { reject(error); }
+      });
+    });
+    request.on("error", reject);
+    request.setTimeout(2_000, () => request.destroy(new Error("Remote CDP timeout.")));
+  });
+}
+
+async function waitForRemoteFlowTarget(url, timeout = 10_000) {
+  const port = getRemoteDebuggingPort();
+  if (!port || typeof globalThis.WebSocket !== "function") return null;
+  for (let elapsed = 0; elapsed < timeout; elapsed += 250) {
+    try {
+      const targets = await readRemoteDebuggingTargets(port);
+      const target = targets.find((item) => item.type === "page" && item.webSocketDebuggerUrl && (item.url === url || /flow\.google\.com\/project\//i.test(item.url)));
+      if (target) return target;
+    } catch { /* Cổng debug có thể chưa sẵn sàng. */ }
+    await delay(250);
+  }
+  return null;
+}
+
+async function getFlowRemoteClient(window) {
+  if (!getRemoteDebuggingPort() || window !== flowWindow || typeof globalThis.WebSocket !== "function") return null;
+  if (flowRemoteClient) return flowRemoteClient;
+  const target = await waitForRemoteFlowTarget(window.webContents.getURL(), 15_000);
+  if (!target) return null;
+  const client = connectRemoteCdp(target.webSocketDebuggerUrl);
+  await client.ready();
+  flowRemoteClient = client;
+  return client;
+}
+
+async function executeFlowJavaScript(window, expression) {
+  const remoteClient = await getFlowRemoteClient(window);
+  if (remoteClient) return remoteClient.evaluate(expression);
+  return window.webContents.executeJavaScript(expression, true);
+}
+
+function connectRemoteCdp(webSocketDebuggerUrl) {
+  const socket = new globalThis.WebSocket(webSocketDebuggerUrl);
+  let nextId = 1;
+  const pending = new Map();
+  const events = [];
+  let opened = false;
+  let openResolve;
+  let openReject;
+  const openPromise = new Promise((resolve, reject) => { openResolve = resolve; openReject = reject; });
+  socket.onopen = () => { opened = true; openResolve(); };
+  socket.onerror = (event) => { if (!opened) openReject(new Error("Không kết nối được remote CDP Google Flow.")); for (const request of pending.values()) request.reject(new Error("Remote CDP đã lỗi.")); pending.clear(); };
+  socket.onclose = () => { for (const request of pending.values()) request.reject(new Error("Remote CDP đã đóng kết nối.")); pending.clear(); };
+  socket.onmessage = async (message) => {
+    let payload;
+    try {
+      let raw = message.data;
+      if (typeof raw !== "string") {
+        if (typeof raw?.text === "function") raw = await raw.text();
+        else if (raw instanceof ArrayBuffer) raw = Buffer.from(raw).toString("utf8");
+        else if (ArrayBuffer.isView(raw)) raw = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("utf8");
+        else raw = String(raw);
+      }
+      payload = JSON.parse(raw);
+    } catch { return; }
+    if (payload.id && pending.has(payload.id)) {
+      const request = pending.get(payload.id);
+      pending.delete(payload.id);
+      if (payload.error) request.reject(new Error(payload.error.message || "Remote CDP command failed."));
+      else request.resolve(payload);
+    } else if (payload.method) events.push(payload);
+  };
+  return {
+    async ready() { await openPromise; },
+    send(method, params = {}) {
+      const id = nextId++;
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        socket.send(JSON.stringify({ id, method, params }));
+      });
+    },
+    async evaluate(expression) {
+      const response = await this.send("Runtime.evaluate", { expression, returnByValue: true });
+      return response?.result?.result?.value;
+    },
+    async waitForEvent(method, timeout = 12_000) {
+      for (let elapsed = 0; elapsed < timeout; elapsed += 250) {
+        const index = events.findIndex((event) => event.method === method);
+        if (index >= 0) return events.splice(index, 1)[0].params || {};
+        await delay(250);
+      }
+      return null;
+    },
+    close() { try { socket.close(); } catch { /* Kết nối có thể đã đóng. */ } },
+  };
+}
+
+async function remoteFlowPoint(client, labels, exact = false) {
+  return client.evaluate(`(() => {
+    const wanted = ${JSON.stringify(labels)}.map((value) => value.toLowerCase().replace(/\\s+/g, ' ').trim());
+    const exactMatch = ${JSON.stringify(exact)};
+    const roots = [document];
+    const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) {
+      for (const element of roots[index].querySelectorAll('*')) {
+        if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      }
+    }
+    const labelsFor = (element) => [element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent].filter(Boolean).map((value) => value.replace(/\\s+/g, ' ').trim().toLowerCase()).filter(Boolean);
+    const visible = (element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return bounds.width > 0 && bounds.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'; };
+    const candidates = roots.flatMap((root) => [...root.querySelectorAll('button, [role="button"], [role="menuitem"], [role="option"], [role="radio"], a')]).filter((element) => !element.disabled && visible(element));
+    const matches = candidates.filter((element) => labelsFor(element).some((label) => exactMatch ? wanted.some((value) => label === value || label.startsWith(value + ' ') || label.endsWith(value)) : wanted.some((value) => label === value || label.includes(value))));
+    const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable="true"]')]).find(visible);
+    const inputBounds = input?.getBoundingClientRect();
+    const score = (element) => { const labels = labelsFor(element); const exactRank = labels.some((label) => wanted.includes(label)) ? 0 : 1; const bounds = element.getBoundingClientRect(); const distance = inputBounds ? Math.hypot(bounds.left - inputBounds.left, bounds.top - inputBounds.top) : 0; return exactRank * 1000000 + distance; };
+    const selected = matches.sort((left, right) => score(left) - score(right))[0];
+    if (!selected) return null;
+    const bounds = selected.getBoundingClientRect();
+    return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+  })()`);
+}
+
+async function waitForRemoteFlowPoint(client, labels, exact = false, timeout = 15_000) {
+  for (let elapsed = 0; elapsed < timeout; elapsed += 500) {
+    const point = await remoteFlowPoint(client, labels, exact).catch(() => null);
+    if (point) return point;
+    await delay(500);
+  }
+  throw new Error("Không tìm thấy điều khiển Google Flow qua CDP: " + labels.join(" / ") + ".");
+}
+
+async function remoteFlowClick(client, point) {
+  await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: Math.round(point.x), y: Math.round(point.y) });
+  await delay(120);
+  await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: Math.round(point.x), y: Math.round(point.y), button: "left", clickCount: 1 });
+  await delay(70);
+  await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: Math.round(point.x), y: Math.round(point.y), button: "left", clickCount: 1 });
+}
+
+async function waitForRemoteFlowUploadPoint(client, timeout = 15_000) {
+  for (let elapsed = 0; elapsed < timeout; elapsed += 500) {
+    const point = await client.evaluate(`(() => {
+      const roots = [document]; const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const visible = (element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return bounds.width > 0 && bounds.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'; };
+      const selected = roots.flatMap((root) => [...root.querySelectorAll('button[role="menuitem"], [role="menuitem"], flow-menu-item, [data-menu-item]')]).find((element) => {
+        if (!visible(element) || element.disabled) return false;
+        const values = [element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent].filter(Boolean).map(normalize);
+        const combined = values.join(' ');
+        return values.includes('upload') || (combined.includes('upload') && !combined.includes('uploads'));
+      });
+      if (!selected) return null; const bounds = selected.getBoundingClientRect(); return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+    })()`);
+    if (point) return point;
+    await delay(500);
+  }
+  throw new Error("Không tìm thấy mục Upload trong menu Google Flow qua CDP.");
+}
+
+async function waitForRemoteFlowAsset(client, filename, beforeImageCount = 0) {
+  for (let elapsed = 0; elapsed < 60_000; elapsed += 500) {
+    const ready = await client.evaluate(`(() => {
+      const target = ${JSON.stringify(filename)}.toLowerCase(); const text = document.body?.innerText || '';
+      const uploading = /đang tải lên|uploading|đang tải bản xem trước|loading preview|\\b(?:[1-9]?\\d)%\\b/i.test(text);
+      const roots = [document]; const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      const hasFilename = roots.flatMap((root) => [...root.querySelectorAll('*')]).some((element) => [element.textContent, element.getAttribute('aria-label'), element.getAttribute('title'), element.getAttribute('alt')].filter(Boolean).some((value) => value.toLowerCase().includes(target)));
+      const visibleImages = roots.flatMap((root) => [...root.querySelectorAll('img')]).filter((image) => { const bounds = image.getBoundingClientRect(); const style = getComputedStyle(image); return bounds.width >= 32 && bounds.height >= 32 && image.complete && (image.naturalWidth || image.width) >= 64 && style.visibility !== 'hidden' && style.display !== 'none'; }).length;
+      return !uploading && (hasFilename || visibleImages > ${beforeImageCount});
+    })()`);
+    if (ready) return;
+    await delay(500);
+  }
+  throw new Error("Google Flow chưa tải xong ảnh " + filename + ".");
+}
+
+async function uploadFlowAssetViaRemoteCdp(window, filePath, attachToPrompt, onStatus) {
+  const client = await getFlowRemoteClient(window);
+  if (!client) return false;
+  try {
+    onStatus("Đã kết nối target Google Flow bằng CDP.");
+    const filename = path.basename(filePath);
+    const beforeImageCount = await client.evaluate(`(() => [...document.querySelectorAll('img')].filter((image) => image.complete && (image.naturalWidth || image.width) >= 64).length)()`);
+    const mediaPoint = await waitForRemoteFlowPoint(client, ["Add media menu", "Thêm nội dung nghe nhìn", "Thêm phương tiện"], true);
+    await client.send("Page.enable", { enableFileChooserOpenedEvent: true }).catch(() => client.send("Page.enable"));
+    await client.send("Page.setInterceptFileChooserDialog", { enabled: true });
+    await client.evaluate(`document.querySelector('button[aria-label="Add media menu"]').click()`);
+    await delay(600);
+    onStatus("Đã mở menu thêm nội dung bằng CDP, đang tìm Upload...");
+    const uploadPoint = await waitForRemoteFlowUploadPoint(client);
+    onStatus("Đã tìm thấy Upload bằng CDP.");
+    await remoteFlowClick(client, uploadPoint);
+    onStatus("Đã nhấn Upload bằng CDP, đang chờ hộp chọn tệp Google Flow...");
+    const chooser = await client.waitForEvent("Page.fileChooserOpened", 12_000);
+    if (!chooser?.backendNodeId) throw new Error("Google Flow không trả về backendNodeId cho file chooser qua CDP: " + JSON.stringify(chooser));
+    await client.send("DOM.enable").catch(() => {});
+    await client.send("DOM.setFileInputFiles", { files: [filePath], backendNodeId: chooser.backendNodeId });
+    onStatus("Đã gắn tệp vào Google Flow bằng CDP, đang chờ Flow lưu ảnh...");
+    await waitForRemoteFlowAsset(client, filename, beforeImageCount);
+    if (!attachToPrompt) return true;
+    await attachFlowAssetToPrompt(window, filename, await countFlowPromptAttachments(window));
+    return true;
+  } finally { /* Giữ phiên CDP dùng chung cho các bước tiếp theo của Flow. */ }
+}
+
 async function scanFacebookPages(entries, onProgress) {
   const browser = createFacebookWindow();
   const results = [];
@@ -345,6 +563,8 @@ function createFlowWindow() {
 }
 
 function closeFlowWindow() {
+  flowRemoteClient?.close();
+  flowRemoteClient = undefined;
   const window = flowWindow;
   flowWindow = undefined;
   flowLoadPromise = undefined;
@@ -366,7 +586,7 @@ async function waitForFlowLoad(window) {
   for (let elapsed = 0; elapsed < 60_000; elapsed += 500) {
     if (window.isDestroyed()) throw new Error("Cửa sổ Google Flow đã bị đóng.");
     try {
-      const state = await window.webContents.executeJavaScript(`(() => ({ readyState: document.readyState, url: window.location.href }))()`, true);
+      const state = await executeFlowJavaScript(window, `(() => ({ readyState: document.readyState, url: window.location.href }))()`);
       if (state?.url?.includes("accounts.google.com")) {
         throw new Error("Google Flow yêu cầu đăng nhập. Hãy đăng nhập trong cửa sổ Flow rồi chạy lại.");
       }
@@ -398,7 +618,7 @@ async function reloadGeminiBeforeNextPrompt(window) {
   }
   await delay(1_500);
   for (let elapsed = 0; elapsed < 20_000; elapsed += 500) {
-    const ready = await window.webContents.executeJavaScript(`(() => {
+    const ready = await executeFlowJavaScript(window, `(() => {
       const roots = [document];
       const seen = new Set(roots);
       for (let index = 0; index < roots.length; index += 1) {
@@ -657,6 +877,11 @@ async function renderFinalVideo(event, projectId, sceneNumbers, rawOptions = {})
 async function dispatchBrowserClick(window, point) {
   const x = Math.round(point.x);
   const y = Math.round(point.y);
+  const remoteClient = await getFlowRemoteClient(window);
+  if (remoteClient) {
+    await remoteFlowClick(remoteClient, { x, y });
+    return;
+  }
   window.show();
   window.focus();
   window.webContents.focus();
@@ -669,6 +894,8 @@ async function dispatchBrowserClick(window, point) {
 }
 
 async function findFlowControlPoint(window, labels, exact = false) {
+  const remoteClient = await getFlowRemoteClient(window);
+  if (remoteClient) return remoteFlowPoint(remoteClient, labels, exact);
   const expression = [
     "(() => {",
     "  const wanted = " + JSON.stringify(labels) + ".map((value) => value.toLowerCase().replace(/\\s+/g, ' ').trim());",
@@ -705,6 +932,44 @@ async function waitForFlowControlPoint(window, labels, exact = false, timeout = 
   throw new Error("Không tìm thấy điều khiển Google Flow: " + labels.join(" / ") + ".");
 }
 
+async function waitForFlowUploadMenuPoint(window, timeout = 15_000) {
+  const remoteClient = await getFlowRemoteClient(window);
+  if (remoteClient) return waitForRemoteFlowUploadPoint(remoteClient, timeout);
+  for (let elapsed = 0; elapsed < timeout; elapsed += 500) {
+    const point = await executeFlowJavaScript(window, `(() => {
+      const roots = [document];
+      const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll('*')) {
+          if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        }
+      }
+      const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const visible = (element) => {
+        const bounds = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return bounds.width > 0 && bounds.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const matches = roots.flatMap((root) => [...root.querySelectorAll('button[role="menuitem"], [role="menuitem"], flow-menu-item, [data-menu-item]')])
+        .filter((element) => visible(element) && !element.disabled)
+        .filter((element) => {
+          const aria = normalize(element.getAttribute('aria-label'));
+          const title = normalize(element.getAttribute('title'));
+          const text = normalize(element.textContent);
+          const combined = [aria, title, text].filter(Boolean).join(' ');
+          return aria === 'upload' || title === 'upload' || (combined.includes('upload') && !combined.includes('uploads'));
+        });
+      const selected = matches[0];
+      if (!selected) return null;
+      const bounds = selected.getBoundingClientRect();
+      return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+    })()`, true);
+    if (point) return point;
+    await delay(500);
+  }
+  throw new Error("Không tìm thấy mục Upload trong menu Google Flow.");
+}
+
 async function clickFlowControl(window, labels, exact = false, timeout = 30_000) {
   const point = await waitForFlowControlPoint(window, labels, exact, timeout);
   await dispatchBrowserClick(window, point);
@@ -712,6 +977,13 @@ async function clickFlowControl(window, labels, exact = false, timeout = 30_000)
 }
 
 async function dispatchBrowserEscape(window) {
+  const remoteClient = await getFlowRemoteClient(window);
+  if (remoteClient) {
+    await remoteClient.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+    await remoteClient.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+    await delay(350);
+    return;
+  }
   if (!window.webContents.debugger.isAttached()) window.webContents.debugger.attach("1.3");
   await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
   await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
@@ -739,7 +1011,7 @@ async function findFlowAssetPoint(window, filename) {
     "  return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };",
     "})()",
   ].join("\n");
-  return window.webContents.executeJavaScript(expression, true);
+  return executeFlowJavaScript(window, expression);
 }
 
 async function findFlowFileInput(window) {
@@ -749,9 +1021,65 @@ async function findFlowFileInput(window) {
   });
 }
 
-async function waitForFlowAsset(window, filename) {
+async function findFlowFileInputBackendNodeId(window) {
+  const document = await window.webContents.debugger.sendCommand("DOM.getDocument", { depth: -1, pierce: true });
+  const pending = document?.root ? [document.root] : [];
+  while (pending.length > 0) {
+    const node = pending.shift();
+    const attributes = node.attributes || [];
+    const type = attributes[attributes.indexOf("type") + 1]?.toLowerCase();
+    if (node.nodeName?.toLowerCase() === "input" && type === "file" && node.backendNodeId) return node.backendNodeId;
+    if (Array.isArray(node.children)) pending.push(...node.children);
+    if (Array.isArray(node.shadowRoots)) pending.push(...node.shadowRoots);
+    if (node.contentDocument) pending.push(node.contentDocument);
+  }
+  return null;
+}
+
+async function countFlowVisualImages(window) {
+  return executeFlowJavaScript(window, `(() => {
+    const roots = [document];
+    const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) {
+      for (const element of roots[index].querySelectorAll('*')) {
+        if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      }
+    }
+    return roots.flatMap((root) => [...root.querySelectorAll('img')]).filter((image) => {
+      const bounds = image.getBoundingClientRect();
+      const style = getComputedStyle(image);
+      return bounds.width >= 32 && bounds.height >= 32 && image.complete && (image.naturalWidth || image.width) >= 64
+        && style.visibility !== 'hidden' && style.display !== 'none';
+    }).length;
+  })()`, true);
+}
+
+async function waitForFlowAsset(window, filename, beforeImageCount = 0) {
   for (let elapsed = 0; elapsed < 60_000; elapsed += 500) {
-    const ready = await window.webContents.executeJavaScript("(() => { const text = document.body?.innerText || ''; const target = " + JSON.stringify(filename) + "; const uploading = /đang tải lên|uploading|đang tải bản xem trước|loading preview|\\b(?:[1-9]?\\d)%\\b/i.test(text); return text.toLowerCase().includes(target.toLowerCase()) && !uploading; })()", true);
+    const ready = await executeFlowJavaScript(window, `(() => {
+      const target = ${JSON.stringify(filename)}.toLowerCase();
+      const text = document.body?.innerText || '';
+      const uploading = /đang tải lên|uploading|đang tải bản xem trước|loading preview|\\b(?:[1-9]?\\d)%\\b/i.test(text);
+      const roots = [document];
+      const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll('*')) {
+          if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        }
+      }
+      const hasFilename = roots.flatMap((root) => [...root.querySelectorAll('*')]).some((element) =>
+        [element.textContent, element.getAttribute('aria-label'), element.getAttribute('title'), element.getAttribute('alt')]
+          .filter(Boolean)
+          .some((value) => value.toLowerCase().includes(target))
+      );
+      const visibleImages = roots.flatMap((root) => [...root.querySelectorAll('img')]).filter((image) => {
+        const bounds = image.getBoundingClientRect();
+        const style = getComputedStyle(image);
+        return bounds.width >= 32 && bounds.height >= 32 && image.complete && (image.naturalWidth || image.width) >= 64
+          && style.visibility !== 'hidden' && style.display !== 'none';
+      }).length;
+      return !uploading && (hasFilename || visibleImages > ${beforeImageCount});
+    })()`, true);
     if (ready) return;
     await delay(500);
   }
@@ -759,7 +1087,9 @@ async function waitForFlowAsset(window, filename) {
 }
 
 async function countFlowPromptAttachments(window) {
-  return window.webContents.executeJavaScript(`(() => {
+  return executeFlowJavaScript(window, `(() => {
+    const attachedImages = [...document.querySelectorAll('flow-base-prompt-box img[alt="Ingredient image"]')].filter((image) => image.getBoundingClientRect().width > 0);
+    if (attachedImages.length) return attachedImages.length;
     const roots = [document];
     const seen = new Set(roots);
     for (let index = 0; index < roots.length; index += 1) {
@@ -785,13 +1115,48 @@ async function countFlowPromptAttachments(window) {
   })()`, true);
 }
 
+async function findFlowAssetTilePoint(window, filename) {
+  return executeFlowJavaScript(window, `(() => {
+    const target = ${JSON.stringify(filename)}.toLowerCase();
+    const roots = [document];
+    const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) {
+      for (const element of roots[index].querySelectorAll('*')) {
+        if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      }
+    }
+    const visible = (element) => {
+      const bounds = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return bounds.width >= 32 && bounds.height >= 32 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const candidates = roots.flatMap((root) => [...root.querySelectorAll('flow-grid-tile-container')]).filter((element) => {
+      if (!visible(element)) return false;
+      const values = [element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent]
+        .filter(Boolean).map((value) => value.replace(/\\s+/g, ' ').trim().toLowerCase());
+      return values.some((value) => value === target || value.includes(target));
+    });
+    const selected = candidates[0];
+    if (!selected) return null;
+    const bounds = selected.getBoundingClientRect();
+    return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+  })()`, true);
+}
+
 async function attachFlowAssetToPrompt(window, filename, previousAttachmentCount) {
   if (await countFlowPromptAttachments(window) > previousAttachmentCount) return;
   await dispatchBrowserEscape(window);
-  await clickFlowControl(window, ["Add ingredients to the prompt box", "Thêm thành phần vào hộp câu lệnh", "Thêm thành phần vào ô nhập câu lệnh"], false);
-  const assetPoint = await waitForFlowControlPoint(window, [filename], false, 20_000);
+  const ingredientsPoint = await waitForFlowControlPoint(window, ["Add ingredients to the prompt box", "Thêm thành phần vào hộp câu lệnh", "Thêm thành phần vào ô nhập câu lệnh"], false, 15_000);
+  await dispatchBrowserClick(window, ingredientsPoint);
+  await delay(600);
+  const assetPoint = await waitForFlowControlPoint(window, [filename], false, 10_000);
+  if (!assetPoint) throw new Error("Không tìm thấy đúng ảnh tham chiếu " + filename + " trong Google Flow.");
   await dispatchBrowserClick(window, assetPoint);
-  await clickFlowControl(window, ["Add to prompt", "Thêm vào câu lệnh", "Thêm vào prompt"], true, 15_000);
+  for (let elapsed = 0; elapsed < 5_000; elapsed += 250) {
+    if (await countFlowPromptAttachments(window) > previousAttachmentCount) return;
+    await delay(250);
+  }
+  await clickFlowControl(window, ["Add to prompt", "Thêm vào câu lệnh", "Thêm vào prompt"], true, 5_000);
   for (let elapsed = 0; elapsed < 15_000; elapsed += 500) {
     if (await countFlowPromptAttachments(window) > previousAttachmentCount) return;
     await delay(500);
@@ -799,58 +1164,135 @@ async function attachFlowAssetToPrompt(window, filename, previousAttachmentCount
   throw new Error("Ảnh nhân vật chính chưa được gắn vào cùng prompt Google Flow.");
 }
 
-async function uploadFlowAsset(window, filePath, attachToPrompt = false) {
+async function uploadFlowAsset(window, filePath, attachToPrompt = false, onStatus = () => {}) {
   const filename = path.basename(filePath);
+  const beforeImageCount = await countFlowVisualImages(window);
   const previousAttachmentCount = attachToPrompt ? await countFlowPromptAttachments(window) : 0;
   if (await findFlowAssetPoint(window, filename)) {
     if (attachToPrompt) await attachFlowAssetToPrompt(window, filename, previousAttachmentCount);
     return;
   }
-  await clickFlowControl(window, ["Add ingredients to the prompt box", "Thêm thành phần vào hộp câu lệnh", "Thêm thành phần vào ô nhập câu lệnh"], false);
-  const uploadPoint = await waitForFlowControlPoint(window, ["Tải nội dung nghe nhìn lên", "Upload media", "Upload files", "Upload"], false);
+  if (getRemoteDebuggingPort()) {
+    const uploaded = await uploadFlowAssetViaRemoteCdp(window, filePath, attachToPrompt, onStatus);
+    if (uploaded) return;
+  }
   if (!window.webContents.debugger.isAttached()) window.webContents.debugger.attach("1.3");
-  let candidate;
   let fileChooserResolve;
   const fileChooserPromise = new Promise((resolve) => { fileChooserResolve = resolve; });
-  const fileChooserListener = (_event, method, params) => { if (method === "Page.fileChooserOpened") fileChooserResolve(params); };
+  const fileChooserListener = (_event, method, params) => {
+    if (method === "Page.fileChooserOpened") {
+      onStatus("Đã nhận sự kiện file chooser từ Google Flow.");
+      console.log("[Flow upload] Page.fileChooserOpened", params);
+      fileChooserResolve(params || {});
+    }
+  };
   window.webContents.debugger.on("message", fileChooserListener);
   try {
-    await window.webContents.debugger.sendCommand("Page.enable");
-    await window.webContents.debugger.sendCommand("Page.setInterceptFileChooserDialog", { enabled: true });
-  } catch { /* Chromium có thể không hỗ trợ bắt hộp chọn tệp. */ }
-  await dispatchBrowserClick(window, uploadPoint);
-  const chooser = await Promise.race([fileChooserPromise, delay(2_000).then(() => null)]);
-  window.webContents.debugger.removeListener("message", fileChooserListener);
-  if (chooser?.backendNodeId) {
-    const resolved = await window.webContents.debugger.sendCommand("DOM.resolveNode", { backendNodeId: chooser.backendNodeId });
-    if (resolved?.object?.objectId) {
-      await window.webContents.debugger.sendCommand("DOM.setFileInputFiles", { files: [filePath], objectId: resolved.object.objectId });
-      await waitForFlowAsset(window, filename);
-      if (attachToPrompt) await attachFlowAssetToPrompt(window, filename, previousAttachmentCount);
-      else await dispatchBrowserEscape(window);
-      return;
+    await window.webContents.debugger.sendCommand("Page.enable", { enableFileChooserOpenedEvent: true });
+  } catch (error) {
+    console.log("[Flow upload] Page.enable mở rộng không thành công", error?.message || error);
+    try { await window.webContents.debugger.sendCommand("Page.enable"); } catch (fallbackError) {
+      onStatus("CDP không bật được Page.enable: " + (fallbackError?.message || fallbackError));
+      throw fallbackError;
     }
   }
-  await window.webContents.executeJavaScript("(() => { if (!document.querySelector('input[data-modeling-ai-flow-upload]')) { const input = document.createElement('input'); input.type = 'file'; input.accept = 'image/*'; input.dataset.modelingAiFlowUpload = 'true'; input.style.position = 'fixed'; input.style.left = '-10000px'; document.body.appendChild(input); } return true; })()", true);
-  for (let elapsed = 0; elapsed < 5_000; elapsed += 250) {
-    await delay(250);
-    candidate = await findFlowFileInput(window);
-    if (candidate?.result?.objectId) break;
+  try { await window.webContents.debugger.sendCommand("Page.setInterceptFileChooserDialog", { enabled: true }); } catch (error) {
+    onStatus("CDP không bật được chế độ bắt file chooser: " + (error?.message || error));
+    throw error;
   }
-  if (!candidate?.result?.objectId) throw new Error("Không tìm thấy ô tải nội dung nghe nhìn lên Google Flow.");
-  await window.webContents.debugger.sendCommand("DOM.setFileInputFiles", { files: [filePath], objectId: candidate.result.objectId });
-  await window.webContents.executeJavaScript("(() => { const input = document.querySelector('input[data-modeling-ai-flow-upload]'); input?.dispatchEvent(new Event('change', { bubbles: true })); return true; })()", true);
-  await waitForFlowAsset(window, filename);
-  if (attachToPrompt) await attachFlowAssetToPrompt(window, filename, previousAttachmentCount);
-  else await dispatchBrowserEscape(window);
+  const mediaMenuPoint = await waitForFlowControlPoint(window, ["Add media menu", "Thêm nội dung nghe nhìn", "Thêm phương tiện"], true, 5_000).catch(() => null);
+  onStatus(mediaMenuPoint ? "Đã tìm thấy nút Add media menu của Flow." : "Không thấy Add media menu, đang dùng nút thành phần dự phòng.");
+  const ingredientsPoint = mediaMenuPoint
+    ? null
+    : await waitForFlowControlPoint(window, ["Add ingredients to the prompt box", "Thêm thành phần vào hộp câu lệnh", "Thêm thành phần vào ô nhập câu lệnh"], false, 15_000);
+  await dispatchBrowserClick(window, mediaMenuPoint ?? ingredientsPoint);
+  onStatus("Đã mở menu thêm nội dung Google Flow, đang tìm Upload...");
+  const uploadPoint = await waitForFlowUploadMenuPoint(window, 15_000);
+  await dispatchBrowserClick(window, uploadPoint);
+  onStatus("Đã nhấn Upload, đang chờ hộp chọn tệp Google Flow...");
+  console.log("[Flow upload] Đã nhấn Upload, đang chờ hộp chọn tệp Google Flow...");
+  let chooser = null;
+  let chooserReceived = false;
+  const chooserWait = fileChooserPromise.then((params) => {
+    chooserReceived = true;
+    return params;
+  });
+  for (let elapsed = 0; elapsed < 12_000 && !chooserReceived; elapsed += 250) {
+    await window.webContents.debugger.sendCommand("Runtime.evaluate", { expression: "void 0", returnByValue: true }).catch(() => {});
+    chooser = await Promise.race([chooserWait, delay(250).then(() => null)]);
+  }
+  window.webContents.debugger.removeListener("message", fileChooserListener);
+  if (chooser === null) {
+    for (let elapsed = 0; elapsed < 3_000 && !chooserReceived; elapsed += 250) {
+      const backendNodeId = await findFlowFileInputBackendNodeId(window).catch(() => null);
+      if (backendNodeId) {
+        onStatus("Đã tìm thấy ô file bằng CDP DOM, đang gắn tệp...");
+        await window.webContents.debugger.sendCommand("DOM.setFileInputFiles", { files: [filePath], backendNodeId });
+        chooser = { backendNodeId };
+        break;
+      }
+      await delay(250);
+    }
+    if (chooser === null) throw new Error("Google Flow không phát sự kiện file chooser và không tìm thấy ô file bằng CDP DOM để tải " + filename + ".");
+  }
+  if (chooser?.backendNodeId) {
+    onStatus("Đã bắt sự kiện file chooser của Google Flow.");
+    console.log("[Flow upload] Đã bắt sự kiện file chooser của Google Flow.");
+    try { await window.webContents.debugger.sendCommand("DOM.enable"); } catch { /* DOM có thể đã được bật sẵn. */ }
+    await window.webContents.debugger.sendCommand("DOM.setFileInputFiles", { files: [filePath], backendNodeId: chooser.backendNodeId });
+    onStatus("Đã gắn tệp vào Google Flow, đang chờ Flow lưu ảnh...");
+    console.log("[Flow upload] Đã gắn tệp vào Google Flow, đang chờ Flow lưu ảnh...");
+    await waitForFlowAsset(window, filename, beforeImageCount);
+    if (attachToPrompt) await attachFlowAssetToPrompt(window, filename, previousAttachmentCount);
+    else await dispatchBrowserEscape(window);
+    return;
+  }
+  throw new Error("Google Flow đã phát file chooser nhưng thiếu backendNodeId khi tải " + filename + ".");
 }
 
 async function addFlowAssetToStart(window, filePath) {
   const filename = path.basename(filePath);
   await clickFlowControl(window, ["Bắt đầu", "Start"], true);
-  const assetPoint = await waitForFlowControlPoint(window, [filename], true, 20_000).catch(async () => waitForFlowControlPoint(window, [filename], false, 20_000));
-  await dispatchBrowserClick(window, assetPoint);
-  await delay(700);
+  let selected = false;
+  for (let elapsed = 0; elapsed < 20_000 && !selected; elapsed += 250) {
+    selected = await executeFlowJavaScript(window, `(() => {
+      const target = ${JSON.stringify(filename)}.toLowerCase();
+      const visible = (element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return bounds.width > 0 && bounds.height > 0 && style.display !== 'none' && style.visibility !== 'hidden'; };
+      const matches = [...document.querySelectorAll('button')].filter((element) => visible(element) && [element.textContent, element.getAttribute('aria-label')].filter(Boolean).some((value) => value.replace(/\\s+/g, ' ').trim().toLowerCase() === target));
+      const button = matches.find((element) => element.closest('.cdk-overlay-pane, [role="dialog"]')) || matches[matches.length - 1];
+      if (!button) return false;
+      button.click();
+      return true;
+    })()`);
+    if (!selected) await delay(250);
+  }
+  if (!selected) throw new Error("Không tìm thấy ảnh " + filename + " trong bảng chọn Start frame Google Flow.");
+  const hasStartFrame = () => executeFlowJavaScript(window, `(() => {
+    const start = [...document.querySelectorAll('flow-ingredient-bar .frame-trigger')][0];
+    return Boolean(start?.querySelector('img, .filled-chip, flow-media-chip, flow-image-ingredient-chip'));
+  })()`);
+  for (let elapsed = 0; elapsed < 2_000; elapsed += 250) {
+    if (await hasStartFrame()) return;
+    await delay(250);
+  }
+  let confirmed = false;
+  for (let elapsed = 0; elapsed < 5_000 && !confirmed; elapsed += 250) {
+    confirmed = await executeFlowJavaScript(window, `(() => {
+    const labels = ['add to prompt', 'thêm vào câu lệnh', 'thêm vào prompt'];
+    const button = [...document.querySelectorAll('button')].find((element) => labels.includes((element.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase()));
+    if (!button || button.disabled) return false;
+    button.click();
+    return true;
+  })()`);
+    if (!confirmed) await delay(250);
+  }
+  if (!confirmed && !await hasStartFrame()) throw new Error("Không xác nhận được ảnh " + filename + " vào Start frame Google Flow.");
+  for (let elapsed = 0; elapsed < 10_000; elapsed += 250) {
+    const attached = await hasStartFrame();
+    if (attached) return;
+    await delay(250);
+  }
+  throw new Error("Ảnh cảnh " + filename + " chưa được đặt vào Start frame Google Flow.");
 }
 
 async function clearFlowComposer(window) {
@@ -864,7 +1306,7 @@ async function clearFlowComposer(window) {
 async function ensureFlowMode(window, modes) {
   const wanted = (Array.isArray(modes) ? modes : [modes]).map((mode) => mode.toLowerCase());
   for (let elapsed = 0; elapsed < 15_000; elapsed += 500) {
-    const state = await window.webContents.executeJavaScript(`(() => {
+    const state = await executeFlowJavaScript(window, `(() => {
       const roots = [document];
       const seen = new Set(roots);
       for (let index = 0; index < roots.length; index += 1) {
@@ -938,7 +1380,7 @@ async function createFlowProject(window) {
     if (!requestedWorkspace) {
       const enterFlowPoint = await findFlowControlPoint(window, ["Create with Google Flow", "Tạo bằng Google Flow", "Try Google Flow", "Thử Google Flow"], true);
       if (enterFlowPoint) {
-        const clicked = await window.webContents.executeJavaScript(`(() => {
+        const clicked = await executeFlowJavaScript(window, `(() => {
           const labels = ["Create with Google Flow", "Tạo bằng Google Flow", "Try Google Flow", "Thử Google Flow"];
           const wanted = labels.map((value) => value.toLowerCase());
           const button = [...document.querySelectorAll("button, [role=\"button\"]")].find((element) => {
@@ -993,7 +1435,7 @@ async function reloadFlowProject(window, projectUrl) {
 
 async function waitForFlowComposer(window, timeout = 20_000) {
   for (let elapsed = 0; elapsed < timeout; elapsed += 500) {
-    const ready = await window.webContents.executeJavaScript(`(() => {
+    const ready = await executeFlowJavaScript(window, `(() => {
       const roots = [document];
       const seen = new Set(roots);
       for (let index = 0; index < roots.length; index += 1) {
@@ -1041,7 +1483,7 @@ async function inspectFlowVideo(window, beforeSources = [], beforeCardCount = 0)
     "  return { videoSource: video ? sourceFor(video) : (resourceSources[resourceSources.length - 1] || null), duration: video && Number.isFinite(video.duration) ? video.duration : null, videoCardCount: videoCards.length, videoCard: Boolean(thumbnail), thumbnailPoint: thumbnailBounds ? { x: thumbnailBounds.left + thumbnailBounds.width / 2, y: thumbnailBounds.top + thumbnailBounds.height / 2 } : null, playButton: Boolean(playButton), playButtonPoint: playButtonBounds ? { x: playButtonBounds.left + playButtonBounds.width / 2, y: playButtonBounds.top + playButtonBounds.height / 2 } : null, playCircle: Boolean(playCircle), playCirclePoint: playCircleBounds ? { x: playCircleBounds.left + playCircleBounds.width / 2, y: playCircleBounds.top + playCircleBounds.height / 2 } : null, failed: /không thành công|không tải được video|failed|couldn't load video|could not load video|generation failed/i.test(text) };",
     "})()",
   ].join("\n");
-  return window.webContents.executeJavaScript(expression, true).then((state) => ({ ...state, beforeCardCount }));
+  return executeFlowJavaScript(window, expression).then((state) => ({ ...state, beforeCardCount }));
 }
 
 async function waitForFlowVideo(window, beforeSources, beforeCardCount = 0, timeout = 600_000) {
@@ -1074,7 +1516,7 @@ async function getFlowVideoBuffer(window, result) {
     if (!response.ok) throw new Error("Google Flow không cho phép tải video vừa tạo.");
     return Buffer.from(await response.arrayBuffer());
   }
-  const dataUrl = await window.webContents.executeJavaScript("(async () => { const video = [...document.querySelectorAll('video')].reverse().find((candidate) => (candidate.currentSrc || candidate.src || '').startsWith('blob:')); if (!video) return null; const response = await window.fetch(video.currentSrc || video.src); const blob = await response.blob(); return await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); }); })()", true);
+  const dataUrl = await executeFlowJavaScript(window, "(async () => { const video = [...document.querySelectorAll('video')].reverse().find((candidate) => (candidate.currentSrc || candidate.src || '').startsWith('blob:')); if (!video) return null; const response = await window.fetch(video.currentSrc || video.src); const blob = await response.blob(); return await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); }); })()");
   const match = typeof dataUrl === "string" ? /^data:video\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=]+)$/i.exec(dataUrl) : null;
   if (!match) throw new Error("Không tìm thấy dữ liệu video Google Flow để tải về app.");
   return Buffer.from(match[1], "base64");
@@ -1112,7 +1554,7 @@ async function inspectFlowImage(window, beforeSources = []) {
     "  return { imageSource: image ? sourceFor(image) : (resourceSources[resourceSources.length - 1] || null), failed: /không thành công|không tải được ảnh|failed|couldn't load image|could not load image|generation failed/i.test(text) };",
     "})()",
   ].join("\n");
-  return window.webContents.executeJavaScript(expression, true);
+  return executeFlowJavaScript(window, expression);
 }
 
 async function waitForFlowImage(window, beforeSources, timeout = 600_000) {
@@ -1133,7 +1575,7 @@ async function getFlowImageBuffer(window, result) {
     if (!mimeType.startsWith("image/")) throw new Error("Google Flow không trả về tệp ảnh hợp lệ.");
     return { buffer: Buffer.from(await response.arrayBuffer()), mimeType };
   }
-  const dataUrl = await window.webContents.executeJavaScript("(async () => { const image = [...document.querySelectorAll('img')].reverse().find((candidate) => (candidate.currentSrc || candidate.src || '').startsWith('blob:')); if (!image) return null; const response = await window.fetch(image.currentSrc || image.src); const blob = await response.blob(); return await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); }); })()", true);
+  const dataUrl = await executeFlowJavaScript(window, "(async () => { const image = [...document.querySelectorAll('img')].reverse().find((candidate) => (candidate.currentSrc || candidate.src || '').startsWith('blob:')); if (!image) return null; const response = await window.fetch(image.currentSrc || image.src); const blob = await response.blob(); return await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); }); })()");
   const match = typeof dataUrl === "string" ? /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(dataUrl) : null;
   if (!match) throw new Error("Không tìm thấy dữ liệu ảnh Google Flow để tải về app.");
   return { buffer: Buffer.from(match[2], "base64"), mimeType: match[1].toLowerCase() };
@@ -1432,7 +1874,6 @@ async function runFlowVideoJob(event, projectId, channelId, slots) {
   event.sender.send("gemini-browser:video-progress", { processed: 0, total: slots.length, label: "Đang mở Google Flow..." });
   const window = createFlowWindow();
   const videos = {};
-  const characterReferencePath = findChannelMainCharacterImagePath(channelId);
   for (let index = 0; index < slots.length; index += 1) {
     const slot = slots[index];
     if (!Number.isInteger(slot?.sceneNumber) || typeof slot.visualBlock !== "string" || typeof slot.actionBlock !== "string" || typeof slot.audioBlock !== "string") {
@@ -1448,12 +1889,8 @@ async function runFlowVideoJob(event, projectId, channelId, slots) {
     event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang cấu hình Google Flow cho cảnh " + sceneNumber + "..." });
     await configureFlowVideo(window);
     event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang tải đúng ảnh cảnh " + sceneNumber + " lên Google Flow..." });
-    await uploadFlowAsset(window, imagePath);
+    await uploadFlowAsset(window, imagePath, false, (label) => event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label }));
     await addFlowAssetToStart(window, imagePath);
-    if (characterReferencePath) {
-      event.sender.send("gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang gắn ảnh nhân vật chính để giữ nhận diện..." });
-      await uploadFlowAsset(window, characterReferencePath, true);
-    }
 
     const prepared = await window.webContents.executeJavaScript([
       "(() => {",
@@ -1479,7 +1916,7 @@ async function runFlowVideoJob(event, projectId, channelId, slots) {
     if (prepared?.error) throw new Error(prepared.error);
 
     const videoFormat = "vertical 9:16";
-    const prompt = "Create one 4-second " + videoFormat + " video from the attached scene image and the fixed main-character reference image. Use this exact scene image as the Start frame for scene " + sceneNumber + ". The character reference is only for preserving the recurring protagonist's exact identity, silhouette, face, colors, clothing, and proportions; never use it as the Start frame or End frame. Do not use an End frame or a separate background image. Preserve the exact scene composition, environment, lighting, and art style. Animate only this scene. Action: " + slot.actionBlock + ". Camera and visual direction: " + slot.visualBlock + ". Audio and sound direction: " + slot.audioBlock + ". Generate one final video with audio.";
+    const prompt = "Create one 4-second " + videoFormat + " video from the attached scene image. Use this exact scene image as the Start frame for scene " + sceneNumber + ". Preserve the main character already shown in the scene image, including identity, silhouette, face, colors, clothing, and proportions. Do not use an End frame or a separate character/background image. Preserve the exact scene composition, environment, lighting, and art style. Animate only this scene. Action: " + slot.actionBlock + ". Camera and visual direction: " + slot.visualBlock + ". Audio and sound direction: " + slot.audioBlock + ". Generate one final video with audio.";
     const promptResult = await window.webContents.executeJavaScript([
       "(() => {",
       "  const prompt = " + JSON.stringify(prompt) + ";",
@@ -1525,7 +1962,9 @@ ipcMain.handle("flow-browser:run-image-job", async (event, value) => {
   if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || typeof channelId !== "string" || !/^[A-Za-z0-9_-]+$/.test(channelId) || !Array.isArray(slots) || slots.length === 0) {
     throw new Error("Yêu cầu tạo ảnh bằng Google Flow không hợp lệ.");
   }
-  return runFlowImageJob(event, projectId, channelId, slots).finally(() => closeFlowWindow());
+  const result = await runFlowImageJob(event, projectId, channelId, slots);
+  closeFlowWindow();
+  return result;
 });
 
 ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
@@ -1535,7 +1974,9 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
   if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || typeof channelId !== "string" || !/^[A-Za-z0-9_-]+$/.test(channelId) || !Array.isArray(slots) || slots.length === 0) {
     throw new Error("Yêu cầu tạo video không hợp lệ.");
   }
-  return runFlowVideoJob(event, projectId, channelId, slots).finally(() => closeFlowWindow());
+  const result = await runFlowVideoJob(event, projectId, channelId, slots);
+  closeFlowWindow();
+  return result;
 });
 
 ipcMain.handle("gemini-browser:open-flow", async () => {
