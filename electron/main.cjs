@@ -61,7 +61,10 @@ function ensureRuntime() {
 
 async function ensureLocalDatabaseSchema(databaseUrl) {
   if (typeof databaseUrl !== "string" || !databaseUrl.startsWith("file:")) return;
-  const { PrismaClient } = require("@prisma/client");
+  const prismaClientPath = app.isPackaged
+    ? path.join(runtimeRoot(), "app", "node_modules", "@prisma", "client")
+    : "@prisma/client";
+  const { PrismaClient } = require(prismaClientPath);
   const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
   try {
     const columns = await prisma.$queryRawUnsafe('PRAGMA table_info("StoryboardScene")');
@@ -2109,14 +2112,21 @@ async function createWindow(syncAfterUpdate = false) {
   void window.loadURL(url);
 }
 
-app.whenReady().then(async () => {
-  await startLocalServices();
-  await waitForServer();
-  await createWindow(consumeSyncAfterUpdate());
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) void createWindow();
+app.whenReady()
+  .then(async () => {
+    await startLocalServices();
+    await waitForServer();
+    await createWindow(consumeSyncAfterUpdate());
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) void createWindow();
+    });
+  })
+  .catch((error) => {
+    const message = error instanceof Error ? error.stack || error.message : String(error);
+    fs.appendFileSync(path.join(app.getPath("userData"), "desktop-runtime.log"), `[startup-error] ${message}\n`, "utf8");
+    dialog.showErrorBox("Không thể khởi động Modeling AI", "Ứng dụng không thể khởi động dịch vụ nội bộ. Hãy mở lại ứng dụng hoặc gửi file desktop-runtime.log để kiểm tra.");
+    app.quit();
   });
-});
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
