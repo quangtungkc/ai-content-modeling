@@ -1577,10 +1577,11 @@ async function inspectFlowImage(window, beforeSources = []) {
     "  for (let index = 0; index < roots.length; index += 1) { for (const element of roots[index].querySelectorAll('*')) { if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); } } }",
     "  const images = roots.flatMap((root) => [...root.querySelectorAll('img')]).filter((image) => { const bounds = image.getBoundingClientRect(); return bounds.width > 0 && bounds.height > 0; });",
     "  const sourceFor = (image) => image.currentSrc || image.src || image.querySelector('source')?.src || '';",
-    "  const image = images.reverse().find((candidate) => { const source = sourceFor(candidate); return source && !before.has(source) && candidate.complete && (candidate.naturalWidth || candidate.width) >= 128 && (candidate.naturalHeight || candidate.height) >= 128 && (/flow-content\\.google\\/image\\//i.test(source) || /tile displaying a user's image/i.test(candidate.alt || '')); });",
-    "  const resourceSources = performance.getEntriesByType('resource').map((entry) => entry.name).filter((source) => /flow-content\\.google\\/image\\//i.test(source) && !before.has(source));",
+    "  const referenceSources = new Set(images.filter((candidate) => candidate.closest('flow-base-prompt-box, flow-ingredient-bar, .frame-trigger')).map(sourceFor).filter(Boolean));",
+    "  const isReferenceImage = (candidate) => referenceSources.has(sourceFor(candidate)) || Boolean(candidate.closest('flow-base-prompt-box, flow-ingredient-bar, .frame-trigger'));",
+    "  const image = images.reverse().find((candidate) => { const source = sourceFor(candidate); return source && !before.has(source) && !isReferenceImage(candidate) && candidate.complete && (candidate.naturalWidth || candidate.width) >= 128 && (candidate.naturalHeight || candidate.height) >= 128 && /flow-content\\.google\\/image\\//i.test(source); });",
     "  const text = document.body?.innerText || '';",
-    "  return { imageSource: image ? sourceFor(image) : (resourceSources[resourceSources.length - 1] || null), failed: /không thành công|không tải được ảnh|failed|couldn't load image|could not load image|generation failed/i.test(text) };",
+    "  return { imageSource: image ? sourceFor(image) : null, failed: /không thành công|không tải được ảnh|failed|couldn't load image|could not load image|generation failed/i.test(text) };",
     "})()",
   ].join("\n");
   return executeFlowJavaScript(window, expression);
