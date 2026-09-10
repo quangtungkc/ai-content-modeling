@@ -10,6 +10,10 @@ const path = require("node:path");
 
 // Keep development Electron and the packaged desktop app on the same local data store.
 app.setPath("userData", path.join(app.getPath("appData"), "ai-content-modeling"));
+if (app.isPackaged && !process.argv.some((value) => value.startsWith("--remote-debugging-port="))) {
+  app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
+  app.commandLine.appendSwitch("remote-debugging-port", "0");
+}
 
 const PORT = 3210;
 const APP_URL = process.env.DESKTOP_APP_URL || (app.isPackaged ? `http://127.0.0.1:${PORT}` : "http://localhost:3000");
@@ -221,7 +225,14 @@ const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mil
 function getRemoteDebuggingPort() {
   const argument = process.argv.find((value) => value.startsWith("--remote-debugging-port="));
   const port = Number(argument?.split("=")[1]);
-  return Number.isInteger(port) && port > 0 ? port : null;
+  if (Number.isInteger(port) && port > 0) return port;
+  try {
+    const activePortPath = path.join(app.getPath("userData"), "DevToolsActivePort");
+    const activePort = Number(fs.readFileSync(activePortPath, "utf8").split(/\r?\n/, 1)[0]);
+    return Number.isInteger(activePort) && activePort > 0 ? activePort : null;
+  } catch {
+    return null;
+  }
 }
 
 function readRemoteDebuggingTargets(port) {
