@@ -5,6 +5,7 @@ import { GeminiProvider } from "@/services/ai/gemini";
 import { OpenAIProvider } from "@/services/ai/openai";
 import { AIService } from "@/services/ai/service";
 import type { ChannelDNA, VideoContext } from "@/services/ai/types";
+import { readChannelMainCharacterImage } from "@/modules/channels/service";
 
 export async function analyzeCompetitorVideo(videoId: string, userId: string) {
   const video = await db.competitorVideo.findFirst({
@@ -48,8 +49,9 @@ export async function analyzeCompetitorVideo(videoId: string, userId: string) {
     publishedAt: video.publishedAt?.toISOString(),
     duration: video.duration,
   };
+  const mainCharacterImage = await readChannelMainCharacterImage(channel);
   const aiService = new AIService(provider, { userId, channelId: channel.id });
-  const analysis = await aiService.analyzeVideo({ channelDNA, video: videoContext });
+  const analysis = await aiService.analyzeVideo({ channelDNA, video: videoContext, mainCharacterImage });
   const latestAnalysis = await db.sourceAnalysis.findFirst({ where: { sourceVideoId: video.id }, orderBy: { version: "desc" }, select: { version: true } });
   const stored = await db.sourceAnalysis.create({
     data: { sourceVideoId: video.id, version: (latestAnalysis?.version ?? 0) + 1, provider: aiService.providerName, schemaVersion: analysis.schemaVersion, content: analysis },

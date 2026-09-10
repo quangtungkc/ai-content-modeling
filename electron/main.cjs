@@ -59,6 +59,20 @@ function ensureRuntime() {
   };
 }
 
+async function ensureLocalDatabaseSchema(databaseUrl) {
+  if (typeof databaseUrl !== "string" || !databaseUrl.startsWith("file:")) return;
+  const { PrismaClient } = require("@prisma/client");
+  const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+  try {
+    const columns = await prisma.$queryRawUnsafe('PRAGMA table_info("StoryboardScene")');
+    if (!Array.isArray(columns) || !columns.some((column) => column?.name === "startFramePrompt")) {
+      await prisma.$executeRawUnsafe('ALTER TABLE "StoryboardScene" ADD COLUMN "startFramePrompt" TEXT');
+    }
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
 function runtimeConfigPath() {
   return path.join(app.getPath("userData"), "desktop-config.json");
 }
@@ -115,10 +129,11 @@ function runtimeRoot() {
     : path.join(__dirname, "dist");
 }
 
-function startLocalServices() {
+async function startLocalServices() {
   if (!app.isPackaged || process.env.DESKTOP_APP_URL) return;
   const appDirectory = path.join(runtimeRoot(), "app");
   const environment = ensureRuntime();
+  await ensureLocalDatabaseSchema(environment.DATABASE_URL);
   const log = fs.openSync(path.join(app.getPath("userData"), "desktop-runtime.log"), "a");
   serverProcess = spawn(process.execPath, [path.join(appDirectory, "server.js")], { cwd: appDirectory, env: environment, windowsHide: true, stdio: ["ignore", log, log] });
   workerProcess = spawn(process.execPath, [path.join(appDirectory, "worker.cjs")], { cwd: appDirectory, env: environment, windowsHide: true, stdio: ["ignore", log, log] });
@@ -1156,7 +1171,7 @@ async function attachFlowAssetToPrompt(window, filename, previousAttachmentCount
     if (await countFlowPromptAttachments(window) > previousAttachmentCount) return;
     await delay(250);
   }
-  await clickFlowControl(window, ["Add to prompt", "Thêm vào câu lệnh", "Thêm vào prompt"], true, 5_000);
+  await clickFlowControl(window, ["Add to prompt", "Thêm vào câu lệnh", "Thêm vào prompt"], true, 30_000);
   for (let elapsed = 0; elapsed < 15_000; elapsed += 500) {
     if (await countFlowPromptAttachments(window) > previousAttachmentCount) return;
     await delay(500);
@@ -1801,7 +1816,9 @@ async function runFlowImageJob(event, projectId, channelId, slots) {
   const characterReferencePath = findChannelMainCharacterImagePath(channelId);
   for (let index = 0; index < slots.length; index += 1) {
     const slot = slots[index];
-    if (!slot || slot.kind !== "scene" || !Number.isInteger(slot.sceneNumber) || typeof slot.prompt !== "string" || !slot.prompt.trim()) {
+    const isBackground = slot?.kind === "background";
+    const isScene = slot?.kind === "scene";
+    if (!slot || (!isBackground && !isScene) || (isScene && (!Number.isInteger(slot.sceneNumber) || slot.sceneNumber < 1)) || (isBackground && slot.sceneNumber !== 0) || typeof slot.prompt !== "string" || !slot.prompt.trim()) {
       throw new Error("Dữ liệu ảnh tạo bằng Google Flow không hợp lệ.");
     }
     event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang mở project Google Flow riêng cho " + (slot.label || "ảnh") + "..." });
@@ -1813,9 +1830,15 @@ async function runFlowImageJob(event, projectId, channelId, slots) {
         await clearFlowComposer(window);
         event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang cấu hình Google Flow cho " + (slot.label || "ảnh") + "..." });
         await configureFlowImage(window);
-        if (characterReferencePath) {
+        if (isScene && characterReferencePath) {
           event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang gắn ảnh nhân vật chính làm tham chiếu..." });
           await uploadFlowAsset(window, characterReferencePath, true);
+        }
+        if (isScene) {
+          const backgroundPath = findGeneratedImagePath(projectId, "background", 0);
+          if (!fs.existsSync(backgroundPath) || fs.statSync(backgroundPath).size < 1024) throw new Error("Ảnh bối cảnh đồng nhất chưa được tạo và lưu thành công vào app.");
+          event.sender.send("flow-browser:image-progress", { processed: index, total: slots.length, label: "Đang gắn ảnh bối cảnh đồng nhất làm tham chiếu..." });
+          await uploadFlowAsset(window, backgroundPath, true);
         }
 
     const prepared = await window.webContents.executeJavaScript([
@@ -1852,8 +1875,8 @@ async function runFlowImageJob(event, projectId, channelId, slots) {
     const { buffer, mimeType } = await getFlowImageBuffer(window, result);
     const url = saveFlowImage(projectId, slot, buffer, mimeType);
     const sceneNumber = Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0;
-    const savedPath = findGeneratedImagePath(projectId, "scene", sceneNumber);
-    if (!fs.existsSync(savedPath) || fs.statSync(savedPath).size < 1024) throw new Error("Ảnh cảnh " + sceneNumber + " chưa được lưu thành công vào app.");
+    const savedPath = findGeneratedImagePath(projectId, slot.kind, sceneNumber);
+    if (!fs.existsSync(savedPath) || fs.statSync(savedPath).size < 1024) throw new Error((isBackground ? "Ảnh bối cảnh đồng nhất" : "Ảnh cảnh " + sceneNumber) + " chưa được lưu thành công vào app.");
     images[`${slot.kind}-${sceneNumber}`] = `${url}&v=${Date.now()}`;
     event.sender.send("flow-browser:image-progress", { processed: index + 1, total: slots.length, label: "Đã tải và lưu " + (slot.label || "ảnh") + " vào app" });
         slotError = null;
@@ -1876,7 +1899,7 @@ async function runFlowVideoJob(event, projectId, channelId, slots) {
   const videos = {};
   for (let index = 0; index < slots.length; index += 1) {
     const slot = slots[index];
-    if (!Number.isInteger(slot?.sceneNumber) || typeof slot.visualBlock !== "string" || typeof slot.actionBlock !== "string" || typeof slot.audioBlock !== "string") {
+    if (!Number.isInteger(slot?.sceneNumber) || typeof slot.visualBlock !== "string" || typeof slot.actionBlock !== "string" || typeof slot.audioBlock !== "string" || typeof slot.englishPrompt !== "string" || !slot.englishPrompt.trim()) {
       throw new Error("Dữ liệu phân cảnh tạo video không hợp lệ.");
     }
     const sceneNumber = slot.sceneNumber;
@@ -1916,7 +1939,7 @@ async function runFlowVideoJob(event, projectId, channelId, slots) {
     if (prepared?.error) throw new Error(prepared.error);
 
     const videoFormat = "vertical 9:16";
-    const prompt = "Create one 4-second " + videoFormat + " video from the attached scene image. Use this exact scene image as the Start frame for scene " + sceneNumber + ". Preserve the main character already shown in the scene image, including identity, silhouette, face, colors, clothing, and proportions. Do not use an End frame or a separate character/background image. Preserve the exact scene composition, environment, lighting, and art style. Animate only this scene. Action: " + slot.actionBlock + ". Camera and visual direction: " + slot.visualBlock + ". Audio and sound direction: " + slot.audioBlock + ". Generate one final video with audio.";
+    const prompt = "Create one 4-second " + videoFormat + " video from the attached start-frame image. Use that image as the exact Start frame for scene " + sceneNumber + ". The start-frame image already combines the approved fixed main character and approved background, so preserve the exact character identity, silhouette, face, colors, clothing, proportions, environment, lighting, composition, props, and art style shown in it. First follow this video-scene prompt written by Gemini without changing its meaning: " + slot.englishPrompt + ". Do not use an End frame and do not add unrelated characters, props, actions, or story beats. Animate only the one primary action specified for this scene. Action reference: " + slot.actionBlock + ". Camera and visual direction reference: " + slot.visualBlock + ". Audio and sound direction reference: " + slot.audioBlock + ". Generate one final video with audio.";
     const promptResult = await window.webContents.executeJavaScript([
       "(() => {",
       "  const prompt = " + JSON.stringify(prompt) + ";",
@@ -2087,7 +2110,7 @@ async function createWindow(syncAfterUpdate = false) {
 }
 
 app.whenReady().then(async () => {
-  startLocalServices();
+  await startLocalServices();
   await waitForServer();
   await createWindow(consumeSyncAfterUpdate());
   app.on("activate", () => {

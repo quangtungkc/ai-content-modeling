@@ -11,8 +11,10 @@ function modelingIdeaInstruction(artStyle?: string) {
 BƯỚC 1 — PHÂN TÍCH VÀ BẮT MẠCH BẢN GỐC (DECONSTRUCTION):
 - Xác định rõ điểm gây cười cốt lõi (The Gag): tiếng cười đến từ sự ngớ ngẩn, tương tác vật lý lố bịch, biểu cảm vô tri, hay khoảng lặng chưng hửng.
 - Bảo tồn sự tối giản của nguyên tác. Giữ tinh thần góc máy, nhịp điệu, khoảng lặng và sự trần trụi cần thiết để gag tự phát huy; không tự ý thêm drama, giải thích dài, tình tiết điện ảnh hoặc tuyến phụ làm hỏng mạch hài.
-- Chỉ kế thừa cơ chế gây cười và nguyên tắc nhịp điệu; phải tạo nhân vật, bối cảnh, chi tiết bề mặt và cách thể hiện mới, không sao chép nguyên tác.
-- Nếu Channel DNA có ảnh nhân vật chính cố định, đó là nhân vật trung tâm bắt buộc của mọi hướng modeling; không được thay bằng nhân vật mới. Mọi cảnh phải có thể dùng cùng ảnh tham chiếu đó để giữ đúng nhận diện.
+- Đây là modeling bám sát bản gốc: phải giữ cốt truyện, thứ tự hành động, số lượng nhân vật, đạo cụ chính, điểm gây cười, nhịp và logic kết thúc. Không được biến cơ chế gốc thành một câu chuyện khác.
+- Chỉ được thay đổi phong cách mỹ thuật, màu sắc và chi tiết bề mặt phù hợp với quốc gia/kênh khi thật sự cần; mọi thay đổi phải ghi rõ trong whatIsChanged và không được làm thay đổi ý nghĩa cảnh.
+- Nếu có ảnh nhân vật chính được đính kèm, phải quan sát ảnh đó trước khi viết và dùng đúng nhân vật làm trung tâm trong mọi cảnh. Không được thay bằng nhân vật mới, không được tự suy diễn một nhân vật khác.
+- Không thêm nhân vật, đạo cụ, bối cảnh, tuyến phụ hoặc hành động mới nếu không có trong bản gốc hay không được yêu cầu rõ ràng.
 
 BƯỚC 2 — NÂNG CẤP NGHỆ THUẬT (ART DIRECTION & PHYSICS):
 - Tạo hình từng nhân vật phải được mô tả cụ thể và có chủ đích gây cười ngay từ cái nhìn đầu tiên. Ưu tiên hình tượng dị biệt, bựa, vô tri, ngớ ngẩn hoặc tương phản bất thường; nét mặt, hình dáng, tỷ lệ, trang phục và đạo cụ phải hỗ trợ hài hình ảnh theo phong cách hài được ưa chuộng.
@@ -20,7 +22,7 @@ BƯỚC 2 — NÂNG CẤP NGHỆ THUẬT (ART DIRECTION & PHYSICS):
 - Mô tả tổng thể không gian thật rõ: bố cục, vật thể chính, khoảng trống, ánh sáng, màu sắc và cảm giác mà bối cảnh mang lại.
 
 BƯỚC 3 — MẠCH KỊCH BẢN PHÂN CẢNH:
-- Trường script phải mô tả chi tiết các phân cảnh nối tiếp nhau chặt chẽ, không rời rạc hoặc "nối bịch". Mỗi cảnh phải kế thừa vị trí, trạng thái, đạo cụ và hậu quả của cảnh trước; có mở đầu, tích lũy, va chạm/gag và kết rõ ràng.
+- Trường script phải mô tả chi tiết các phân cảnh nối tiếp nhau chặt chẽ, không rời rạc hoặc "nối bịch". Mỗi cảnh phải kế thừa vị trí, trạng thái, đạo cụ và hậu quả của cảnh trước; có mở đầu, tích lũy, va chạm/gag và kết rõ ràng. Mỗi cảnh chỉ có một hành động chính, không gộp nhiều hành động liên tiếp vào một ảnh.
 - Mỗi phân cảnh phải làm rõ: tổng thể không gian; tư thế, biểu cảm và trạng thái của từng nhân vật; diễn biến hành động theo thứ tự; vật lý/va chạm; điểm gây cười; và âm thanh hoặc khoảng lặng tương ứng.
 - Không làm phức tạp hóa video. Nếu nguyên tác là hài vô ngôn/slapstick, ưu tiên hành động dễ hiểu, ít lời và nhịp hài trực diện.
 
@@ -40,7 +42,8 @@ function developedIdeaInstruction(aspectRatio?: string) {
 
 BƯỚC 1 — PHÂN TÍCH VÀ BẮT MẠCH BẢN GỐC (DECONSTRUCTION):
 - Trong deconstruction, chỉ ra điểm gây cười cốt lõi (The Gag), bằng chứng từ phân tích, góc máy, nhịp điệu, khoảng lặng và phần tối giản cần bảo tồn.
-- Không tự ý thêm drama, lời giải thích, tuyến phụ hoặc thủ pháp điện ảnh rườm rà nếu không phục vụ gag. Giữ nguyên tinh thần đơn giản của nguyên tác nhưng tạo cách thể hiện, nhân vật và bối cảnh mới.
+- Đây là bản chuyển thể bám sát: giữ nguyên ý nghĩa, chuỗi sự kiện, thứ tự hành động, số lượng nhân vật, đạo cụ chính, góc máy và kết quả của bản gốc. Không được tự ý viết một tình huống khác.
+- Chỉ được thay đổi lớp mỹ thuật và chi tiết bề mặt khi không làm thay đổi hành động hoặc gag. Nếu thiếu dữ liệu, phải ghi rõ thiếu dữ liệu thay vì bịa thêm.
 
 BƯỚC 2 — NÂNG CẤP NGHỆ THUẬT (ART DIRECTION & PHYSICS):
 - Trong artDirection, mô tả tổng thể không gian, bố cục, ánh sáng, màu sắc, cảm giác bối cảnh, phong cách hài thị giác và ngôn ngữ máy quay.
@@ -49,15 +52,16 @@ BƯỚC 2 — NÂNG CẤP NGHỆ THUẬT (ART DIRECTION & PHYSICS):
 - Trong backgroundDesign, mô tả rõ không gian và cảm giác bối cảnh, đồng thời nêu quy tắc giữ bối cảnh nhất quán giữa các cảnh.
 
 BƯỚC 3 — STORYBOARD SCRIPT NỐI TIẾP CHẶT CHẼ:
-- storyboard phải gồm các cảnh nối tiếp hợp lý, không rời rạc. Cảnh sau bắt đầu từ trạng thái, vị trí, đạo cụ và hậu quả ở cuối cảnh trước; không tự ý đổi không gian hoặc reset nhân vật.
-- Mỗi cảnh phải tuân thủ đúng ba khối rạch ròi:
+- storyboard phải gồm các cảnh nối tiếp hợp lý, không rời rạc. Cảnh sau bắt đầu từ trạng thái, vị trí, đạo cụ và hậu quả ở cuối cảnh trước; không tự ý đổi không gian hoặc reset nhân vật. Mỗi cảnh chỉ có một hành động chính, phù hợp video 4 giây.
+- Mỗi cảnh phải tuân thủ đúng ba khối rạch ròi trong storyboard và có thêm hai prompt sản xuất riêng:
   1. visualBlock: ghi rõ [HÌNH ẢNH / KHÔNG GIAN / TƯ THẾ / TRẠNG THÁI], gồm tổng thể không gian, cảm giác bối cảnh, ánh sáng, vị trí vật thể và tư thế/trạng thái ban đầu của từng nhân vật.
   2. actionBlock: liệt kê theo thứ tự 1, 2, 3... toàn bộ diễn biến hành động, tương tác vật lý, chuyển động cơ thể, va đập, co giãn, nảy lên, rơi xuống và điểm gag.
   3. audioBlock: liệt kê Foley đồng bộ 100% với từng hành động; ghi rõ nhịp, cao trào và khoảng lặng. Sự im lặng cũng được coi là một loại âm thanh để tấu hài.
-- englishPrompt phải chuyển đầy đủ visualBlock và các quy tắc liên tục nhân vật/bối cảnh sang tiếng Anh để dùng tạo ảnh/video, không được rút gọn thành mô tả chung.
-- Trong mọi visualBlock và englishPrompt, phải ghi rõ nhân vật chính cố định của kênh được giữ nguyên nhận diện qua các cảnh; ảnh tham chiếu kênh sẽ được đính kèm ở bước tạo ảnh/video.
+- startFramePrompt là prompt tiếng Anh riêng để tạo đúng một ảnh bắt đầu đứng yên cho cảnh 4 giây. Prompt phải mô tả chính xác khung hình đầu: không gian, bố cục, tư thế và trạng thái ban đầu, vị trí nhân vật/đạo cụ, ánh sáng, góc máy và phong cách; dùng ảnh nhân vật chính cùng ảnh bối cảnh làm tham chiếu; tuyệt đối không mô tả chuyển động tiếp diễn, không tạo collage, storyboard, sheet, chữ hoặc nhiều biến thể.
+- englishPrompt là prompt tiếng Anh riêng cho video quay 4 giây sau khi đã có ảnh bắt đầu. Prompt phải chỉ rõ cách animate từ đúng ảnh bắt đầu, giữ nguyên ý nghĩa, thứ tự hành động, nhân vật, đạo cụ, bối cảnh, nhịp máy quay, điểm gag và kết thúc; không được biến thành một câu chuyện khác hoặc thêm hành động mới.
+- Trong visualBlock, startFramePrompt và englishPrompt, phải ghi rõ nhân vật chính cố định của kênh được giữ nguyên nhận diện qua các cảnh; ảnh tham chiếu kênh sẽ được đính kèm ở bước tạo ảnh và video. Không được dùng ảnh tham chiếu để tạo sheet, collage hoặc nhân vật thứ hai.
 
-Trả đúng JSON có schemaVersion là chuỗi "1.0", gồm deconstruction, artDirection, characterDesign, backgroundDesign, storyboard và safetyReview. Viết các trường mô tả bằng tiếng Việt, trừ englishPrompt. Khung hình đã chọn: ${aspectRatio ?? "9:16"}. Chỉ dùng mô tả hình ảnh nguyên bản, không nêu tên hoặc bắt chước studio, thương hiệu, nghệ sĩ hay nhân vật có bản quyền.`;
+Trả đúng JSON có schemaVersion là chuỗi "1.0", gồm deconstruction, artDirection, characterDesign, backgroundDesign, storyboard và safetyReview. Mỗi phần tử storyboard bắt buộc có sceneNumber, visualBlock, actionBlock, audioBlock, startFramePrompt và englishPrompt. Viết các trường mô tả bằng tiếng Việt, riêng startFramePrompt và englishPrompt phải viết bằng tiếng Anh để gửi cho Google Flow. Khung hình đã chọn: ${aspectRatio ?? "9:16"}. Chỉ dùng mô tả hình ảnh nguyên bản, không nêu tên hoặc bắt chước studio, thương hiệu, nghệ sĩ hay nhân vật có bản quyền.`;
 }
 
 export class GeminiProvider implements AIProvider {
@@ -74,6 +78,7 @@ export class GeminiProvider implements AIProvider {
       videoAnalysisSchema,
       normalizeVideoAnalysis,
       videoAnalysisResponseSchema,
+      { includeMainCharacterImage: false },
     );
   }
   generateIdeas(input: AIInput & { analysis: VideoAnalysis; artStyle?: string }) { return this.request(modelingIdeaInstruction(input.artStyle), input, modelingIdeasSchema, normalizeModelingIdeas, modelingIdeasResponseSchema); }
@@ -108,9 +113,9 @@ export class GeminiProvider implements AIProvider {
     if (!image?.data) throw new AIStructuredOutputError(this.name, { message: "Gemini không trả về dữ liệu ảnh. Kiểm tra quyền truy cập model tạo ảnh của API key." });
     return { mimeType: image.mimeType ?? "image/png", data: image.data };
   }
-  private async request<T>(instruction: string, input: unknown, schema: { parse(value: unknown): T }, normalize?: (value: unknown) => unknown, responseSchema?: Record<string, unknown>): Promise<T> {
+  private async request<T>(instruction: string, input: unknown, schema: { parse(value: unknown): T }, normalize?: (value: unknown) => unknown, responseSchema?: Record<string, unknown>, options?: { includeMainCharacterImage?: boolean }): Promise<T> {
     if (!this.apiKey) throw new AIProviderNotConfiguredError(this.name);
-    const response = await this.generateContent({ contents: [{ parts: [{ text: `${instruction}\n${JSON.stringify(input)}` }] }], generationConfig: { responseMimeType: "application/json", ...(responseSchema ? { responseSchema } : {}) } });
+    const response = await this.generateContent({ contents: [{ parts: buildGeminiRequestParts(instruction, input, options?.includeMainCharacterImage !== false) }], generationConfig: { responseMimeType: "application/json", ...(responseSchema ? { responseSchema } : {}) } });
     const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     try {
       const parsed = parseJsonText(body.candidates?.[0]?.content?.parts?.[0]?.text ?? "");
@@ -154,6 +159,22 @@ function isTransientGeminiError(status: number) {
 
 function delay(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function buildGeminiRequestParts(instruction: string, input: unknown, includeMainCharacterImage = true) {
+  const source = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  const media = source.mainCharacterImage && typeof source.mainCharacterImage === "object"
+    ? source.mainCharacterImage as { mimeType?: unknown; data?: unknown; name?: unknown }
+    : undefined;
+  const context = { ...source };
+  delete context.mainCharacterImage;
+  const parts: Array<Record<string, unknown>> = [{ text: instruction }];
+  if (includeMainCharacterImage && typeof media?.mimeType === "string" && typeof media.data === "string" && media.data.length > 0) {
+    parts.push({ inline_data: { mime_type: media.mimeType, data: media.data } });
+    parts.push({ text: `Ảnh tham chiếu nhân vật chính${typeof media.name === "string" ? ` (${media.name})` : ""} đã được đính kèm. Hãy nhìn ảnh này trước khi viết và giữ nguyên nhận diện nhân vật.` });
+  }
+  parts.push({ text: `DỮ LIỆU CHỮ CỦA KÊNH, VIDEO VÀ PHÂN TÍCH:\n${JSON.stringify(context)}` });
+  return parts;
 }
 
 async function readApiError(response: Response) {
@@ -201,9 +222,10 @@ const developedIdeaResponseSchema: Record<string, unknown> = {
           visualBlock: { type: "STRING" },
           actionBlock: { type: "STRING" },
           audioBlock: { type: "STRING" },
+          startFramePrompt: { type: "STRING" },
           englishPrompt: { type: "STRING" },
         },
-        required: ["sceneNumber", "visualBlock", "actionBlock", "audioBlock", "englishPrompt"],
+        required: ["sceneNumber", "visualBlock", "actionBlock", "audioBlock", "startFramePrompt", "englishPrompt"],
       },
     },
     safetyReview: { type: "OBJECT" },
@@ -299,7 +321,8 @@ function normalizeDevelopedIdea(value: unknown): unknown {
       visualBlock: text(item.visualBlock ?? item.visual ?? item.image, "Chưa có mô tả hình ảnh cho cảnh này."),
       actionBlock: text(item.actionBlock ?? item.action, "Chưa có mô tả hành động cho cảnh này."),
       audioBlock: text(item.audioBlock ?? item.audio, "Không có âm thanh đặc biệt."),
-      englishPrompt: text(item.englishPrompt ?? item.prompt, "Create a consistent scene using the approved character and background designs."),
+      startFramePrompt: text(item.startFramePrompt ?? item.imagePrompt ?? item.startPrompt, "Create one single full-frame vertical 9:16 still image showing the exact starting state of this scene, using the approved main character and background references. Preserve the character identity, environment, lighting, composition, and initial pose. Do not show motion, a collage, a storyboard, text, or multiple variations."),
+      englishPrompt: text(item.englishPrompt ?? item.videoPrompt ?? item.prompt, "Create one 4-second video starting from the exact approved still image for this scene. Preserve the character, background, composition, and story meaning, and animate only the specified primary action with synchronized sound."),
     };
   }) : [];
   return {

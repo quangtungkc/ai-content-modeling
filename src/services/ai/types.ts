@@ -16,6 +16,12 @@ export type ChannelDNA = {
   timezone: string;
 };
 
+export type AIImageReference = {
+  mimeType: string;
+  data: string;
+  name?: string | null;
+};
+
 export type VideoContext = {
   id: string;
   url: string;
@@ -27,7 +33,7 @@ export type VideoContext = {
   content?: string | null;
 };
 
-export type AIInput = { channelDNA: ChannelDNA; video: VideoContext };
+export type AIInput = { channelDNA: ChannelDNA; video: VideoContext; mainCharacterImage?: AIImageReference };
 export type VideoUnderstandingInput = { channelDNA?: ChannelDNA; videoId: string; videoFileUri: string; mimeType: string; instruction?: string };
 
 export type VideoAnalysis = {
@@ -57,7 +63,7 @@ export type ReviewIssue = { id: string; category: "missing_detail" | "continuity
 export type FinalReview = { schemaVersion: "1.0"; issues: ReviewIssue[]; overallSummary: string };
 export type AssetValidationInput = { assetId: string; assetType: "character" | "background" | "prop"; assetUri: string; mimeType: string; expectedDesign: Record<string, unknown>; projectContext?: Record<string, unknown> };
 export type AssetValidation = { schemaVersion: "1.0"; result: "APPROVED" | "NEEDS_REVISION"; scores: { characterMatch?: number; styleMatch: number; composition: number }; issues: Array<{ code: string; severity: "low" | "medium" | "high"; message: string; suggestion: string }> };
-export type DevelopedIdea = { schemaVersion: "1.0"; deconstruction: Record<string, unknown>; artDirection: Record<string, unknown>; characterDesign: Record<string, unknown>; backgroundDesign: Record<string, unknown>; storyboard: Array<{ sceneNumber: number; visualBlock: string; actionBlock: string; audioBlock: string; englishPrompt: string }>; safetyReview: Record<string, unknown> };
+export type DevelopedIdea = { schemaVersion: "1.0"; deconstruction: Record<string, unknown>; artDirection: Record<string, unknown>; characterDesign: Record<string, unknown>; backgroundDesign: Record<string, unknown>; storyboard: Array<{ sceneNumber: number; visualBlock: string; actionBlock: string; audioBlock: string; startFramePrompt: string; englishPrompt: string }>; safetyReview: Record<string, unknown> };
 
 export interface AIProvider {
   readonly name: string;

@@ -361,6 +361,7 @@ model StoryboardScene {
   actionBlock    String
   audioBlock     String
   englishPrompt  String?
+  startFramePrompt String?
   promptProvider String?
   status         String
   project        ContentProject   @relation(fields: [projectId], references: [id])

@@ -6,6 +6,7 @@ import { OpenAIProvider } from "@/services/ai/openai";
 import { AIService } from "@/services/ai/service";
 import { modelingIdeasSchema, videoAnalysisSchema } from "@/services/ai/schemas";
 import type { ChannelDNA, VideoContext } from "@/services/ai/types";
+import { readChannelMainCharacterImage } from "@/modules/channels/service";
 
 export async function generateIdeasFromVideo(videoId: string, userId: string, artStyle = "", provider?: AIService) {
   const video = await db.competitorVideo.findFirst({ where: { id: videoId, competitor: { channel: { userId } } }, include: { competitor: { include: { channel: true } }, analyses: { orderBy: { version: "desc" }, take: 1 } } });
@@ -14,6 +15,7 @@ export async function generateIdeasFromVideo(videoId: string, userId: string, ar
   if (!analysisRecord) throw new AppError("ANALYSIS_REQUIRED", "Video cần được phân tích trước khi tạo modeling ideas.", 409);
   const analysis = videoAnalysisSchema.parse(analysisRecord.content);
   const channel = video.competitor.channel;
+  const mainCharacterImage = await readChannelMainCharacterImage(channel);
   const channelDNA: ChannelDNA = { name: channel.name, topic: channel.topic, subTopic: channel.subTopic, targetCountry: channel.targetCountry, language: channel.language, audience: channel.audience, contentStyle: channel.contentStyle, visualStyle: channel.visualStyle, videoDuration: channel.videoDurationSec, hasDialogue: channel.hasDialogue, creativeInstructions: channel.creativeInstructions, hashtags: channel.hashtags, mainCharacterImageAvailable: Boolean(channel.mainCharacterImageKey), mainCharacterImageName: channel.mainCharacterImageName, timezone: channel.timezone };
   const videoContext: VideoContext = { id: video.id, url: video.url, caption: video.caption, thumbnailUrl: video.thumbnailUrl, publishedAt: video.publishedAt?.toISOString(), duration: video.duration };
   let aiService = provider;
@@ -24,7 +26,7 @@ export async function generateIdeasFromVideo(videoId: string, userId: string, ar
     const aiProvider = connection.provider === "GEMINI" ? new GeminiProvider(apiKey) : new OpenAIProvider(apiKey);
     aiService = new AIService(aiProvider, { userId, channelId: channel.id });
   }
-  const result = await aiService.generateIdeas({ channelDNA, video: videoContext, analysis, artStyle });
+  const result = await aiService.generateIdeas({ channelDNA, video: videoContext, analysis, artStyle, mainCharacterImage });
   if (result.modelingDirections.length !== 1) throw new AppError("INVALID_IDEA_COUNT", "AI phải trả đúng 1 modeling idea.", 502);
   const ideas = await db.$transaction(result.modelingDirections.map((content) => db.modelingIdea.create({ data: { sourceVideoId: video.id, analysisId: analysisRecord.id, title: content.title, content, status: "DRAFT" } })));
   return {
