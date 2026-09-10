@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
+import packageJson from "../../package.json";
 
 const items = [
   ["▦", "Tổng quan", "/"],
@@ -12,6 +14,16 @@ const items = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const [appVersion, setAppVersion] = useState(packageJson.version);
+
+  useEffect(() => {
+    const desktopApp = (window as Window & { desktopApp?: { getVersion: () => Promise<{ version?: string }> } }).desktopApp;
+    if (!desktopApp) return;
+    void desktopApp.getVersion().then((result) => {
+      if (result?.version) setAppVersion(result.version);
+    });
+  }, []);
+
   if (pathname === "/login") return null;
 
   return (
@@ -22,7 +34,7 @@ export function Sidebar() {
         {items.map(([icon, label, href]) => <Link href={href} key={label} className={`flex items-center gap-2.5 rounded-lg px-4 py-3 text-sm font-semibold transition-colors ${pathname === href ? "bg-[#205898] text-white shadow-sm" : "text-blue-100 hover:bg-white/10 hover:text-white"}`}><span className="w-4 text-center text-base">{icon}</span>{label}</Link>)}
       </nav>
       <p className="mt-5 px-4 text-xs leading-5 text-blue-200">Báo cáo, video và dự án nội dung sẽ xuất hiện tại đây khi có dữ liệu.</p>
-      <div className="mt-auto px-3 pb-2"><div className="border-t border-white/10 pt-5"><p className="text-sm font-bold">Không gian làm việc Phong</p><p className="mt-1 text-xs text-blue-200">AI Content Modeling</p></div></div>
+      <div className="mt-auto px-3 pb-2"><div className="border-t border-white/10 pt-5"><p className="text-sm font-bold">Không gian làm việc Phong</p><p className="mt-1 text-xs text-blue-200">AI Content Modeling</p><p className="mt-3 text-xs font-semibold text-teal-300" aria-label="Phiên bản đang sử dụng">Phiên bản đang sử dụng: v{appVersion}</p></div></div>
     </aside>
   );
 }

@@ -1,6 +1,10 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const { contextBridge, ipcRenderer } = require("electron");
 
+contextBridge.exposeInMainWorld("desktopApp", {
+  getVersion: () => ipcRenderer.invoke("desktop-app:version"),
+});
+
 contextBridge.exposeInMainWorld("desktopUpdater", {
   check: () => ipcRenderer.invoke("desktop-update:check"),
   download: () => ipcRenderer.invoke("desktop-update:download"),

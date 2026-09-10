@@ -180,6 +180,7 @@ ipcMain.handle("desktop-update:check", async () => {
     return { status: "error", message: error instanceof Error ? error.message : "Không thể kiểm tra cập nhật." };
   }
 });
+ipcMain.handle("desktop-app:version", () => ({ version: app.getVersion() }));
 ipcMain.handle("desktop-update:download", async () => {
   await autoUpdater.downloadUpdate();
   return { status: "downloading" };
