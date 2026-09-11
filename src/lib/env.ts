@@ -18,7 +18,7 @@ const envSchema = z.object({
   CODEX_STALL_TIMEOUT_MS: z.coerce.number().int().min(60_000).max(30 * 60_000).default(5 * 60_000),
   CODEX_SELF_REPAIR_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
   CODEX_SELF_REPAIR_WORKSPACE: z.string().optional(),
-  GOOGLE_API_FIRST_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  GOOGLE_API_FIRST_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   GOOGLE_BROWSER_FALLBACK_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
   GEMINI_API_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
   GOOGLE_IMAGE_API_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),

@@ -568,19 +568,19 @@ export function ViralDashboard() {
       if (!selectedChannelId) throw new Error("Hãy chọn kênh trước khi tạo ảnh.");
       setFlowImageSlots(slots);
       setFlowImageProgress({ processed: 0, total: slots.length });
-      setFlowImageMessage("Đang tạo ảnh bằng Google Image API...");
+      setFlowImageMessage("Đang tạo ảnh Gemini bằng Google Flow qua trình duyệt...");
       const apiResponse = await fetch(`/api/v1/projects/${project.id}/images`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channelId: selectedChannelId, slots }) });
       const apiBody = await apiResponse.json() as { data?: { status?: string; images: Record<string, string> }; error?: { code?: string; message?: string; details?: { browserFallback?: boolean } } };
       let result: { status: string; images: Record<string, string> };
       if (apiResponse.ok && apiBody.data) {
         result = { status: apiBody.data.status ?? "completed", images: apiBody.data.images };
         setFlowImageProgress({ processed: slots.length, total: slots.length });
-        setFlowImageMessage("Đã tạo và lưu ảnh bằng Google Image API.");
+        setFlowImageMessage("Đã tạo và lưu ảnh Gemini bằng Google Flow qua trình duyệt.");
       } else if (["API_PROVIDER_DISABLED", "API_PROVIDER_UNAVAILABLE"].includes(apiBody.error?.code ?? "") && apiBody.error?.details?.browserFallback !== false) {
         const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
         if (!flow) throw new Error(apiBody.error?.message ?? "Google API chưa sẵn sàng và không có Flow fallback.");
         await reportCodexProviderFallback("ASSETS", apiBody.error?.message ?? "Google Image API chưa sẵn sàng.");
-        setFlowImageMessage("Google API chưa sẵn sàng; chuyển sang Flow fallback...");
+        setFlowImageMessage("Đang chuyển sang Google Flow qua trình duyệt...");
         result = await flow.runImageJob(project.id, selectedChannelId, slots, (progress) => { setFlowImageProgress({ processed: progress.processed, total: progress.total }); setFlowImageMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`); });
       } else {
         throw new Error(apiBody.error?.message ?? "Không thể tạo ảnh bằng Google Image API.");
@@ -590,7 +590,7 @@ export function ViralDashboard() {
       setShowGeneratedImages(true);
       setFlowImageMessage("Đã tạo và đưa toàn bộ ảnh vào app theo đúng thứ tự.");
       return mergedImages;
-    } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo ảnh bằng Google Image API/Flow."); return null; }
+    } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo ảnh Gemini bằng Google Flow."); return null; }
     finally { setIsGeneratingImages(false); }
   }
   async function generateAllProjectVideos(project = contentProject, images = generatedImages, onlySceneNumbers?: number[], existingVideos = generatedVideos): Promise<Record<string, string> | null> {
@@ -612,7 +612,7 @@ export function ViralDashboard() {
     setIsGeneratingVideos(true);
     setContentProjectError("");
     setGeminiVideoProgress({ processed: 0, total: sceneSlots.length });
-    setGeminiVideoMessage("Đang tạo video bằng Veo API...");
+    setGeminiVideoMessage("Đang tạo video bằng Flow Veo 3 qua trình duyệt...");
     try {
       const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
       if (!selectedChannelId) throw new Error("Hãy chọn kênh trước khi tạo video.");
@@ -625,13 +625,13 @@ export function ViralDashboard() {
         } else {
           result = { status: apiBody.data.status ?? "completed", videos: apiBody.data.videos };
           setGeminiVideoProgress({ processed: sceneSlots.length, total: sceneSlots.length });
-          setGeminiVideoMessage("Đã tạo và lưu video bằng Veo API.");
+          setGeminiVideoMessage("Đã tạo và lưu video bằng Flow Veo 3 qua trình duyệt.");
         }
       } else if (["API_PROVIDER_DISABLED", "API_PROVIDER_UNAVAILABLE"].includes(apiBody.error?.code ?? "") && apiBody.error?.details?.browserFallback !== false) {
         const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
         if (!flow) throw new Error(apiBody.error?.message ?? "Veo API chưa sẵn sàng và không có Flow fallback.");
         await reportCodexProviderFallback("SCENES", apiBody.error?.message ?? "Veo API chưa sẵn sàng.");
-        setGeminiVideoMessage("Veo API chưa sẵn sàng; chuyển sang Flow fallback...");
+        setGeminiVideoMessage("Đang chuyển sang Flow Veo 3 qua trình duyệt...");
         result = await flow.runVideoJob(project.id, selectedChannelId, sceneSlots, (progress) => {
           setGeminiVideoProgress({ processed: progress.processed, total: progress.total });
           setGeminiVideoMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`);
@@ -645,7 +645,7 @@ export function ViralDashboard() {
       setGeminiVideoMessage("Đã tạo và lưu toàn bộ video 4 giây theo đúng thứ tự phân cảnh.");
       return mergedVideos;
     } catch (caught) {
-      setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo video bằng Veo API/Flow.");
+      setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo video bằng Flow Veo 3.");
       return null;
     } finally {
       setIsGeneratingVideos(false);
@@ -659,14 +659,14 @@ export function ViralDashboard() {
       const videos = body.data.videos ?? {};
       setGeminiVideoProgress({ processed: Object.keys(videos).filter((key) => sceneSlots.some((slot) => `scene-${slot.sceneNumber}` === key)).length, total: sceneSlots.length });
       if (body.data.status === "completed" || body.data.status === "succeeded") {
-        setGeminiVideoMessage("Đã tạo và lưu video bằng Veo API.");
+        setGeminiVideoMessage("Đã tạo và lưu video bằng Flow Veo 3 qua trình duyệt.");
         return { status: "completed", videos };
       }
       if (body.data.status === "failed") throw new Error(body.data.error ?? "Worker Veo không hoàn tất.");
-      setGeminiVideoMessage(`Worker Veo đang chạy — đã nhận ${Object.keys(videos).length}/${sceneSlots.length} video cảnh.`);
+      setGeminiVideoMessage(`Flow Veo 3 đang chạy — đã nhận ${Object.keys(videos).length}/${sceneSlots.length} video cảnh.`);
       await new Promise((resolve) => window.setTimeout(resolve, 2_000));
     }
-    throw new Error("Tạo video Veo vượt quá thời gian chờ. Có thể mở Lịch sử hoạt động để chạy lại.");
+    throw new Error("Tạo video Flow Veo 3 vượt quá thời gian chờ. Có thể mở Lịch sử hoạt động để chạy lại.");
   }
   function defaultVideoEditScenes(project: ContentProjectResult): VideoEditScene[] {
     return project.scenes.map((scene) => ({ sceneNumber: scene.sceneNumber, trimStart: 0, trimEnd: 0 }));
@@ -754,8 +754,8 @@ export function ViralDashboard() {
     return [
       { key: "modeling-idea", label: "Tạo Modeling Idea", status: "pending" },
       { key: "content-project", label: "Tạo Content Project và phân cảnh", status: "pending" },
-      { key: "images", label: "Tạo và kiểm tra ảnh bằng Google Image API", status: "pending" },
-      { key: "videos", label: "Tạo video phân cảnh bằng Veo API", status: "pending" },
+      { key: "images", label: "Tạo và kiểm tra ảnh Gemini bằng trình duyệt", status: "pending" },
+      { key: "videos", label: "Tạo video phân cảnh bằng Flow Veo 3", status: "pending" },
       { key: "final-video", label: "Ghép và xuất video hoàn chỉnh", status: "pending" },
     ];
   }
@@ -819,15 +819,15 @@ export function ViralDashboard() {
       await updateAutomationRun(runId, currentSteps, { projectId: project.id, ideaId: idea.id });
 
       activeStep = "images";
-      await changeStep(activeStep, "running", "Đang tạo ảnh bằng Google Image API...");
+      await changeStep(activeStep, "running", "Đang tạo ảnh Gemini bằng Google Flow qua trình duyệt...");
       const images = await generateAllProjectImages(project);
-      if (!images) throw new Error("Không tạo đủ ảnh bằng Google Image API/Flow.");
+      if (!images) throw new Error("Không tạo đủ ảnh Gemini bằng Google Flow.");
       await changeStep(activeStep, "completed", `Đã tạo ${Object.keys(images).length} ảnh và lưu vào app.`);
 
       activeStep = "videos";
       await changeStep(activeStep, "running", "Đang tạo video cho từng phân cảnh...");
       const videos = await generateAllProjectVideos(project, images);
-      if (!videos) throw new Error("Không tạo đủ video bằng Veo API/Flow.");
+      if (!videos) throw new Error("Không tạo đủ video bằng Flow Veo 3.");
       await changeStep(activeStep, "completed", `Đã tạo ${Object.keys(videos).length} video phân cảnh.`);
 
       activeStep = "final-video";
@@ -1105,8 +1105,8 @@ export function ViralDashboard() {
                  <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Tạo hình và phân cảnh</p><p className="mt-1 text-sm text-[#6883aa]">Giữ nhân vật và bối cảnh đồng nhất trong toàn bộ video.</p><div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end"><label className="flex-1 text-sm font-semibold text-[#0b3262]">Kích thước khung hình<select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value as AutomationSettings["aspectRatio"])} disabled={isAutomaticRunning} className="mt-1 w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-2.5 font-normal"><option value="9:16">9:16 · Dọc</option><option value="16:9">16:9 · Ngang</option><option value="1:1">1:1 · Vuông</option><option value="4:5">4:5 · Dọc mạng xã hội</option></select></label><button type="button" onClick={() => void createContentProject()} disabled={isCreatingProject || isAutomaticRunning} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isCreatingProject ? "Đang tạo..." : "Tạo hình tượng & phân cảnh"}</button></div>{contentProjectError && <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{contentProjectError}</p>}{contentProject && <div className="mt-5 space-y-4 border-t border-[#d8e3f1] pt-4"><AnalysisBlock label="Thiết kế nhân vật đồng nhất" value={JSON.stringify(contentProject.characterDesign, null, 2)} /><AnalysisBlock label="Bối cảnh đồng nhất" value={JSON.stringify(contentProject.backgroundDesign, null, 2)} /><AnalysisBlock label="Khung hình" value={String(contentProject.artDirection.aspectRatio ?? aspectRatio)} /><div><p className="font-extrabold text-[#0b3262]">Các phân cảnh</p><div className="mt-2 space-y-3">{contentProject.scenes.map((scene) => <div key={scene.sceneNumber} className="rounded-lg border border-[#d8e3f1] bg-white p-3"><p className="font-bold text-[#0b5799]">Cảnh {scene.sceneNumber}</p><p className="mt-1"><strong>Hình ảnh:</strong> {scene.visualBlock}</p><p className="mt-1"><strong>Hành động:</strong> {scene.actionBlock}</p><p className="mt-1"><strong>Âm thanh:</strong> {scene.audioBlock}</p><p className="mt-1"><strong>Prompt ảnh bắt đầu:</strong> {scene.startFramePrompt ?? "Chưa có; app sẽ dùng prompt dự phòng cho ảnh bắt đầu."}</p><p className="mt-1"><strong>Prompt video 4 giây:</strong> {scene.englishPrompt ?? "Chưa có; app sẽ dùng prompt dự phòng cho video."}</p></div>)}</div></div></div>}</div>
               </div>}
               {contentProject && <div className="mt-4 space-y-3">
-                <button type="button" onClick={() => void generateAllProjectImages()} disabled={isGeneratingImages || isAutomaticRunning} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isGeneratingImages ? `Đang tạo ảnh ${flowImageProgress.processed}/${flowImageProgress.total}...` : "Tự động tạo toàn bộ ảnh bằng Google Image API"}</button>
-                {flowImageSlots.length > 0 && <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Quy trình Google Image API</p><p className="mt-1 text-sm leading-6 text-[#6883aa]">App tạo bối cảnh đồng nhất trước, sau đó mỗi ảnh cảnh dùng lần lượt ảnh nhân vật chính và ảnh bối cảnh làm tham chiếu. Mỗi ảnh được tạo và lưu thành công rồi mới chuyển sang bước tiếp theo; nếu API chưa sẵn sàng, Flow fallback hiện tại sẽ được dùng khi được bật.</p>{flowImageMessage && <p className="mt-2 text-sm font-semibold text-[#0b5799]">{flowImageMessage}</p>}<p className="mt-2 text-xs text-[#6883aa]">Flow fallback vẫn cần đăng nhập Google Flow trong cửa sổ mở ra. Không xử lý CAPTCHA tự động.</p></div>}
+                <button type="button" onClick={() => void generateAllProjectImages()} disabled={isGeneratingImages || isAutomaticRunning} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isGeneratingImages ? `Đang tạo ảnh ${flowImageProgress.processed}/${flowImageProgress.total}...` : "Tạo toàn bộ ảnh Gemini bằng trình duyệt"}</button>
+                {flowImageSlots.length > 0 && <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Quy trình Gemini qua Google Flow</p><p className="mt-1 text-sm leading-6 text-[#6883aa]">App mở Google Flow bằng trình duyệt, tạo bối cảnh trước, sau đó lần lượt tạo từng ảnh bắt đầu cảnh bằng ảnh nhân vật chính và bối cảnh làm tham chiếu. Mỗi ảnh được tạo, tải về và lưu thành công rồi mới chuyển sang ảnh tiếp theo.</p>{flowImageMessage && <p className="mt-2 text-sm font-semibold text-[#0b5799]">{flowImageMessage}</p>}<p className="mt-2 text-xs text-[#6883aa]">Cần đăng nhập Google Flow trong cửa sổ mở ra. Không xử lý CAPTCHA tự động.</p></div>}
                 {Object.keys(generatedImages).length > 0 && <button type="button" onClick={() => setShowGeneratedImages((visible) => !visible)} className="ml-2 rounded-lg border border-[#0b5799] px-4 py-2.5 text-sm font-bold text-[#0b5799]">{showGeneratedImages ? "Ẩn ảnh" : "Xem ảnh"}</button>}
                 {showGeneratedImages && <div className="mt-4 grid gap-4 sm:grid-cols-2">{generatedImages["character-0"] && <figure><img src={generatedImages["character-0"]} alt="Hình tượng nhân vật" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Nhân vật</figcaption></figure>}{generatedImages["background-0"] && <figure><img src={generatedImages["background-0"]} alt="Bối cảnh đồng nhất" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Bối cảnh</figcaption></figure>}{contentProject.scenes.map((scene) => generatedImages[`scene-${scene.sceneNumber}`] && <figure key={`image-${scene.sceneNumber}`}><img src={generatedImages[`scene-${scene.sceneNumber}`]} alt={`Ảnh cảnh ${scene.sceneNumber}`} className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Cảnh {scene.sceneNumber}</figcaption></figure>)}</div>}
               </div>}
