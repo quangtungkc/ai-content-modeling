@@ -6,7 +6,7 @@ import { developApprovedIdea, setIdeaStatus } from "@/modules/ideas/approval-ser
 import { readProjectImage, readProjectVideo } from "@/modules/assets/image-generation-service";
 import { generateProjectImagesWithFlowBrowser, generateProjectVideosWithFlowBrowser, type BrowserFlowImageSlot, type BrowserFlowVideoSlot } from "@/modules/generation/browser-flow-bridge";
 import { assembleProjectVideo } from "@/modules/generation/final-assembly-service";
-import { appendCodexEvent, getCodexJob, initializeCodexPlan, recordCodexProgress, reportCodexEvent, validateCodexStage } from "./service";
+import { appendCodexEvent, getCodexJob, initializeCodexPlan, recordCodexProgress, reportCodexEvent, runPostRunReview, validateCodexStage } from "./service";
 import { attemptGuardedProductionRepair } from "./self-repair";
 import type { CodexAction, CodexStage } from "./types";
 
@@ -56,6 +56,10 @@ async function projectForJob(jobId: string, userId: string) {
 async function executeStage(jobId: string, userId: string, action: CodexAction, progress: (detail: string, payload?: Record<string, unknown>) => Promise<void>) {
   const stage = action.stage;
   if (!stage) throw new Error("Codex action thiếu stage.");
+  if (action.name === "runPostRunReview") {
+    await runPostRunReview(jobId, userId);
+    return { postRunReview: "PASS" };
+  }
   if (action.name === "runAnalysisStage") {
     const job = await db.codexJob.findUniqueOrThrow({ where: { id: jobId }, select: { sourceVideoId: true } });
     const result = await analyzeCompetitorVideo(job.sourceVideoId, userId);
@@ -150,8 +154,12 @@ export async function executeCodexJob(jobId: string, userId: string) {
     try {
       const actualState = await executeStage(jobId, userId, action, progress);
       if (stalled) throw new Error(`STAGE_STALLED_${action.stage}: không có tiến triển trong ${env.CODEX_STALL_TIMEOUT_MS}ms.`);
+      // The stage watchdog must not fire while the checkpoint event itself is
+      // running (Final Audit also persists Post-Run Review).
+      stallGuard.stop();
       await reportCodexEvent(userId, jobId, { type: "STAGE_COMPLETED", stage: action.stage, actualState, provider: stageProvider(action.stage) });
     } catch (error) {
+      stallGuard.stop();
       const message = error instanceof Error ? error.message : "Stage không hoàn tất.";
       const stack = error instanceof Error ? error.stack ?? error.message : String(error);
       if (stallRecovery) await stallRecovery;

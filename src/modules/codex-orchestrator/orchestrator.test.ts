@@ -27,17 +27,21 @@ describe("Codex orchestrator policy", () => {
     const stages = [stage("ANALYSIS", "COMPLETED"), stage("MODELING", "COMPLETED"), stage("PROJECT", "COMPLETED"), stage("ASSETS", "RETRYING"), stage("SCENES", "COMPLETED"), stage("FINAL_ASSEMBLY", "COMPLETED")];
     expect(findIncompleteFinalAuditPrerequisite(stages)?.stage).toBe("ASSETS");
   });
-  it("17. Restart/resume bảo toàn Expected State", () => { const expected: ExpectedState = { stage: "SCENES", projectId: "p1", scenes: [scene] }; expect(JSON.parse(JSON.stringify(expected)).scenes[0].sceneId).toBe("scene-1"); });
-  it("18. Idempotency tạo cùng error signature cho cùng lỗi biến thiên ID", () => expect(createErrorSignature("SCENES", "timeout job abcdef1234567890")).toBe(createErrorSignature("SCENES", "timeout job fedcba0987654321")));
-  it("19. Không tạo trùng scene trong batch", () => expect(planSceneBatches([1, 1, 2, 2], 4)).toEqual([[1, 2]]));
-  it("20. Scene độc lập được chia batch song song", () => expect(planSceneBatches([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]));
-  it("21. Event logging có đủ lifecycle bắt buộc", () => expect(CODEX_EVENT_TYPES).toEqual(expect.arrayContaining(["CODEX_JOB_STARTED", "VALIDATION_FAILED", "RECOVERY_SUCCEEDED", "FINAL_AUDIT_PASSED", "JOB_COMPLETED"])));
-  it("22. Improvement candidate chỉ tạo cho lỗi lặp hoặc root cause rõ", () => { expect(shouldCreateImprovementCandidate(1)).toBe(false); expect(shouldCreateImprovementCandidate(2)).toBe(true); expect(shouldCreateImprovementCandidate(1, true)).toBe(true); });
-  it("23. External research disabled không ảnh hưởng recovery policy", () => expect(recoveryStrategies("ASSETS", "TECHNICAL_FAILURE", "network").length).toBeGreaterThan(0));
-  it("24. Secret redaction loại credential nhưng giữ Expected State", () => {
+  it("17. Final Audit PASS vẫn phải chạy Post-Run Review trước khi hoàn tất", () => {
+    const stages = [stage("ANALYSIS", "COMPLETED"), stage("MODELING", "COMPLETED"), stage("PROJECT", "COMPLETED"), stage("ASSETS", "COMPLETED"), stage("SCENES", "COMPLETED"), stage("FINAL_ASSEMBLY", "COMPLETED"), stage("FINAL_AUDIT", "COMPLETED"), stage("POST_RUN_REVIEW", "PENDING")];
+    expect(nextPendingAction(stages)).toMatchObject({ name: "runPostRunReview", stage: "POST_RUN_REVIEW" });
+  });
+  it("18. Restart/resume bảo toàn Expected State", () => { const expected: ExpectedState = { stage: "SCENES", projectId: "p1", scenes: [scene] }; expect(JSON.parse(JSON.stringify(expected)).scenes[0].sceneId).toBe("scene-1"); });
+  it("19. Idempotency tạo cùng error signature cho cùng lỗi biến thiên ID", () => expect(createErrorSignature("SCENES", "timeout job abcdef1234567890")).toBe(createErrorSignature("SCENES", "timeout job fedcba0987654321")));
+  it("20. Không tạo trùng scene trong batch", () => expect(planSceneBatches([1, 1, 2, 2], 4)).toEqual([[1, 2]]));
+  it("21. Scene độc lập được chia batch song song", () => expect(planSceneBatches([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]));
+  it("22. Event logging có đủ lifecycle bắt buộc", () => expect(CODEX_EVENT_TYPES).toEqual(expect.arrayContaining(["CODEX_JOB_STARTED", "VALIDATION_FAILED", "RECOVERY_SUCCEEDED", "FINAL_AUDIT_PASSED", "JOB_COMPLETED"])));
+  it("23. Improvement candidate chỉ tạo cho lỗi lặp hoặc root cause rõ", () => { expect(shouldCreateImprovementCandidate(1)).toBe(false); expect(shouldCreateImprovementCandidate(2)).toBe(true); expect(shouldCreateImprovementCandidate(1, true)).toBe(true); });
+  it("24. External research disabled không ảnh hưởng recovery policy", () => expect(recoveryStrategies("ASSETS", "TECHNICAL_FAILURE", "network").length).toBeGreaterThan(0));
+  it("25. Secret redaction loại credential nhưng giữ Expected State", () => {
     const redacted = redactSecrets({ apiKey: "credential-value", note: "Bearer abc.def.ghi", password: "pw", requiredAssetKeys: ["background-0", "scene-1"] });
     expect(JSON.stringify(redacted)).not.toContain("real-secret");
     expect(redacted.requiredAssetKeys).toEqual(["background-0", "scene-1"]);
   });
-  it("25. Feature flag disabled giữ pipeline cũ", () => { expect(shouldUseCodexPipeline(false)).toBe(false); expect(shouldUseCodexPipeline(true)).toBe(true); });
+  it("26. Feature flag disabled giữ pipeline cũ", () => { expect(shouldUseCodexPipeline(false)).toBe(false); expect(shouldUseCodexPipeline(true)).toBe(true); });
 });

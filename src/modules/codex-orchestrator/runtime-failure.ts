@@ -13,6 +13,20 @@ const MAX_MESSAGE_LENGTH = 4_000;
 const MAX_STACK_LENGTH = 12_000;
 const MAX_CONTEXT_LENGTH = 24_000;
 const validStages = new Set<string>(CODEX_STAGES);
+const actionStages: Record<string, CodexStage> = {
+  runAnalysisStage: "ANALYSIS",
+  runModelingStage: "MODELING",
+  runProjectDevelopmentStage: "PROJECT",
+  runAssetStage: "ASSETS",
+  validateAssets: "ASSETS",
+  regenerateAsset: "ASSETS",
+  runSceneGenerationStage: "SCENES",
+  validateScenes: "SCENES",
+  regenerateScene: "SCENES",
+  runFinalAssembly: "FINAL_ASSEMBLY",
+  runFinalAudit: "FINAL_AUDIT",
+  runPostRunReview: "POST_RUN_REVIEW",
+};
 type ActiveWorkerJob = { jobId: string; name: string; payload: Record<string, unknown> };
 const runtimeState = globalThis as typeof globalThis & { __viralModelingActiveWorkerJob?: ActiveWorkerJob | null };
 
@@ -52,6 +66,17 @@ function compactContext(value: Record<string, unknown> | undefined) {
 
 function safeStage(stage: string | null | undefined): CodexStage | undefined {
   return stage && validStages.has(stage) ? stage as CodexStage : undefined;
+}
+
+function stageFromAction(action: string | null | undefined) {
+  return action ? actionStages[action] : undefined;
+}
+
+async function resolveRuntimeStage(input: { stage?: string | null; context?: Record<string, unknown> }, codexJobId: string | null, userId: string | null) {
+  const explicit = safeStage(input.stage) ?? safeStage(typeof input.context?.stage === "string" ? input.context.stage : undefined);
+  if (explicit || !codexJobId) return explicit;
+  const job = await db.codexJob.findFirst({ where: { id: codexJobId, ...(userId ? { userId } : {}) }, select: { currentStage: true, currentAction: true } });
+  return safeStage(job?.currentStage) ?? stageFromAction(job?.currentAction);
 }
 
 function safeCode(code: string | undefined, source: string) {
@@ -101,9 +126,10 @@ export async function reportRuntimeFailure(input: RuntimeFailureInput) {
   const details = errorDetails(input.error);
   const message = redactSecrets(details.message).slice(0, MAX_MESSAGE_LENGTH);
   const stack = redactSecrets(details.stack).slice(0, MAX_STACK_LENGTH);
-  const userId = await resolveRuntimeUserId({ userId: input.userId, codexJobId: input.codexJobId, channelId: input.context?.channelId, syncId: input.context?.syncId, generationJobId: input.context?.generationJobId });
+  const contextCodexJobId = typeof input.context?.codexJobId === "string" ? input.context.codexJobId : undefined;
+  const userId = await resolveRuntimeUserId({ userId: input.userId, codexJobId: input.codexJobId ?? contextCodexJobId, channelId: input.context?.channelId, syncId: input.context?.syncId, generationJobId: input.context?.generationJobId });
   const codexJobId = await findCodexJobId(input, userId);
-  const stage = safeStage(input.stage);
+  const stage = await resolveRuntimeStage(input, codexJobId, userId);
   const failureKind = input.failureKind ?? classifyFailure(message);
   const context = compactContext({ ...input.context, errorName: details.name, failureKind, errorSignature: createErrorSignature(stage ?? "ANALYSIS", message) });
   const failure = await db.runtimeFailure.create({
@@ -155,6 +181,21 @@ export async function dispatchRuntimeFailure(runtimeFailureId: string) {
     return db.runtimeFailure.update({ where: { id: runtimeFailureId }, data: { status: "NEEDS_USER_CONTEXT", attempts: { increment: 1 }, lastAttemptAt: new Date() } });
   }
   await db.runtimeFailure.update({ where: { id: runtimeFailureId }, data: { status: "SENDING", attempts: { increment: 1 }, lastAttemptAt: new Date() } });
+  const stage = await resolveRuntimeStage({ stage: failure.stage, context: failure.context as Record<string, unknown> }, failure.codexJobId, failure.userId);
+  if (failure.codexJobId && stage) {
+    try {
+      await appendCodexEvent(failure.codexJobId, "CODEX_WAKE_REQUESTED", stage, { runtimeFailureId: failure.id, source: failure.source }, "Worker nền đánh thức recovery từ đúng stage đang bị gián đoạn.");
+      await reportCodexEvent(failure.userId, failure.codexJobId, { type: "STAGE_FAILED", stage, error: failure.message, actualState: { runtimeFailureId: failure.id, source: failure.source, context: failure.context }, provider: failure.source });
+      return db.runtimeFailure.update({ where: { id: runtimeFailureId }, data: { status: "RECOVERY_REQUESTED", resolvedAt: new Date() } });
+    } catch (error) {
+      await db.runtimeFailure.update({ where: { id: runtimeFailureId }, data: { status: "PENDING", context: compactContext({ ...(failure.context as Record<string, unknown>), codexWakeError: error instanceof Error ? error.message : "unknown" }) as Prisma.InputJsonValue } });
+      throw error;
+    }
+  }
+  if (failure.codexJobId) {
+    await new LocalJobQueue().enqueue("codex.job.execute", { jobId: failure.codexJobId, userId: failure.userId }, `codex-runtime-wake:${failure.id}`);
+    return db.runtimeFailure.update({ where: { id: runtimeFailureId }, data: { status: "QUEUED" } });
+  }
   try {
     const result = await new CodexReasoner().decide(failure.userId, {
       purpose: "RUNTIME_FAILURE",

@@ -270,6 +270,14 @@ export async function reportCodexEvent(userId: string, jobId: string, input: Rep
   }
   if (input.type === "STAGE_FAILED") {
     const message = input.error || "Stage failed without an error message.";
+    // A stalled stage and the original provider error can arrive almost at the
+    // same time. Claim the failure transition once so two workers cannot spend
+    // two retries on the same interruption.
+    const claimedFailure = await db.codexStageState.updateMany({
+      where: { jobId, stage: input.stage, status: { in: ["PENDING", "RUNNING"] } },
+      data: { actualState: json(actual) },
+    });
+    if (!claimedFailure.count) return presentJob(jobId, userId);
     await appendEvent(jobId, "TOOL_FAILED", input.stage, { provider: input.provider, error: message }, message);
     await appendEvent(jobId, "RUNTIME_FAILURE_REPORTED", input.stage, { source: "codex-stage", provider: input.provider, error: redactSecrets(message) }, "Lỗi stage đã được ghi nhận trước khi Codex chẩn đoán.");
     await appendEvent(jobId, "CODEX_WAKE_REQUESTED", input.stage, { source: "codex-stage", provider: input.provider }, "Đánh thức vòng điều phối Codex để chọn recovery.");
@@ -317,9 +325,10 @@ export async function reportCodexEvent(userId: string, jobId: string, input: Rep
   }
   if (input.stage === "FINAL_AUDIT") {
     await appendEvent(jobId, "FINAL_AUDIT_PASSED", input.stage, { finalVideoUrl: actual.finalVideoUrl });
-    await db.codexJob.update({ where: { id: jobId }, data: { status: "COMPLETED", currentStage: "POST_RUN_REVIEW", currentAction: "runPostRunReview", finalVideoId: typeof actual.finalVideoId === "string" ? actual.finalVideoId : undefined, finalVideoPath: typeof actual.finalVideoPath === "string" ? actual.finalVideoPath : undefined, finalVideoUrl: typeof actual.finalVideoUrl === "string" ? actual.finalVideoUrl : undefined, completedAt: new Date(), failureReason: null } });
-    await appendEvent(jobId, "JOB_COMPLETED", input.stage, { finalAudit: "PASS" });
-    await runPostRunReview(jobId, userId);
+    // Final Audit PASS only unlocks the post-run review. The job is not
+    // complete until the review has been persisted successfully.
+    await db.codexJob.update({ where: { id: jobId }, data: { status: "RUNNING", currentStage: "POST_RUN_REVIEW", currentAction: "runPostRunReview", finalVideoId: typeof actual.finalVideoId === "string" ? actual.finalVideoId : undefined, finalVideoPath: typeof actual.finalVideoPath === "string" ? actual.finalVideoPath : undefined, finalVideoUrl: typeof actual.finalVideoUrl === "string" ? actual.finalVideoUrl : undefined, completedAt: null, failureReason: null } });
+    await syncAutomation(jobId);
   } else {
     const refreshed = await db.codexStageState.findMany({ where: { jobId } });
     const action = nextPendingAction(refreshed.map(stageSnapshot));
@@ -330,13 +339,21 @@ export async function reportCodexEvent(userId: string, jobId: string, input: Rep
   return presentJob(jobId, userId);
 }
 
-async function runPostRunReview(jobId: string, userId: string) {
+export async function runPostRunReview(jobId: string, userId: string) {
   const env = getEnv();
   const job = await db.codexJob.findFirst({ where: { id: jobId, userId }, include: { events: true, experiences: true } });
   if (!job) return;
+  const startedAt = new Date();
+  await db.$transaction([
+    db.codexStageState.update({ where: { jobId_stage: { jobId, stage: "POST_RUN_REVIEW" } }, data: { status: "RUNNING", startedAt } }),
+    db.codexJob.update({ where: { id: jobId }, data: { status: "RUNNING", currentStage: "POST_RUN_REVIEW", currentAction: "runPostRunReview", failureReason: null } }),
+  ]);
+  await syncAutomation(jobId);
   if (!env.CODEX_POST_RUN_REVIEW_ENABLED) {
     await db.codexStageState.update({ where: { jobId_stage: { jobId, stage: "POST_RUN_REVIEW" } }, data: { status: "SKIPPED", validationResult: "PASS", completedAt: new Date() } });
     await appendEvent(jobId, "POST_RUN_REVIEW_COMPLETED", "POST_RUN_REVIEW", { skipped: true, reason: "feature-flag-disabled" });
+    await db.codexJob.update({ where: { id: jobId }, data: { status: "COMPLETED", currentStage: "POST_RUN_REVIEW", currentAction: "jobComplete", completedAt: new Date(), failureReason: null } });
+    await appendEvent(jobId, "JOB_COMPLETED", "POST_RUN_REVIEW", { finalAudit: "PASS", postRunReview: "SKIPPED" });
     await syncAutomation(jobId);
     return;
   }
@@ -367,5 +384,7 @@ async function runPostRunReview(jobId: string, userId: string) {
   }
   await db.codexStageState.update({ where: { jobId_stage: { jobId, stage: "POST_RUN_REVIEW" } }, data: { status: "COMPLETED", actualState: json({ summary: reviewSummary }), validationResult: "PASS", completedAt: new Date() } });
   await appendEvent(jobId, "POST_RUN_REVIEW_COMPLETED", "POST_RUN_REVIEW", { summary: reviewSummary }, reviewSummary);
+  await db.codexJob.update({ where: { id: jobId }, data: { status: "COMPLETED", currentStage: "POST_RUN_REVIEW", currentAction: "jobComplete", completedAt: new Date(), failureReason: null } });
+  await appendEvent(jobId, "JOB_COMPLETED", "POST_RUN_REVIEW", { finalAudit: "PASS", postRunReview: "PASS" });
   await syncAutomation(jobId);
 }

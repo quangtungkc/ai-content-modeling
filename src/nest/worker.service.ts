@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { LocalJobQueue } from "@/lib/jobs/queue";
 import { handleJob } from "@/workers/job-handler";
-import { pumpPendingRuntimeFailures, reportBackgroundJobFailure, reportStalledBackgroundJob, requeueStaleRuntimeFailures, setActiveWorkerJob } from "@/modules/codex-orchestrator/runtime-failure";
+import { getActiveWorkerJob, pumpPendingRuntimeFailures, reportBackgroundJobFailure, reportStalledBackgroundJob, reportWorkerProcessFailure, requeueStaleRuntimeFailures, setActiveWorkerJob } from "@/modules/codex-orchestrator/runtime-failure";
 
 @Injectable()
 export class WorkerService implements OnModuleInit, OnModuleDestroy {
@@ -10,8 +10,9 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private stopped = false;
 
   async onModuleInit() {
-    void this.run().catch((error) => {
+    void this.run().catch(async (error) => {
       this.logger.error(`Worker loop bị gián đoạn: ${error instanceof Error ? error.message : String(error)}`);
+      try { await reportWorkerProcessFailure("NestJS worker loop stopped", error, getActiveWorkerJob()); } catch (reportError) { this.logger.error(`Không gửi được lỗi worker loop về Codex: ${reportError instanceof Error ? reportError.message : String(reportError)}`); }
     });
   }
 

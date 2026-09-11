@@ -18,7 +18,7 @@ Module này bọc quanh pipeline hiện tại. Nó không thay thế analysis, m
 
 Desktop executor gửi `STAGE_STARTED`, `STAGE_COMPLETED` hoặc `STAGE_FAILED` về API. Codex không polling tiến độ. Codex chỉ được gọi khi lập plan, có lỗi, validation không chắc chắn/không đạt, Final Audit hoặc Post-Run Review.
 
-Runtime failure reporting chạy độc lập với request gốc. Lỗi gắn với Codex Job phát `RUNTIME_FAILURE_REPORTED` và đánh thức job để recovery; lỗi không gắn job chạy qua `codex.runtime.failure` để Codex chẩn đoán. Nếu mất mạng hoặc Codex API không sẵn sàng, bản ghi vẫn ở trạng thái chờ và được retry bởi worker.
+Runtime failure reporting chạy độc lập với request gốc. Lỗi gắn với Codex Job phát `RUNTIME_FAILURE_REPORTED`, truy ngược `currentStage/currentAction` nếu payload thiếu stage, rồi đánh thức recovery từ đúng checkpoint; lỗi không gắn job chạy qua `codex.runtime.failure` để Codex chẩn đoán. Nếu mất mạng hoặc Codex API không sẵn sàng, bản ghi vẫn ở trạng thái chờ và được retry bởi worker.
 
 Worker có watchdog 5 phút cho job đang chạy. Watchdog chỉ tạo cảnh báo `JOB_STALLED_OVER_5_MINUTES` và chuyển dữ liệu cho Codex kiểm tra; không tự hủy hoặc khởi chạy trùng job đang hoạt động. Nếu worker/server chết, Electron và tiến trình worker ghi nhận lỗi, lưu spool cục bộ khi chưa thể gửi, rồi gửi lại khi app khởi động.
 
@@ -52,7 +52,7 @@ Lỗi từ giao diện được giữ tạm ở local storage khi offline và g�
 2. Bật `CODEX_ORCHESTRATOR_ENABLED` ở môi trường server/desktop rồi khởi động lại app.
 3. Phân tích một Source Video, chọn cài đặt và bấm **Run with Codex**.
 4. Xem checkpoint, recovery, validation và video cuối trong **Lịch sử hoạt động**.
-5. Chỉ event `FINAL_AUDIT_PASSED` mới cho phép `JOB_COMPLETED`.
+5. `FINAL_AUDIT_PASSED` chỉ mở khóa `POST_RUN_REVIEW`; chỉ sau `POST_RUN_REVIEW_COMPLETED` mới phát `JOB_COMPLETED`.
 
 ## Pilot và mock boundary
 
