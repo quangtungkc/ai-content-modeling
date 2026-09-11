@@ -27,4 +27,15 @@ export class LocalJobQueue implements JobQueue {
     const attempts = job.attempts + 1;
     await db.backgroundJob.update({ where: { id: job.jobId }, data: { status: attempts >= job.maxAttempts ? "failed" : "queued", attempts, error, startedAt: null, completedAt: attempts >= job.maxAttempts ? new Date() : null } });
   }
+
+  async touch(jobId: string) {
+    await db.backgroundJob.updateMany({ where: { id: jobId, status: "running" }, data: { startedAt: new Date() } });
+  }
+
+  async requeueStale(staleBefore: Date) {
+    return db.backgroundJob.updateMany({
+      where: { status: "running", startedAt: { lt: staleBefore } },
+      data: { status: "queued", startedAt: null, error: "Worker bị gián đoạn; job được resume từ checkpoint." },
+    });
+  }
 }

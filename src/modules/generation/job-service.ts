@@ -33,7 +33,7 @@ export async function getGenerationJob(id: string, userId: string) {
   return job;
 }
 
-export async function runGenerationJob(jobId: string, request: VeoRequest) {
+export async function runGenerationJob(jobId: string, request: VeoRequest, onProgress?: (status: string) => Promise<void> | void) {
   const { VeoProvider } = await import("@/services/video-generation/veo");
   const ownership = await db.videoGenerationJob.findUniqueOrThrow({ where: { id: jobId }, select: { scene: { select: { sceneNumber: true, project: { select: { id: true, channelId: true, channel: { select: { userId: true } } } } } } } });
   const apiKey = await requireProviderApiKey(ownership.scene.project.channel.userId, ["VEO", "GEMINI"], "VIDEO_GENERATION", "Veo/Google Video");
@@ -43,7 +43,7 @@ export async function runGenerationJob(jobId: string, request: VeoRequest) {
     const operation = await provider.generateScene(request);
     void recordUsage({ userId: ownership.scene.project.channel.userId, channelId: ownership.scene.project.channelId, projectId: ownership.scene.project.id, metric: UsageMetric.VEO_GENERATION, idempotencyKey: `veo:generation:${jobId}` });
     await db.videoGenerationJob.update({ where: { id: jobId }, data: { externalOperationId: operation.operationId } });
-    const current = await pollGenerationOperation(provider, operation.operationId);
+    const current = await pollGenerationOperation(provider, operation.operationId, 5_000, undefined, 15 * 60_000, onProgress);
     if (current.status === "failed") throw new Error(current.error ?? "Veo generation failed");
     if (!current.previewUrl) throw new Error("Veo không trả về URL video.");
     const videoResponse = await fetch(current.previewUrl, { headers: { "x-goog-api-key": apiKey } });
@@ -61,15 +61,17 @@ export async function runGenerationJob(jobId: string, request: VeoRequest) {
   }
 }
 
-export async function pollGenerationOperation(provider: { getOperation(operationId: string): Promise<{ status: "queued" | "running" | "succeeded" | "failed"; error?: string; previewUrl?: string }> }, operationId: string, waitMs = 5_000, sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)), maxWaitMs = 15 * 60_000) {
+export async function pollGenerationOperation(provider: { getOperation(operationId: string): Promise<{ status: "queued" | "running" | "succeeded" | "failed"; error?: string; previewUrl?: string }> }, operationId: string, waitMs = 5_000, sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)), maxWaitMs = 15 * 60_000, onProgress?: (status: string) => Promise<void> | void) {
   const startedAt = Date.now();
   let attempt = 0;
   let current = await provider.getOperation(operationId);
+  await onProgress?.(current.status);
   while (current.status === "queued" || current.status === "running") {
     if (Date.now() - startedAt >= maxWaitMs) throw new Error("Veo operation vượt quá thời gian chờ cho phép.");
     await sleep(Math.min(waitMs * (2 ** attempt), 30_000));
     attempt += 1;
     current = await provider.getOperation(operationId);
+    await onProgress?.(current.status);
   }
   return current;
 }

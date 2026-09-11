@@ -78,7 +78,6 @@ type AutomationRunResult = { id: string; status: "RUNNING" | "SUCCEEDED" | "FAIL
 type CodexStage = "ANALYSIS" | "MODELING" | "PROJECT" | "ASSETS" | "SCENES" | "FINAL_ASSEMBLY" | "FINAL_AUDIT" | "POST_RUN_REVIEW";
 type CodexAction = { name: string; stage?: CodexStage; targetIds?: string[]; strategy?: string; reason?: string };
 type CodexJobResult = { id: string; automationRunId?: string | null; status: string; stages: Array<{ stage: CodexStage; status: string; retryCount: number; validationResult?: string }>; nextAction: CodexAction };
-type QualityResult = { verdict: "PASS" | "FAIL" | "UNCERTAIN"; issues: Array<{ code: string; message: string; sceneNumber?: number; targetId?: string }> };
 type SelectedModelingVideo = { videoId: string; modelingUrl: string; sourceUrl: string };
 const accents = [
   "border-l-emerald-600",
@@ -865,7 +864,7 @@ export function ViralDashboard() {
       status: stage.status === "COMPLETED" || stage.status === "SKIPPED" ? "completed" : stage.status === "RUNNING" || stage.status === "RETRYING" ? "running" : stage.status === "FAILED" ? "failed" : "pending",
       detail: stage.validationResult ? `Validation: ${stage.validationResult}` : undefined,
     })));
-    setCodexStatus(job.status === "RECOVERING" ? `Codex đang recovery: ${job.nextAction.strategy ?? job.nextAction.reason ?? "đang chọn chiến lược"}` : job.status === "NEEDS_HUMAN" ? `Cần kiểm tra thủ công: ${job.nextAction.reason ?? "đã hết giới hạn recovery"}` : job.status === "COMPLETED" ? "Final Audit PASS — VIDEO COMPLETE" : `Bước tiếp theo: ${job.nextAction.stage ?? job.nextAction.name}`);
+    setCodexStatus(job.status === "RECOVERING" ? `Codex đang recovery: ${job.nextAction.strategy ?? job.nextAction.reason ?? "đang chọn chiến lược"}` : job.status === "NEEDS_ENGINEERING" ? `NEEDS_ENGINEERING: ${job.nextAction.reason ?? "Codex đang xử lý lỗi code trong workspace được bảo vệ."}` : job.status === "NEEDS_HUMAN" ? `Cần kiểm tra thủ công: ${job.nextAction.reason ?? "đã hết giới hạn recovery"}` : job.status === "COMPLETED" ? "Final Audit PASS — VIDEO COMPLETE" : job.status === "PLANNING" ? "Worker nền đang tạo Execution Plan..." : `Bước tiếp theo: ${job.nextAction.stage ?? job.nextAction.name}`);
   }
   async function createCodexRun(settings: AutomationSettings) {
     const response = await fetch("/api/v1/codex/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sourceVideoId: analysisVideoId, idempotencyKey: `codex:${analysisVideoId}:${crypto.randomUUID()}`, settings }) });
@@ -888,87 +887,26 @@ export function ViralDashboard() {
       // Fallback remains usable even if the optional Codex telemetry call fails.
     }
   }
-  async function requestQualityValidation(jobId: string, stage: "ASSETS" | "SCENES" | "FINAL_AUDIT") {
-    const response = await fetch(`/api/v1/codex/jobs/${jobId}/validate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ stage }) });
-    const body = await response.json() as { data?: QualityResult; error?: { message?: string } };
-    if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Quality Validator không thể kiểm tra kết quả.");
-    return body.data;
-  }
-  const targetSceneNumbers = (action: CodexAction) => (action.targetIds ?? []).map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0);
   async function runWithCodex() {
     if (!analysisVideoId || isAutomaticRunning) return;
     const settings: AutomationSettings = { artStyle: ideaArtStyle.trim() || "Hoạt hình 3D", aspectRatio };
-    let idea = modelingIdea;
-    let project = contentProject;
-    let images = generatedImages;
-    let videos = generatedVideos;
-    let finalVideo = finalVideoUrl;
-    let job: CodexJobResult | null = null;
     setExecutionMode("codex");
     setIsAutomaticRunning(true);
-    setCodexStatus("Đang tạo Execution Plan...");
+    setCodexStatus("Đang giao job cho worker nền...");
     setContentProjectError("");
     setError("");
     try {
-      job = await createCodexRun(settings);
+      let job = await createCodexRun(settings);
       showCodexProgress(job);
-      let action = job.nextAction;
-      for (let guard = 0; guard < 30 && action.name !== "jobComplete"; guard += 1) {
-        if (action.name === "waitForHuman") throw new Error(action.reason ?? "Codex job cần người dùng kiểm tra.");
-        const stage = action.stage;
-        if (!stage) throw new Error("Codex không trả về stage hợp lệ.");
-        await reportCodexStage(job.id, "STAGE_STARTED", stage);
-        try {
-          let actualState: Record<string, unknown> = {};
-          if (action.name === "runAnalysisStage") {
-            if (!analysisResult) throw new Error("Cần hoàn thành phân tích Source Video trước khi tiếp tục.");
-            actualState = { analysisId: analysisVideoId };
-          } else if (action.name === "runModelingStage") {
-            idea = await generateModelingIdea();
-            if (!idea) throw new Error("Không tạo được Modeling Idea.");
-            actualState = { ideaId: idea.id, title: idea.title };
-          } else if (action.name === "runProjectDevelopmentStage") {
-            if (!idea) throw new Error("Thiếu Modeling Idea để tạo Content Project.");
-            project = await createContentProject(idea);
-            if (!project) throw new Error("Không tạo được Content Project.");
-            actualState = { projectId: project.id, sceneCount: project.scenes.length };
-          } else if (action.name === "runAssetStage" || action.name === "regenerateAsset") {
-            if (!project) throw new Error("Thiếu Content Project để tạo ảnh.");
-            const targets = action.name === "regenerateAsset" ? targetSceneNumbers(action) : undefined;
-            images = await generateAllProjectImages(project, targets, images) ?? images;
-            if (!images["background-0"] || project.scenes.some((scene) => !images[`scene-${scene.sceneNumber}`])) throw new Error("Chưa tạo đủ ảnh bắt đầu phân cảnh.");
-            const quality = await requestQualityValidation(job.id, "ASSETS");
-            actualState = { generatedAssetKeys: Object.keys(images), semanticVerdict: quality.verdict, semanticIssues: quality.issues };
-          } else if (action.name === "runSceneGenerationStage" || action.name === "regenerateScene") {
-            if (!project) throw new Error("Thiếu Content Project để tạo video.");
-            const targets = action.name === "regenerateScene" ? targetSceneNumbers(action) : undefined;
-            videos = await generateAllProjectVideos(project, images, targets, videos) ?? videos;
-            if (project.scenes.some((scene) => !videos[`scene-${scene.sceneNumber}`])) throw new Error("Chưa tạo đủ video phân cảnh.");
-            const quality = await requestQualityValidation(job.id, "SCENES");
-            actualState = { generatedSceneNumbers: project.scenes.filter((scene) => videos[`scene-${scene.sceneNumber}`]).map((scene) => scene.sceneNumber), semanticVerdict: quality.verdict, semanticIssues: quality.issues };
-          } else if (action.name === "runFinalAssembly") {
-            if (!project) throw new Error("Thiếu Content Project để ghép video.");
-            finalVideo = await renderFinalProjectVideo(project, videos) ?? "";
-            if (!finalVideo) throw new Error("Không xuất được video hoàn chỉnh.");
-            actualState = { finalVideoAvailable: true, finalVideoUrl: finalVideo, sceneOrder: project.scenes.map((scene) => scene.sceneNumber), aspectRatio, hasAudio: true };
-          } else if (action.name === "runFinalAudit") {
-            if (!project || !finalVideo) throw new Error("Chưa có video cuối để Final Audit.");
-            const quality = await requestQualityValidation(job.id, "FINAL_AUDIT");
-            actualState = { finalVideoAvailable: true, finalVideoUrl: finalVideo, generatedSceneNumbers: project.scenes.map((scene) => scene.sceneNumber), sceneOrder: project.scenes.map((scene) => scene.sceneNumber), aspectRatio, hasAudio: true, semanticVerdict: quality.verdict, semanticIssues: quality.issues };
-          } else if (action.name === "runPostRunReview") {
-            actualState = { completed: true };
-          } else {
-            throw new Error(`Codex tool không được UI hỗ trợ: ${action.name}`);
-          }
-          job = await reportCodexStage(job.id, "STAGE_COMPLETED", stage, { actualState, provider: stage === "ASSETS" || stage === "SCENES" || stage === "FINAL_AUDIT" ? "GEMINI" : undefined });
-          action = job.nextAction;
-        } catch (caught) {
-          const failure = caught instanceof Error ? caught.message : "Stage không hoàn tất.";
-          job = await reportCodexStage(job.id, "STAGE_FAILED", stage, { error: failure, provider: stage === "ASSETS" || stage === "SCENES" ? "FLOW" : undefined });
-          action = job.nextAction;
-        }
+      for (let poll = 0; poll < 3_600 && !["COMPLETED", "FAILED", "NEEDS_HUMAN", "NEEDS_ENGINEERING"].includes(job.status); poll += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+        const response = await fetch(`/api/v1/codex/jobs/${job.id}`);
+        const body = await response.json() as { data?: CodexJobResult; error?: { message?: string } };
+        if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không đọc được trạng thái Codex job.");
+        job = body.data;
+        showCodexProgress(job);
       }
-      if (!job || job.status !== "COMPLETED") throw new Error("Codex job chưa đạt Final Audit PASS.");
+      if (job.status !== "COMPLETED") throw new Error(job.nextAction.reason ?? (job.status === "NEEDS_ENGINEERING" ? "Codex phát hiện lỗi code cần sửa." : "Codex job chưa đạt Final Audit PASS."));
       setMessage("Codex đã hoàn thành video, Final Audit PASS và lưu Post-Run Review trong Lịch sử hoạt động.");
     } catch (caught) {
       const failure = caught instanceof Error ? caught.message : "Codex job chưa hoàn tất.";

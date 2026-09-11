@@ -34,6 +34,7 @@ export function redactSecrets<T>(value: T): T {
 
 export function classifyFailure(message: string, validationFailure = false): FailureKind {
   if (validationFailure) return "SEMANTIC_FAILURE";
+  if (/\b(?:TypeError|ReferenceError|SyntaxError)\b|cannot find module|prisma.*validation|schema.*(?:parse|invalid)|structured output.*(?:invalid|không hợp lệ)|code defect|invariant/i.test(message)) return "ENGINEERING_FAILURE";
   return /wrong|mismatch|missing (?:character|prop|scene|action|background)|continuity|deviation|gag|semantic/i.test(message)
     ? "SEMANTIC_FAILURE"
     : "TECHNICAL_FAILURE";
@@ -51,6 +52,7 @@ export function nextPendingAction(stages: CodexStageSnapshot[]): CodexAction {
 }
 
 export function recoveryStrategies(stage: CodexStage, kind: FailureKind, errorMessage: string): string[] {
+  if (kind === "ENGINEERING_FAILURE") return ["codex-guarded-code-repair"];
   const message = errorMessage.toLowerCase();
   if (/reference.*(?:reject|invalid)|unsupported.*image/.test(message)) return ["normalize-reference-image", "convert-reference-to-png", "use-single-start-frame-reference"];
   if (/rate.?limit|429|quota/.test(message)) return ["provider-backoff", "reduce-batch-size", "resume-from-checkpoint"];

@@ -7,8 +7,8 @@ export type HighLevelTool = {
   mutating: boolean;
 };
 
-// This is the complete allow-list exposed to Codex. It intentionally contains no
-// shell, arbitrary filesystem, credential, database-write, deploy, or merge tool.
+// Complete allow-list exposed to Codex. Code repair is separately guarded by a
+// stage-specific path allow-list plus regression test, typecheck and build gates.
 export const HIGH_LEVEL_TOOLS: HighLevelTool[] = [
   { name: "getSourceVideo", description: "Read the owned source video and latest analysis.", mutating: false },
   { name: "getJobState", description: "Read the persistent orchestration checkpoint and stage states.", mutating: false },
@@ -28,6 +28,7 @@ export const HIGH_LEVEL_TOOLS: HighLevelTool[] = [
   { name: "getFailureContext", description: "Read the failed stage, Expected State, Actual State, and attempts.", mutating: false },
   { name: "getExperienceMatches", description: "Find matching historical errors and successful fixes.", mutating: false },
   { name: "runPostRunReview", description: "Create a post-run review and proposals without modifying production.", stage: "POST_RUN_REVIEW", mutating: true },
+  { name: "repairProductionCode", description: "Create and apply a guarded source patch, regression-test it, typecheck it, and build it; sensitive and non-allowlisted files are blocked.", mutating: true },
   { name: "waitForHuman", description: "Stop safely when retries are exhausted or a decision is too uncertain.", mutating: false },
   { name: "jobComplete", description: "Mark complete only after Final Audit passes.", mutating: true },
 ];

@@ -108,6 +108,7 @@ export class GeminiProvider implements AIProvider {
     ];
     const response = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
       method: "POST",
+      signal: AbortSignal.timeout(5 * 60_000),
       headers: { "Content-Type": "application/json", "x-goog-api-key": this.apiKey },
       body: JSON.stringify({ model: process.env.GEMINI_IMAGE_MODEL ?? "gemini-3.1-flash-image", input, response_format: { type: "image", mime_type: "image/jpeg", aspect_ratio: aspectRatio, image_size: "1K" } }),
     });
@@ -144,6 +145,7 @@ export class GeminiProvider implements AIProvider {
         const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
         const response = await fetch(endpoint, {
           method: "POST",
+          signal: AbortSignal.timeout(5 * 60_000),
           headers: { "Content-Type": "application/json", "x-goog-api-key": this.apiKey },
           body: JSON.stringify(body),
         });

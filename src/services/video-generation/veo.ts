@@ -11,7 +11,7 @@ export class VeoProvider implements VideoGenerationProvider {
     if (!this.apiKey) throw new VideoProviderNotConfiguredError(this.name);
     if ((input.referenceImages?.length ?? 0) > 3) throw new VideoProviderError(this.name, "Veo 3.1 chỉ nhận tối đa 3 reference images.");
     if (input.lastFrame && !input.firstFrame) throw new VideoProviderError(this.name, "lastFrame cần đi cùng firstFrame.");
-    const response = await fetch(`${this.endpoint}/${this.model}:predictLongRunning`, { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": this.apiKey }, body: JSON.stringify({ instances: [{ prompt: input.prompt, ...(input.firstFrame ? { image: toImage(input.firstFrame) } : {}), ...(input.lastFrame ? { lastFrame: toImage(input.lastFrame) } : {}), ...(input.referenceImages?.length ? { referenceImages: input.referenceImages.map(toReferenceImage) } : {}) }], parameters: { aspectRatio: input.aspectRatio, resolution: input.resolution, durationSeconds: input.duration, ...(input.audioEnabled === false ? { generateAudio: false } : {}) } }) });
+    const response = await fetch(`${this.endpoint}/${this.model}:predictLongRunning`, { method: "POST", signal: AbortSignal.timeout(5 * 60_000), headers: { "Content-Type": "application/json", "x-goog-api-key": this.apiKey }, body: JSON.stringify({ instances: [{ prompt: input.prompt, ...(input.firstFrame ? { image: toImage(input.firstFrame) } : {}), ...(input.lastFrame ? { lastFrame: toImage(input.lastFrame) } : {}), ...(input.referenceImages?.length ? { referenceImages: input.referenceImages.map(toReferenceImage) } : {}) }], parameters: { aspectRatio: input.aspectRatio, resolution: input.resolution, durationSeconds: input.duration, ...(input.audioEnabled === false ? { generateAudio: false } : {}) } }) });
     if (!response.ok) throw new VideoProviderError(this.name, `Không thể tạo generation operation: ${await readProviderError(response)}`, { status: response.status });
     const body = await response.json() as { name?: string };
     if (!body.name) throw new VideoProviderError(this.name, "Provider không trả về operation id.");
@@ -20,7 +20,7 @@ export class VeoProvider implements VideoGenerationProvider {
 
   async getOperation(operationId: string): Promise<GenerationOperation> {
     if (!this.apiKey) throw new VideoProviderNotConfiguredError(this.name);
-    const response = await fetch(`${this.operationsEndpoint}/${operationId}`, { headers: { "x-goog-api-key": this.apiKey } });
+    const response = await fetch(`${this.operationsEndpoint}/${operationId}`, { signal: AbortSignal.timeout(5 * 60_000), headers: { "x-goog-api-key": this.apiKey } });
     if (!response.ok) throw new VideoProviderError(this.name, `Không thể lấy trạng thái operation: ${await readProviderError(response)}`, { status: response.status });
     const body = await response.json() as { done?: boolean; error?: { message?: string }; response?: { generatedVideos?: Array<{ video?: { uri?: string } }>; generateVideoResponse?: { generatedSamples?: Array<{ video?: { uri?: string } }> } } };
     if (body.error) return { provider: this.name, operationId, status: "failed", error: body.error.message ?? "Generation failed" };

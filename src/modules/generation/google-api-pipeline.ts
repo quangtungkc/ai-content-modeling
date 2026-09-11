@@ -26,7 +26,7 @@ function imageUrl(projectId: string, kind: "background" | "scene", sceneNumber: 
   return `/api/v1/projects/${projectId}/images?kind=${kind}&sceneNumber=${sceneNumber}&v=${Date.now()}`;
 }
 
-export async function generateProjectImagesWithGoogleApi(projectId: string, userId: string, channelId: string, slots: ImageSlot[]) {
+export async function generateProjectImagesWithGoogleApi(projectId: string, userId: string, channelId: string, slots: ImageSlot[], onProgress?: (detail: string, processed: number, total: number) => Promise<void> | void) {
   ensureApiFirst();
   if (!getEnv().GOOGLE_IMAGE_API_ENABLED) throw providerUnavailable("Google Image API đang tắt; có thể dùng Flow fallback.");
   if (!slots.length) throw new AppError("VALIDATION_ERROR", "Không có ảnh cần tạo.", 400);
@@ -44,7 +44,7 @@ export async function generateProjectImagesWithGoogleApi(projectId: string, user
   const images: Record<string, string> = {};
 
   // Giữ nguyên thứ tự: background trước, sau đó từng start-frame một.
-  for (const slot of slots) {
+  for (const [index, slot] of slots.entries()) {
     const sceneNumber = slot.kind === "background" ? 0 : slot.sceneNumber;
     if (slot.kind === "scene" && (!Number.isInteger(sceneNumber) || (sceneNumber ?? 0) < 1)) throw new AppError("VALIDATION_ERROR", "Số cảnh không hợp lệ.", 400);
     const references: Array<{ mimeType: string; data: string }> = [];
@@ -56,11 +56,12 @@ export async function generateProjectImagesWithGoogleApi(projectId: string, user
     const result = await provider.generateImage(slot.prompt, slot.aspectRatio ?? "9:16", references);
     await writeProjectImage(projectId, slot.kind, sceneNumber ?? 0, Buffer.from(result.data, "base64"), result.mimeType);
     images[`${slot.kind}-${sceneNumber ?? 0}`] = imageUrl(projectId, slot.kind, sceneNumber ?? 0);
+    await onProgress?.(`Đã tạo và lưu ${slot.kind === "background" ? "ảnh bối cảnh" : `ảnh bắt đầu cảnh ${sceneNumber}`}.`, index + 1, slots.length);
   }
   return { status: "completed", provider: "google-image-api", images };
 }
 
-export async function generateProjectVideosWithVeoApi(projectId: string, userId: string, channelId: string, slots: VideoSlot[]) {
+export async function generateProjectVideosWithVeoApi(projectId: string, userId: string, channelId: string, slots: VideoSlot[], onProgress?: (detail: string, processed: number, total: number) => Promise<void> | void) {
   ensureApiFirst();
   if (!getEnv().VEO_API_ENABLED) throw providerUnavailable("Veo API đang tắt; có thể dùng Flow fallback.");
   if (!slots.length) throw new AppError("VALIDATION_ERROR", "Không có video cảnh cần tạo.", 400);
@@ -71,7 +72,7 @@ export async function generateProjectVideosWithVeoApi(projectId: string, userId:
   const videos: Record<string, string> = {};
 
   // Mỗi operation được hoàn tất và tải về local trước khi khởi tạo cảnh kế tiếp.
-  for (const slot of slots) {
+  for (const [index, slot] of slots.entries()) {
     const scene = project.scenes.find((item) => item.sceneNumber === slot.sceneNumber);
     if (!scene) throw new AppError("SCENE_NOT_FOUND", `Không tìm thấy cảnh ${slot.sceneNumber}.`, 404);
     const image = await readProjectImage(projectId, userId, "scene", slot.sceneNumber);
@@ -95,9 +96,10 @@ export async function generateProjectVideosWithVeoApi(projectId: string, userId:
       audioEnabled: true,
     };
     const job = await createGenerationJob(scene.id, userId, request, { enqueue: false });
-    const completed = await runGenerationJob(job.id, request);
+    const completed = await runGenerationJob(job.id, request, (status) => onProgress?.(`Cảnh ${slot.sceneNumber}: Veo ${status}.`, index, slots.length));
     if (completed.status !== "COMPLETED" || !completed.resultUrl) throw new AppError("VIDEO_GENERATION_FAILED", `Không tạo được video cảnh ${slot.sceneNumber}.`, 502);
     videos[`scene-${slot.sceneNumber}`] = `${completed.resultUrl}&v=${Date.now()}`;
+    await onProgress?.(`Đã tạo và tải video cảnh ${slot.sceneNumber}.`, index + 1, slots.length);
   }
   return { status: "completed", provider: "veo-api", videos };
 }

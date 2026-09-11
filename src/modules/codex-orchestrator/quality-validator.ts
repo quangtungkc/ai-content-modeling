@@ -22,6 +22,7 @@ async function geminiKey(userId: string) {
 async function uploadFile(apiKey: string, data: Buffer, mimeType: string, displayName: string) {
   const start = await fetch("https://generativelanguage.googleapis.com/upload/v1beta/files", {
     method: "POST",
+    signal: AbortSignal.timeout(5 * 60_000),
     headers: {
       "x-goog-api-key": apiKey,
       "X-Goog-Upload-Protocol": "resumable",
@@ -35,13 +36,13 @@ async function uploadFile(apiKey: string, data: Buffer, mimeType: string, displa
   if (!start.ok) throw new Error(`GEMINI_FILE_UPLOAD_START_${start.status}`);
   const uploadUrl = start.headers.get("x-goog-upload-url");
   if (!uploadUrl) throw new Error("GEMINI_FILE_UPLOAD_URL_MISSING");
-  const uploaded = await fetch(uploadUrl, { method: "POST", headers: { "Content-Length": String(data.length), "X-Goog-Upload-Offset": "0", "X-Goog-Upload-Command": "upload, finalize" }, body: new Uint8Array(data) });
+  const uploaded = await fetch(uploadUrl, { method: "POST", signal: AbortSignal.timeout(5 * 60_000), headers: { "Content-Length": String(data.length), "X-Goog-Upload-Offset": "0", "X-Goog-Upload-Command": "upload, finalize" }, body: new Uint8Array(data) });
   if (!uploaded.ok) throw new Error(`GEMINI_FILE_UPLOAD_${uploaded.status}`);
   let file = ((await uploaded.json()) as { file?: GeminiFile }).file;
   if (!file?.name) throw new Error("GEMINI_FILE_METADATA_MISSING");
   for (let attempt = 0; file.state === "PROCESSING" && attempt < 30; attempt += 1) {
     await delay(2_000);
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/${file.name}`, { headers: { "x-goog-api-key": apiKey } });
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/${file.name}`, { signal: AbortSignal.timeout(5 * 60_000), headers: { "x-goog-api-key": apiKey } });
     if (!response.ok) throw new Error(`GEMINI_FILE_STATUS_${response.status}`);
     file = await response.json() as GeminiFile;
   }
@@ -58,6 +59,7 @@ async function generateVerdict(apiKey: string, parts: Array<Record<string, unkno
   const model = process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: "POST",
+    signal: AbortSignal.timeout(5 * 60_000),
     headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify({ contents: [{ parts: [...parts, { text: instruction }] }], generationConfig: { responseMimeType: "application/json" } }),
   });

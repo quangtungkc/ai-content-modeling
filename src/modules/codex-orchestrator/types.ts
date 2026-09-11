@@ -10,15 +10,16 @@ export const CODEX_STAGES = [
 ] as const;
 
 export type CodexStage = (typeof CODEX_STAGES)[number];
-export type CodexJobStatus = "PLANNING" | "RUNNING" | "RECOVERING" | "NEEDS_HUMAN" | "COMPLETED" | "FAILED";
+export type CodexJobStatus = "PLANNING" | "RUNNING" | "RECOVERING" | "NEEDS_HUMAN" | "NEEDS_ENGINEERING" | "COMPLETED" | "FAILED";
 export type CodexStageStatus = "PENDING" | "RUNNING" | "RETRYING" | "COMPLETED" | "FAILED" | "SKIPPED";
 export type ValidationVerdict = "PASS" | "FAIL" | "UNCERTAIN";
-export type FailureKind = "TECHNICAL_FAILURE" | "SEMANTIC_FAILURE";
+export type FailureKind = "TECHNICAL_FAILURE" | "SEMANTIC_FAILURE" | "ENGINEERING_FAILURE";
 
 export const CODEX_EVENT_TYPES = [
   "CODEX_JOB_STARTED",
   "PLAN_CREATED",
   "STAGE_STARTED",
+  "STAGE_PROGRESS",
   "STAGE_COMPLETED",
   "TOOL_CALLED",
   "TOOL_FAILED",
@@ -36,6 +37,10 @@ export const CODEX_EVENT_TYPES = [
   "POST_RUN_REVIEW_COMPLETED",
   "IMPROVEMENT_CANDIDATE_CREATED",
   "JOB_NEEDS_HUMAN",
+  "JOB_NEEDS_ENGINEERING",
+  "ENGINEERING_REPAIR_STARTED",
+  "ENGINEERING_REPAIR_SUCCEEDED",
+  "ENGINEERING_REPAIR_FAILED",
   "PROVIDER_FALLBACK",
 ] as const;
 
@@ -54,6 +59,7 @@ export type CodexActionName =
   | "runFinalAssembly"
   | "runFinalAudit"
   | "runPostRunReview"
+  | "repairProductionCode"
   | "waitForHuman"
   | "jobComplete";
 

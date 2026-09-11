@@ -46,7 +46,8 @@ export function ActivityHistory() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    fetch("/api/v1/automations")
+    let active = true;
+    const loadRuns = () => fetch("/api/v1/automations")
       .then(async (response) => {
         const body = await response.json() as { data?: AutomationRun[]; error?: { message?: string } };
         if (response.status === 401) {
@@ -54,11 +55,15 @@ export function ActivityHistory() {
           return;
         }
         if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể tải lịch sử hoạt động.");
+        if (!active) return;
         setRuns(body.data);
-        setSelectedRunId(body.data[0]?.id ?? "");
+        setSelectedRunId((current) => current && body.data?.some((run) => run.id === current) ? current : body.data?.[0]?.id ?? "");
       })
-      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : "Không thể tải lịch sử hoạt động."))
+      .catch((caught: unknown) => { if (active) setError(caught instanceof Error ? caught.message : "Không thể tải lịch sử hoạt động."); })
       .finally(() => setIsLoading(false));
+    void loadRuns();
+    const refresh = window.setInterval(() => void loadRuns(), 5_000);
+    return () => { active = false; window.clearInterval(refresh); };
   }, []);
 
   const selectedRun = runs.find((run) => run.id === selectedRunId) ?? null;
@@ -145,7 +150,7 @@ export function ActivityHistory() {
                 {selectedRun.status === "SUCCEEDED" && <p className="mt-1">Quy trình đã hoàn thành toàn bộ.</p>}
               </div>
               {selectedRun.codexAgent && <div className="mt-4 rounded-lg border border-teal-200 bg-teal-50 px-4 py-3 text-sm text-teal-950">
-                <p className="font-extrabold">CODEX AGENT · {selectedRun.codexAgent.status}</p>
+                <p className="font-extrabold">CODEX AGENT · {selectedRun.codexAgent.status === "NEEDS_ENGINEERING" ? "NEEDS_ENGINEERING — đang/đã thử tự sửa code" : selectedRun.codexAgent.status}</p>
                 <p className="mt-1 text-xs">Session: {selectedRun.codexAgent.sessionId}</p>
                 <p className="mt-1">Stage: {selectedRun.codexAgent.currentStage}{selectedRun.codexAgent.currentAction ? ` · Action: ${selectedRun.codexAgent.currentAction}` : ""}</p>
                 <p className="mt-1">Tổng recovery: {selectedRun.codexAgent.retryCount}</p>
