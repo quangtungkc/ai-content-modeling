@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { classifyFailure } from "./policy";
+import { classifyFailure, recoveryStrategies } from "./policy";
 import { createStallGuard } from "./executor";
 import { isAllowedRepairPath } from "./self-repair";
 import { CODEX_EVENT_TYPES } from "./types";
@@ -27,8 +27,10 @@ describe("Codex background executor", () => {
     guard.stop();
   });
 
-  it("phân loại lỗi parser/schema là NEEDS_ENGINEERING", () => {
-    expect(classifyFailure("OpenAI trả về structured output không hợp lệ")).toBe("ENGINEERING_FAILURE");
+  it("phân loại lỗi parser/schema là lỗi kỹ thuật và chọn retry tự động", () => {
+    const message = "OpenAI trả về invalid_type expected string received undefined trong storyboard";
+    expect(classifyFailure(message)).toBe("TECHNICAL_FAILURE");
+    expect(recoveryStrategies("PROJECT", "TECHNICAL_FAILURE", message)).toEqual(["retry-structured-output", "switch-ai-provider", "resume-from-checkpoint"]);
     expect(classifyFailure("TypeError: Cannot read properties of undefined")).toBe("ENGINEERING_FAILURE");
   });
 
