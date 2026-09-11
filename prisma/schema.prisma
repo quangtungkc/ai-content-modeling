@@ -546,10 +546,38 @@ model CodexJob {
   events             CodexEvent[]
   experiences        AgentExperience[]
   improvements       AppImprovementCandidate[]
+  runtimeFailures    RuntimeFailure[]
 
   @@index([userId, startedAt(sort: Desc)])
   @@index([status, updatedAt])
   @@index([sourceVideoId, status])
+}
+
+model RuntimeFailure {
+  id               String   @id @default(cuid())
+  userId           String?
+  codexJobId       String?
+  backgroundJobId  String?
+  source           String
+  stage            String?
+  failureKind      String   @default("TECHNICAL_FAILURE")
+  code             String
+  message          String
+  stack            String?
+  context          Json     @default("{}")
+  status           String   @default("PENDING")
+  attempts         Int      @default(0)
+  codexResponseId  String?
+  lastAttemptAt    DateTime?
+  resolvedAt       DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  codexJob         CodexJob? @relation(fields: [codexJobId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
+  @@index([codexJobId, createdAt])
+  @@index([backgroundJobId, createdAt])
 }
 
 model CodexStageState {

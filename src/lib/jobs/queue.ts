@@ -32,6 +32,11 @@ export class LocalJobQueue implements JobQueue {
     await db.backgroundJob.updateMany({ where: { id: jobId, status: "running" }, data: { startedAt: new Date() } });
   }
 
+  async findStale(staleBefore: Date): Promise<QueuedJob[]> {
+    const jobs = await db.backgroundJob.findMany({ where: { status: "running", startedAt: { lt: staleBefore } }, orderBy: { startedAt: "asc" } });
+    return jobs.map((job) => ({ jobId: job.id, name: job.name, payload: job.payload as JobPayload, idempotencyKey: job.idempotencyKey, attempts: job.attempts, maxAttempts: job.maxAttempts }));
+  }
+
   async requeueStale(staleBefore: Date) {
     return db.backgroundJob.updateMany({
       where: { status: "running", startedAt: { lt: staleBefore } },

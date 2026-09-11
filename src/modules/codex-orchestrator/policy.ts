@@ -26,7 +26,7 @@ export function redactSecrets<T>(value: T): T {
   }
   if (Array.isArray(value)) return value.map(redactSecrets) as T;
   if (value && typeof value === "object") {
-    const sensitiveName = /^(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|client[_-]?secret|encryption[_-]?key|encryptedKey|credential|credentials)$/i;
+    const sensitiveName = /^(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|client[_-]?secret|secret|encryption[_-]?key|encryptedKey|credential|credentials)$/i;
     return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, sensitiveName.test(key) ? "[REDACTED]" : redactSecrets(item)])) as T;
   }
   return value;

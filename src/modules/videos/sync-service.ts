@@ -6,6 +6,7 @@ import { UsageMetric } from "@prisma/client";
 import { recordUsage } from "@/modules/usage/service";
 import { decryptSecret } from "@/lib/secrets";
 import { markCompetitorProcessed } from "./sync-progress";
+import { reportRuntimeFailure } from "@/modules/codex-orchestrator/runtime-failure";
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>) {
   const results = new Array<R>(items.length);
@@ -50,6 +51,7 @@ export async function syncChannelVideos(channelId: string, syncId?: string) {
       failed = true;
       const message = error instanceof Error ? error.message : "Unknown competitor sync failure";
       await db.competitor.update({ where: { id: competitor.id }, data: { syncError: message } });
+      await reportRuntimeFailure({ userId: competitor.channel.userId, source: "competitor-sync", code: "COMPETITOR_SYNC_FAILED", error, context: { channelId, competitorId: competitor.id, syncId } });
       logger.error("Competitor sync failed", { channelId, competitorId: competitor.id, message });
     }
     if (syncId) await markCompetitorProcessed(syncId, failed);

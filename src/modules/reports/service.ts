@@ -4,6 +4,7 @@ import { calculateBaselineViews, calculateViralScore } from "@/modules/viral-sco
 import { getLocalClock } from "./time";
 import { AIService } from "@/services/ai/service";
 import { readChannelMainCharacterImage } from "@/modules/channels/service";
+import { reportRuntimeFailure } from "@/modules/codex-orchestrator/runtime-failure";
 
 export async function prepareDailyReport(channelId: string, now = new Date(), ai?: AIService) {
   const periodStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
@@ -48,6 +49,7 @@ export async function prepareDailyReport(channelId: string, now = new Date(), ai
       await db.reportItem.update({ where: { reportId_sourceVideoId: { reportId: report.id, sourceVideoId: item.video.id } }, data: { analysisSummary: analysis.summary, modelingMechanism: ideas.modelingDirections[0]?.sourceMechanism ?? "Analyzed" } });
     } catch (error) {
       await db.reportItem.update({ where: { reportId_sourceVideoId: { reportId: report.id, sourceVideoId: item.video.id } }, data: { analysisSummary: `Analysis failed: ${error instanceof Error ? error.message : "unknown error"}` } });
+      await reportRuntimeFailure({ userId: channel.userId, source: "daily-report-analysis", code: "DAILY_REPORT_ANALYSIS_FAILED", error, context: { channelId, reportId: report.id, sourceVideoId: item.video.id } });
     }
   }
   return db.dailyReport.update({ where: { id: report.id }, data: { status: "READY", generatedAt: new Date() }, include: { items: true } });

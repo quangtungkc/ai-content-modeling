@@ -26,6 +26,8 @@ let geminiLoadPromise;
 let flowWindow;
 let flowLoadPromise;
 let flowRemoteClient;
+let isQuitting = false;
+let fatalRuntimeReported = false;
 
 function notifyUpdate(event, payload = {}) {
   mainWindow?.webContents.send(`desktop-update:${event}`, payload);
@@ -130,6 +132,77 @@ async function ensureDesktopSession() {
   }
 }
 
+async function reportDesktopRuntimeFailure(source, error, context = {}) {
+  const details = error instanceof Error ? { message: error.message, stack: error.stack } : { message: String(error) };
+  const payload = redactDesktopRuntime({ source, code: "DESKTOP_RUNTIME_INTERRUPTED", message: String(details.message).slice(0, 4000), stack: details.stack?.slice(0, 12000), context });
+  try {
+    const session = await ensureDesktopSession();
+    if (!session) { queueDesktopRuntimeFailure(payload); return false; }
+    const response = await fetch(`${APP_URL}/api/v1/runtime-failures`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: `ai_content_modeling_session=${session.token}` },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) queueDesktopRuntimeFailure(payload);
+    return response.ok;
+  } catch (reportError) {
+    queueDesktopRuntimeFailure(payload);
+    try { fs.appendFileSync(path.join(app.getPath("userData"), "desktop-runtime.log"), `[telemetry-error] ${reportError instanceof Error ? reportError.message : String(reportError)}\n`, "utf8"); } catch { /* The desktop may be failing before its data directory is available. */ }
+    return false;
+  }
+}
+
+function redactDesktopRuntime(value) {
+  if (typeof value === "string") return value.replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*\b|\b(?:sk|sess|pat|ghp|AIza)[-_A-Za-z0-9]{12,}\b|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|client[_-]?secret|encryption[_-]?key)\b\s*[:=]\s*[^\s,;]+/gi, "[REDACTED]");
+  if (Array.isArray(value)) return value.map(redactDesktopRuntime);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, /^(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|client[_-]?secret|encryption[_-]?key|credential|credentials)$/i.test(key) ? "[REDACTED]" : redactDesktopRuntime(item)]));
+  return value;
+}
+
+function desktopRuntimeSpoolPath() { return path.join(app.getPath("userData"), "runtime-failures.ndjson"); }
+function queueDesktopRuntimeFailure(payload) {
+  try { fs.appendFileSync(desktopRuntimeSpoolPath(), `${JSON.stringify(payload)}\n`, { encoding: "utf8", mode: 0o600 }); } catch { /* Keep the original runtime error visible in the main log. */ }
+}
+async function flushDesktopRuntimeFailures() {
+  const spool = desktopRuntimeSpoolPath();
+  if (!fs.existsSync(spool)) return;
+  let lines;
+  try { lines = fs.readFileSync(spool, "utf8").split(/\r?\n/).filter(Boolean); } catch { return; }
+  const remaining = [];
+  for (const line of lines) {
+    try {
+      const payload = JSON.parse(line);
+      const session = await ensureDesktopSession();
+      if (!session) { remaining.push(payload); continue; }
+      const response = await fetch(`${APP_URL}/api/v1/runtime-failures`, { method: "POST", headers: { "Content-Type": "application/json", Cookie: `ai_content_modeling_session=${session.token}` }, body: JSON.stringify(payload) });
+      if (!response.ok) remaining.push(payload);
+    } catch { remaining.push(line); }
+  }
+  try {
+    if (remaining.length) fs.writeFileSync(spool, `${remaining.map((item) => typeof item === "string" ? item : JSON.stringify(item)).join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
+    else fs.rmSync(spool);
+  } catch { /* Retry the spool during the next startup. */ }
+}
+
+function monitorChildProcess(child, name) {
+  child.on("error", (error) => { void reportDesktopRuntimeFailure(`electron:${name}:error`, error, { process: name }); });
+  child.on("exit", (code, signal) => {
+    if (isQuitting || code === 0) return;
+    void reportDesktopRuntimeFailure(`electron:${name}:exit`, new Error(`${name} stopped unexpectedly (code=${code ?? "null"}, signal=${signal ?? "none"}).`), { process: name, code, signal });
+  });
+}
+
+process.on("uncaughtException", (error) => {
+  if (fatalRuntimeReported) return;
+  fatalRuntimeReported = true;
+  void reportDesktopRuntimeFailure("electron:main:uncaught-exception", error).finally(() => app.quit());
+});
+process.on("unhandledRejection", (reason) => {
+  if (fatalRuntimeReported) return;
+  fatalRuntimeReported = true;
+  void reportDesktopRuntimeFailure("electron:main:unhandled-rejection", reason).finally(() => app.quit());
+});
+
 function runtimeRoot() {
   return app.isPackaged
     ? path.join(process.resourcesPath, "app.asar.unpacked", "electron", "dist")
@@ -144,6 +217,8 @@ async function startLocalServices() {
   const log = fs.openSync(path.join(app.getPath("userData"), "desktop-runtime.log"), "a");
   serverProcess = spawn(process.execPath, [path.join(appDirectory, "server.js")], { cwd: appDirectory, env: environment, windowsHide: true, stdio: ["ignore", log, log] });
   workerProcess = spawn(process.execPath, [path.join(appDirectory, "worker.cjs")], { cwd: appDirectory, env: environment, windowsHide: true, stdio: ["ignore", log, log] });
+  monitorChildProcess(serverProcess, "server");
+  monitorChildProcess(workerProcess, "worker");
 }
 
 function waitForServer(attempts = 60) {
@@ -169,7 +244,7 @@ autoUpdater.on("update-available", (info) => notifyUpdate("available", { version
 autoUpdater.on("update-not-available", () => notifyUpdate("not-available"));
 autoUpdater.on("download-progress", (progress) => notifyUpdate("progress", { percent: Math.round(progress.percent) }));
 autoUpdater.on("update-downloaded", () => notifyUpdate("downloaded"));
-autoUpdater.on("error", (error) => notifyUpdate("error", { message: error.message }));
+autoUpdater.on("error", (error) => { notifyUpdate("error", { message: error.message }); void reportDesktopRuntimeFailure("electron:auto-updater:error", error); });
 
 ipcMain.handle("desktop-update:check", async () => {
   if (!app.isPackaged) return { status: "dev" };
@@ -197,6 +272,12 @@ ipcMain.handle("desktop-auth:save", (_event, value) => {
 ipcMain.handle("desktop-auth:clear", (event) => {
   updateDesktopSession(null);
   return event.sender.session.cookies.remove(APP_URL, "ai_content_modeling_session").then(() => ({ status: "cleared" }));
+});
+
+ipcMain.handle("runtime-error:report", async (_event, value) => {
+  if (!value || typeof value.source !== "string" || typeof value.message !== "string") return { status: "ignored" };
+  const reported = await reportDesktopRuntimeFailure(value.source.slice(0, 120), new Error(value.message.slice(0, 4000)), { ...(value.context && typeof value.context === "object" ? value.context : {}), clientStack: typeof value.stack === "string" ? value.stack.slice(0, 12000) : undefined });
+  return { status: reported ? "reported" : "queued-locally" };
 });
 
 function createFacebookWindow() {
@@ -2129,6 +2210,7 @@ app.whenReady()
   .then(async () => {
     await startLocalServices();
     await waitForServer();
+    await flushDesktopRuntimeFailures();
     await createWindow(consumeSyncAfterUpdate());
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) void createWindow();
@@ -2146,6 +2228,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  isQuitting = true;
   serverProcess?.kill();
   workerProcess?.kill();
 });

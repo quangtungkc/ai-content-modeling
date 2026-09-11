@@ -1,6 +1,7 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
 import { useCallback, useEffect, useMemo, useState, type DragEvent } from "react";
+import { notifyRuntimeFailure } from "@/components/runtime-error-monitor";
 
 type Dashboard = {
   channel: { id: string; name: string } | null;
@@ -255,6 +256,7 @@ export function ViralDashboard() {
           setAppliedFilters((current) => ({ ...current }));
         }
       } catch (caught) {
+        notifyRuntimeFailure(caught, { operation: "sync-progress" });
         if (!cancelled) {
           setIsSyncing(false);
           setError(caught instanceof Error ? caught.message : "Không thể đọc tiến trình đồng bộ.");
@@ -296,6 +298,7 @@ export function ViralDashboard() {
       setSyncProgress({ syncId: body.data.syncId, status: "running", total: body.data.total ?? 0, processed: 0, failed: 0 });
       setMessage(`${body.data.message ?? "Đã bắt đầu đồng bộ."} Đang theo dõi ${body.data.total ?? 0} đối thủ.`);
     } catch (caught) {
+      notifyRuntimeFailure(caught, { operation: "start-sync" });
       setIsSyncing(false);
       setError(caught instanceof Error ? caught.message : "Không thể bắt đầu đồng bộ dữ liệu.");
     }
@@ -317,6 +320,7 @@ export function ViralDashboard() {
       setMessage(`Đã xoá ${body.data.deleted ?? 0} video và dữ liệu phân tích. Dữ liệu sẽ chỉ bị xoá khi Phong bấm nút này.`);
       setAppliedFilters((current) => ({ ...current }));
     } catch (caught) {
+      notifyRuntimeFailure(caught, { operation: "delete-channel-video-data" });
       setError(caught instanceof Error ? caught.message : "Không thể xoá dữ liệu video.");
     }
   }
@@ -350,6 +354,7 @@ export function ViralDashboard() {
       if (selectedModelingVideo?.videoId === videoId) setSelectedModelingVideo(null);
       setMessage(`Đã xóa video gốc và ${body.data.deletedProjects ?? 0} project modeling liên quan.`);
     } catch (caught) {
+      notifyRuntimeFailure(caught, { operation: "delete-video" });
       setError(caught instanceof Error ? caught.message : "Không thể xóa video.");
     }
   }
@@ -445,6 +450,7 @@ export function ViralDashboard() {
           ? `Đã tìm thấy ${discovered} video nhưng Facebook chưa hiển thị đủ thời gian đăng hoặc lượt xem để lưu. ${scanErrors ? `${scanErrors} Trang không thể mở.` : ""}`
           : `Chưa tải được video từ các Trang. ${scanErrors ? `${scanErrors} Trang không thể mở.` : "Kiểm tra lại phiên đăng nhập Facebook rồi thử lại."}`);
     } catch (caught) {
+      notifyRuntimeFailure(caught, { operation: "facebook-browser-scan" });
       setError(caught instanceof Error ? caught.message : "Không thể quét Facebook.");
     } finally {
       setIsBrowserScanning(false);
@@ -468,6 +474,7 @@ export function ViralDashboard() {
       setAutomationSteps([]);
       setDashboard((current) => current ? { ...current, videos: current.videos.map((video) => video.id === videoId ? { ...video, analysis: { createdAt: new Date().toISOString(), content: body.data!.analysis } } : video) } : current);
     } catch (caught) {
+      notifyRuntimeFailure(caught, { operation: "analyze-video" });
       setError(caught instanceof Error ? caught.message : "Không thể phân tích video.");
     } finally {
       setAnalyzingVideoId("");
@@ -499,6 +506,7 @@ export function ViralDashboard() {
       return idea;
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Không thể tạo Modeling Idea.";
+      notifyRuntimeFailure(caught, { operation: "create-modeling-idea" });
       setModelingIdeaError(message);
       setError(message);
       return null;
@@ -529,6 +537,7 @@ export function ViralDashboard() {
       setShowGeneratedVideos(false);
       return body.data;
     } catch (caught) {
+      notifyRuntimeFailure(caught, { operation: "create-content-project" });
       setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo thiết kế và phân cảnh.");
       return null;
     } finally {
@@ -590,7 +599,7 @@ export function ViralDashboard() {
       setShowGeneratedImages(true);
       setFlowImageMessage("Đã tạo và đưa toàn bộ ảnh vào app theo đúng thứ tự.");
       return mergedImages;
-    } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo ảnh Gemini bằng Google Flow."); return null; }
+    } catch (caught) { notifyRuntimeFailure(caught, { operation: "generate-project-images" }); setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo ảnh Gemini bằng Google Flow."); return null; }
     finally { setIsGeneratingImages(false); }
   }
   async function generateAllProjectVideos(project = contentProject, images = generatedImages, onlySceneNumbers?: number[], existingVideos = generatedVideos): Promise<Record<string, string> | null> {
@@ -645,6 +654,7 @@ export function ViralDashboard() {
       setGeminiVideoMessage("Đã tạo và lưu toàn bộ video 4 giây theo đúng thứ tự phân cảnh.");
       return mergedVideos;
     } catch (caught) {
+      notifyRuntimeFailure(caught, { operation: "generate-project-videos" });
       setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo video bằng Flow Veo 3.");
       return null;
     } finally {
@@ -706,6 +716,7 @@ export function ViralDashboard() {
         setVideoEditError("");
       }
     } catch (caught) {
+      notifyRuntimeFailure(caught, { operation: "select-video-audio" });
       setVideoEditError(caught instanceof Error ? caught.message : "Không thể chọn tệp âm thanh.");
     }
   }
@@ -743,6 +754,7 @@ export function ViralDashboard() {
       return result.video;
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Không thể ghép và edit video.";
+      notifyRuntimeFailure(caught, { operation: "render-final-video" });
       setVideoEditError(`${message} Bạn có thể bấm chạy lại.`);
       setContentProjectError(message);
       return null;
@@ -839,6 +851,7 @@ export function ViralDashboard() {
       setMessage("Đã chạy tự động toàn bộ quy trình và tạo video hoàn chỉnh. Có thể xem lại tại Lịch sử hoạt động.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Quy trình tự động không hoàn tất.";
+      notifyRuntimeFailure(caught, { operation: "automatic-pipeline", stage: activeStep });
       setContentProjectError(message);
       setError(message);
       if (runId) {
@@ -910,6 +923,7 @@ export function ViralDashboard() {
       setMessage("Codex đã hoàn thành video, Final Audit PASS và lưu Post-Run Review trong Lịch sử hoạt động.");
     } catch (caught) {
       const failure = caught instanceof Error ? caught.message : "Codex job chưa hoàn tất.";
+      notifyRuntimeFailure(caught, { operation: "codex-pipeline", codexJobId });
       setContentProjectError(failure);
       setError(failure);
       setCodexStatus(failure);
@@ -973,6 +987,7 @@ export function ViralDashboard() {
       setAppliedFilters((current) => ({ ...current }));
       setManualVideo({ competitorId: "", url: "", publishedAt: new Date().toISOString().slice(0, 16), views: "", likes: "0", comments: "0", shares: "0", caption: "" });
     } catch (caught) {
+      notifyRuntimeFailure(caught, { operation: "save-manual-video" });
       setManualError(caught instanceof Error ? caught.message : "Không thể lưu dữ liệu video.");
     } finally {
       setIsSavingManual(false);

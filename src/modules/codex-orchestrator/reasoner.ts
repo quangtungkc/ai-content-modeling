@@ -25,7 +25,7 @@ const repairSchema = z.object({
 });
 
 export type ReasonerRequest = {
-  purpose: "PLAN" | "RECOVERY" | "UNCERTAIN_VALIDATION" | "FINAL_AUDIT" | "POST_RUN_REVIEW";
+  purpose: "PLAN" | "RECOVERY" | "UNCERTAIN_VALIDATION" | "FINAL_AUDIT" | "POST_RUN_REVIEW" | "RUNTIME_FAILURE";
   stage?: CodexStage;
   state: Record<string, unknown>;
   allowedTools?: string[];
@@ -89,6 +89,7 @@ export class CodexReasoner {
       "Select only one whitelisted high-level tool. Never request credentials, deploy, merge, or arbitrary shell. Production-code repair is allowed only through repairProductionCode and its guarded allowlist/test/build gate.",
       "Prefer deterministic recovery and a previously successful experience. Never repeat an identical failed strategy.",
       request.purpose === "POST_RUN_REVIEW" ? "For external research, evaluate license, maintenance, security, complexity, compatibility, migration cost, performance, and long-term impact. Create proposals only; never modify, merge, or deploy production." : "",
+      request.purpose === "RUNTIME_FAILURE" ? "This is a runtime interruption report. Diagnose from the supplied evidence, do not invent missing facts, and choose only a read-only diagnostic or waitForHuman action unless this report is attached to an active Codex Job." : "",
       "Do not output chain-of-thought. Return only a concise decision with selectedTool, targetStage, targetIds, strategy, shortReason, evidence, externalReferences, alternativeSolutions, confidence.",
       `Allowed tools: ${toolNames.join(", ")}.`,
     ].join("\n");
