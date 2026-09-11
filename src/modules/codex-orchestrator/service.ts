@@ -5,7 +5,7 @@ import { getEnv } from "@/lib/env";
 import { AppError } from "@/lib/errors";
 import { CodexReasoner } from "./reasoner";
 import { ensureCodexStorage } from "./storage";
-import { buildSceneExpectedState, canAutoResumeAfterFlowRuntimeRepair, chooseRecoveryStrategy, classifyFailure, createErrorSignature, extractRecoveryTargetIds, findIncompleteFinalAuditPrerequisite, nextPendingAction, recoveryActionFor, recoveryStrategies, redactSecrets, retryCountForSignature, validateExpectedActual } from "./policy";
+import { buildSceneExpectedState, canAutoResumeAfterFlowRuntimeRepair, chooseRecoveryStrategy, classifyFailure, createErrorSignature, extractRecoveryTargetIds, findIncompleteFinalAuditPrerequisite, nextContinuousRecoveryStrategy, nextPendingAction, recoveryActionFor, recoveryStrategies, redactSecrets, retryCountForSignature, shouldKeepRunningUntilFinal, validateExpectedActual } from "./policy";
 import { CODEX_STAGES, type CodexAction, type CodexEventType, type CodexStage, type CodexStageSnapshot, type ExpectedState, type ReportCodexEventInput, type ValidationOutput } from "./types";
 import { validateQuality } from "./quality-validator";
 import { LocalJobQueue } from "@/lib/jobs/queue";
@@ -73,7 +73,7 @@ export async function confirmDesktopFlowRuntime(userId: string, runtimeRevision:
   for (const candidate of candidates) {
     if (!canAutoResumeAfterFlowRuntimeRepair({ status: candidate.status, stage: candidate.currentStage, failureReason: candidate.failureReason, runtimeRevision })) continue;
     const stage = candidate.currentStage as "ASSETS" | "SCENES";
-    const validatorRetry = /quality validator|semantic_audit_required/i.test(candidate.failureReason ?? "");
+    const validatorRetry = /quality validator|semantic_audit_required|gemini[_\s]quality|quality[_\s]provider|rate.?limit|quota|429/i.test(candidate.failureReason ?? "");
     const action = validatorRetry ? (stage === "ASSETS" ? "validateAssets" : "validateScenes") : stage === "ASSETS" ? "regenerateAsset" : "regenerateScene";
     const repairStrategy = validatorRetry ? "runtime-repair:retry-quality-validation" : `runtime-repair:${runtimeRevision}`;
     const claimed = await db.codexJob.updateMany({
@@ -173,6 +173,7 @@ async function diagnoseAndRecover(jobId: string, userId: string, stage: CodexSta
     .map((event) => String(record(event.payload).strategy ?? ""))
     .filter(Boolean);
   const signatureRetryCount = retryCountForSignature(stageState.lastErrorSignature, signature, stageState.retryCount);
+  const keepRunning = shouldKeepRunningUntilFinal(kind, message);
   let targetIds = extractRecoveryTargetIds(message, actual);
   const experience = await db.agentExperience.findFirst({ where: { stage, provider: provider ?? null, errorSignature: signature, result: "SUCCEEDED", successfulFix: { not: null } }, orderBy: { lastSeenAt: "desc" } });
   const candidates = recoveryStrategies(stage, kind, message);
@@ -185,7 +186,7 @@ async function diagnoseAndRecover(jobId: string, userId: string, stage: CodexSta
     try {
       const allowedTools = kind === "ENGINEERING_FAILURE" ? ["repairProductionCode"] : stage === "ASSETS" ? ["validateAssets", "regenerateAsset", "runAssetStage", "waitForHuman"] : stage === "SCENES" ? ["validateScenes", "regenerateScene", "runSceneGenerationStage", "waitForHuman"] : ["runAnalysisStage", "runModelingStage", "runProjectDevelopmentStage", "runFinalAssembly", "runFinalAudit", "waitForHuman"];
       const result = await new CodexReasoner().decide(userId, { purpose: "RECOVERY", stage, state: { failureKind: kind, validationVerdict: validation?.verdict, errorSignature: signature, message, expectedState: stageState.expectedState, actualState: actual, previousAttempts: attempted, experienceMatch: experience, candidateStrategies: candidates, derivedTargetIds: targetIds }, allowedTools }, job.previousResponseId);
-      if (result.decision.strategy && !attempted.includes(result.decision.strategy)) strategy = result.decision.strategy;
+      if (result.decision.strategy && (!attempted.includes(result.decision.strategy) || keepRunning)) strategy = result.decision.strategy;
       selectedTool = allowedTools.includes(result.decision.selectedTool) && result.decision.selectedTool !== "waitForHuman"
         ? result.decision.selectedTool
         : recoveryActionFor(stage, strategy);
@@ -198,6 +199,7 @@ async function diagnoseAndRecover(jobId: string, userId: string, stage: CodexSta
       reason = `${reason} Codex API tạm thời không khả dụng; policy an toàn dùng chiến lược xác định sẵn.`;
     }
   }
+  if (keepRunning && (!strategy || /request-human/i.test(strategy))) strategy = nextContinuousRecoveryStrategy(candidates, signatureRetryCount);
   await appendCodexEvent(jobId, "ERROR_DIAGNOSED", stage, { failureKind: kind, validationVerdict: validation?.verdict, errorSignature: signature, evidence: redactSecrets(message), candidateStrategies: candidates, previousAttempts: attempted, selectedStrategy: strategy, selectedTool, targetIds, reasonerMode, reasonerError }, reason);
   if (kind === "ENGINEERING_FAILURE") {
     await db.codexStageState.update({ where: { jobId_stage: { jobId, stage } }, data: { status: "FAILED", lastErrorSignature: signature, actualState: json(actual) } });
@@ -206,7 +208,7 @@ async function diagnoseAndRecover(jobId: string, userId: string, stage: CodexSta
     await syncAutomation(jobId);
     return { name: "waitForHuman", stage, strategy: "codex-guarded-code-repair", reason: message };
   }
-  const exhausted = signatureRetryCount >= stageState.maxRetries || !strategy || /request-human/.test(strategy) || !env.CODEX_AUTO_RECOVERY_ENABLED;
+  const exhausted = !keepRunning && (signatureRetryCount >= stageState.maxRetries || !strategy || /request-human/.test(strategy) || !env.CODEX_AUTO_RECOVERY_ENABLED);
   if (exhausted) {
     await db.codexStageState.update({ where: { jobId_stage: { jobId, stage } }, data: { status: "FAILED", validationResult: validation?.verdict, lastErrorSignature: signature } });
     await db.codexJob.update({ where: { id: jobId }, data: { status: "NEEDS_HUMAN", currentStage: stage, currentAction: "waitForHuman", failureReason: redactSecrets(message) } });

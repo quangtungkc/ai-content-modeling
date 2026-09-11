@@ -46,9 +46,17 @@ export function canAutoResumeAfterFlowRuntimeRepair(input: { status: string; sta
   if (!['ASSETS', 'SCENES'].includes(input.stage)) return false;
   if (!['flow-ipc-event-v2', 'flow-recovery-v3'].includes(input.runtimeRevision)) return false;
   const message = input.failureReason ?? '';
-  if (/sign[ -]?in|log[ -]?in|đăng nhập|permission|quyền truy cập|captcha|two-factor|2fa|oauth/i.test(message)) return false;
+  if (requiresUserAction(message)) return false;
   if (/cannot read properties of undefined \(reading ['"]send['"]\)|flow bridge.*sender|ipc.*sender/i.test(message)) return true;
-  return input.runtimeRevision === 'flow-recovery-v3' && /quality validator|semantic_audit_required|không tìm thấy ảnh scene[-\s]?\d+|start frame google flow/i.test(message);
+  return input.runtimeRevision === 'flow-recovery-v3' && /quality validator|semantic_audit_required|gemini[_\s]quality|quality[_\s]provider|rate.?limit|quota|429|không tìm thấy ảnh scene[-\s]?\d+|start frame google flow/i.test(message);
+}
+
+export function requiresUserAction(message: string) {
+  return /sign[ -]?in|log[ -]?in|đăng nhập|permission|quyền truy cập|captcha|two-factor|2fa|oauth/i.test(message);
+}
+
+export function shouldKeepRunningUntilFinal(kind: FailureKind, message: string) {
+  return kind !== "ENGINEERING_FAILURE" && !requiresUserAction(message);
 }
 
 export function createErrorSignature(stage: CodexStage, message: string) {
@@ -112,6 +120,11 @@ export function extractRecoveryTargetIds(message: string, actual: Record<string,
 export function chooseRecoveryStrategy(strategies: string[], attempted: string[], successfulExperience?: string | null) {
   if (successfulExperience && !attempted.includes(successfulExperience)) return successfulExperience;
   return strategies.find((strategy) => !attempted.includes(strategy)) ?? null;
+}
+
+export function nextContinuousRecoveryStrategy(strategies: string[], retryIndex: number) {
+  const retryable = strategies.filter((strategy) => !/request-human/i.test(strategy));
+  return retryable[retryIndex % retryable.length] ?? "retry-stage-once";
 }
 
 export function planSceneBatches(sceneNumbers: number[], maxConcurrency: number) {

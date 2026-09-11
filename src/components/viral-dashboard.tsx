@@ -853,7 +853,7 @@ export function ViralDashboard() {
       `Strategy: ${String(diagnosisPayload.selectedStrategy ?? job.nextAction.strategy ?? "đang chọn")}`,
       `Tool: ${String(diagnosisPayload.selectedTool ?? job.nextAction.name)}`,
       targetIds.length ? `Mục tiêu: ${targetIds.join(", ")}` : null,
-      activeStage ? `Retry: ${activeStage.retryCount}/${activeStage.maxRetries ?? 3}` : null,
+      activeStage ? `Retry: ${activeStage.retryCount}/${job.status === "RECOVERING" ? "∞" : activeStage.maxRetries ?? 3}` : null,
     ].filter(Boolean).join(" · ");
     setCodexStatus(job.status === "RECOVERING" ? recoveryDetail : job.status === "NEEDS_ENGINEERING" ? `NEEDS_ENGINEERING: ${job.nextAction.reason ?? "Codex đang xử lý lỗi code trong workspace được bảo vệ."}` : job.status === "NEEDS_HUMAN" ? `Cần kiểm tra thủ công: ${job.nextAction.reason ?? "đã hết giới hạn recovery"}` : job.status === "COMPLETED" ? "Final Audit PASS — VIDEO COMPLETE" : job.status === "PLANNING" ? "Worker nền đang tạo Execution Plan..." : `Bước tiếp theo: ${job.nextAction.stage ?? job.nextAction.name}`);
     const latestResumeEvent = [...(job.events ?? [])].reverse().find((event) => event.type === "JOB_AUTO_RESUMED" || event.type === "RUNTIME_REPAIR_VERIFIED");

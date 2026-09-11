@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CODEX_EVENT_TYPES, type CodexStageSnapshot, type ExpectedState } from "./types";
-import { buildSceneExpectedState, canAutoResumeAfterFlowRuntimeRepair, chooseRecoveryStrategy, classifyFailure, createErrorSignature, extractRecoveryTargetIds, findIncompleteFinalAuditPrerequisite, hasReachedRetryLimit, nextPendingAction, planSceneBatches, recoveryActionFor, recoveryStrategies, redactSecrets, retryCountForSignature, shouldCreateImprovementCandidate, shouldUseCodexPipeline, validateExpectedActual } from "./policy";
+import { buildSceneExpectedState, canAutoResumeAfterFlowRuntimeRepair, chooseRecoveryStrategy, classifyFailure, createErrorSignature, extractRecoveryTargetIds, findIncompleteFinalAuditPrerequisite, hasReachedRetryLimit, nextContinuousRecoveryStrategy, nextPendingAction, planSceneBatches, recoveryActionFor, recoveryStrategies, redactSecrets, requiresUserAction, retryCountForSignature, shouldCreateImprovementCandidate, shouldKeepRunningUntilFinal, shouldUseCodexPipeline, validateExpectedActual } from "./policy";
 import { CODEX_REQUEST_TIMEOUT_MS } from "./reasoner";
 
 const stage = (name: CodexStageSnapshot["stage"], status: CodexStageSnapshot["status"]): CodexStageSnapshot => ({ stage: name, status, retryCount: 0, maxRetries: 3 });
@@ -64,10 +64,23 @@ describe("Codex orchestrator policy", () => {
   });
   it("33. Runtime v3 tự mở lại job Quality Validator nhưng vẫn chặn lỗi đăng nhập", () => {
     expect(canAutoResumeAfterFlowRuntimeRepair({ status: "NEEDS_HUMAN", stage: "SCENES", failureReason: "Cần Quality Validator xác nhận nội dung hình ảnh/video.", runtimeRevision: "flow-recovery-v3" })).toBe(true);
+    expect(canAutoResumeAfterFlowRuntimeRepair({ status: "NEEDS_HUMAN", stage: "ASSETS", failureReason: "GEMINI_QUALITY_VALIDATION_429", runtimeRevision: "flow-recovery-v3" })).toBe(true);
     expect(canAutoResumeAfterFlowRuntimeRepair({ status: "NEEDS_HUMAN", stage: "SCENES", failureReason: "Cần đăng nhập Google Flow", runtimeRevision: "flow-recovery-v3" })).toBe(false);
   });
   it("34. Lỗi mới trong cùng stage có ngân sách retry riêng", () => {
     expect(retryCountForSignature("SCENES:start-frame", "SCENES:quality-provider", 3)).toBe(0);
     expect(retryCountForSignature("SCENES:quality-provider", "SCENES:quality-provider", 2)).toBe(2);
+  });
+  it("35. Lỗi provider không chuyển NEEDS_HUMAN sau khi hết 3 retry", () => {
+    expect(shouldKeepRunningUntilFinal("TECHNICAL_FAILURE", "GEMINI_QUALITY_VALIDATION_429")).toBe(true);
+    expect(nextContinuousRecoveryStrategy(["retry-quality-validation", "provider-backoff", "retry-quality-validation-after-backoff"], 3)).toBe("retry-quality-validation");
+  });
+  it("36. Chỉ blocker quyền/đăng nhập mới yêu cầu người dùng", () => {
+    expect(requiresUserAction("Hãy đăng nhập Google Flow")).toBe(true);
+    expect(shouldKeepRunningUntilFinal("TECHNICAL_FAILURE", "Hãy đăng nhập Google Flow")).toBe(false);
+  });
+  it("37. Semantic failure tiếp tục recovery, không chọn request-human khi còn cách tự xử lý", () => {
+    expect(shouldKeepRunningUntilFinal("SEMANTIC_FAILURE", "Sai nhân vật trong cảnh 2")).toBe(true);
+    expect(nextContinuousRecoveryStrategy(["strengthen-scene-expected-state", "regenerate-failed-scenes-only", "request-human-scene-review"], 2)).toBe("strengthen-scene-expected-state");
   });
 });

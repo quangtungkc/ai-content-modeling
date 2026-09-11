@@ -138,7 +138,7 @@ async function executeStage(jobId: string, userId: string, action: CodexAction, 
 export async function executeCodexJob(jobId: string, userId: string) {
   await initializeCodexPlan(jobId, userId);
   const env = getEnv();
-  for (let guard = 0; guard < 50; guard += 1) {
+  while (true) {
     const state = await getCodexJob(userId, jobId);
     if (state.status === "COMPLETED") return state;
     if (state.status === "NEEDS_HUMAN" || state.status === "NEEDS_ENGINEERING" || state.status === "FAILED") return state;
