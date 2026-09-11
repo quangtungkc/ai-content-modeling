@@ -138,6 +138,8 @@ export type CodexStageSnapshot = {
 export type ReportCodexEventInput = {
   type: "STAGE_STARTED" | "STAGE_COMPLETED" | "STAGE_FAILED" | "PROVIDER_FALLBACK";
   stage: CodexStage;
+  action?: CodexActionName;
+  strategy?: string;
   actualState?: Record<string, unknown>;
   error?: string;
   provider?: string;

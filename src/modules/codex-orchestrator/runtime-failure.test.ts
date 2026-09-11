@@ -23,7 +23,7 @@ vi.mock("./storage", () => ({ ensureCodexStorage: vi.fn(async () => undefined) }
 vi.mock("./service", () => ({ appendCodexEvent: vi.fn(), reportCodexEvent: mocks.reportCodexEvent }));
 vi.mock("./reasoner", () => ({ CodexReasoner: class {} }));
 
-import { reportBackgroundJobFailure, reportRuntimeFailure } from "./runtime-failure";
+import { reportBackgroundJobFailure, reportRuntimeFailure, reportStalledBackgroundJob } from "./runtime-failure";
 
 describe("runtime failure reporting", () => {
   it("stores a redacted failure and queues it for Codex", async () => {
@@ -66,5 +66,17 @@ describe("runtime failure reporting", () => {
 
     expect(mocks.createFailure).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ codexJobId: "codex-3", stage: "PROJECT" }) }));
     expect(mocks.reportCodexEvent).toHaveBeenCalledWith("user-3", "codex-3", expect.objectContaining({ type: "STAGE_FAILED", stage: "PROJECT" }));
+  });
+
+  it("gắn cảnh báo treo của Codex worker vào đúng Codex job", async () => {
+    mocks.createFailure.mockResolvedValue({ id: "runtime-4", status: "PENDING" });
+    mocks.updateFailure.mockResolvedValue({ id: "runtime-4", status: "RECOVERY_REQUESTED" });
+    mocks.findCodexJob.mockResolvedValue({ id: "codex-4", currentStage: "SCENES", currentAction: "runSceneGenerationStage" });
+    mocks.reportCodexEvent.mockResolvedValue({});
+
+    await reportStalledBackgroundJob({ jobId: "queue-4", name: "codex.job.execute", payload: { jobId: "codex-4", userId: "user-4" } });
+
+    expect(mocks.createFailure).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ codexJobId: "codex-4", stage: "SCENES", code: "JOB_STALLED_OVER_5_MINUTES" }) }));
+    expect(mocks.reportCodexEvent).toHaveBeenCalledWith("user-4", "codex-4", expect.objectContaining({ type: "STAGE_FAILED", stage: "SCENES" }));
   });
 });

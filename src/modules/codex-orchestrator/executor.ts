@@ -84,6 +84,15 @@ async function executeStage(jobId: string, userId: string, action: CodexAction, 
   }
   const { job, project } = await projectForJob(jobId, userId);
   const aspectRatio = String(object(project.artDirection).aspectRatio ?? "9:16");
+  if (action.name === "validateAssets" || action.name === "validateScenes") {
+    if (action.strategy === "provider-backoff" || action.strategy === "retry-quality-validation-after-backoff") {
+      await progress("Quality Validator tạm nghỉ 30 giây trước khi kiểm tra lại.", { recoveryStrategy: action.strategy });
+      await new Promise((resolve) => setTimeout(resolve, 30_000));
+    }
+    const stageState = await db.codexStageState.findUniqueOrThrow({ where: { jobId_stage: { jobId, stage } }, select: { actualState: true } });
+    const quality = await validateCodexStage(userId, jobId, stage);
+    return { ...object(stageState.actualState), semanticVerdict: quality.verdict, semanticFailureKind: quality.failureKind, semanticIssues: quality.issues };
+  }
   if (action.name === "runAssetStage" || action.name === "regenerateAsset") {
     const targetNumbers = targetSceneNumbers(action.targetIds);
     const slots: ImageSlot[] = [];
@@ -99,7 +108,7 @@ async function executeStage(jobId: string, userId: string, action: CodexAction, 
     const generatedAssetKeys = ["background-0"];
     for (const scene of project.scenes) if (await exists(() => readProjectImage(project.id, userId, "scene", scene.sceneNumber))) generatedAssetKeys.push(`scene-${scene.sceneNumber}`);
     const quality = await validateCodexStage(userId, jobId, "ASSETS");
-    return { generatedAssetKeys, semanticVerdict: quality.verdict, semanticIssues: quality.issues };
+    return { generatedAssetKeys, semanticVerdict: quality.verdict, semanticFailureKind: quality.failureKind, semanticIssues: quality.issues };
   }
   if (action.name === "runSceneGenerationStage" || action.name === "regenerateScene") {
     const targetNumbers = targetSceneNumbers(action.targetIds);
@@ -113,7 +122,7 @@ async function executeStage(jobId: string, userId: string, action: CodexAction, 
     const generatedSceneNumbers: number[] = [];
     for (const scene of project.scenes) if (await exists(() => readProjectVideo(project.id, userId, scene.sceneNumber))) generatedSceneNumbers.push(scene.sceneNumber);
     const quality = await validateCodexStage(userId, jobId, "SCENES");
-    return { generatedSceneNumbers, semanticVerdict: quality.verdict, semanticIssues: quality.issues };
+    return { generatedSceneNumbers, semanticVerdict: quality.verdict, semanticFailureKind: quality.failureKind, semanticIssues: quality.issues };
   }
   if (action.name === "runFinalAssembly") {
     const result = await assembleProjectVideo(project.id, project.scenes.map((scene) => scene.sceneNumber), (detail, processed, total) => progress(detail, { processed, total }));
@@ -121,7 +130,7 @@ async function executeStage(jobId: string, userId: string, action: CodexAction, 
   }
   if (action.name === "runFinalAudit") {
     const quality = await validateCodexStage(userId, jobId, "FINAL_AUDIT");
-    return { finalVideoAvailable: true, finalVideoUrl: `/api/v1/projects/${project.id}/videos?final=1`, generatedSceneNumbers: project.scenes.map((scene) => scene.sceneNumber), sceneOrder: project.scenes.map((scene) => scene.sceneNumber), aspectRatio, hasAudio: true, semanticVerdict: quality.verdict, semanticIssues: quality.issues };
+    return { finalVideoAvailable: true, finalVideoUrl: `/api/v1/projects/${project.id}/videos?final=1`, generatedSceneNumbers: project.scenes.map((scene) => scene.sceneNumber), sceneOrder: project.scenes.map((scene) => scene.sceneNumber), aspectRatio, hasAudio: true, semanticVerdict: quality.verdict, semanticFailureKind: quality.failureKind, semanticIssues: quality.issues };
   }
   throw new Error(`Worker chưa hỗ trợ action ${action.name}.`);
 }
@@ -136,7 +145,7 @@ export async function executeCodexJob(jobId: string, userId: string) {
     const action = state.nextAction as CodexAction;
     if (action.name === "jobComplete") return state;
     if (action.name === "waitForHuman" || !action.stage) return state;
-    await reportCodexEvent(userId, jobId, { type: "STAGE_STARTED", stage: action.stage });
+    await reportCodexEvent(userId, jobId, { type: "STAGE_STARTED", stage: action.stage, action: action.name, strategy: action.strategy });
     let stalled = false;
     let stallRecovery: Promise<void> | null = null;
     const stallGuard = createStallGuard(env.CODEX_STALL_TIMEOUT_MS, () => {

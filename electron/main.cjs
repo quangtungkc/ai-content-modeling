@@ -17,7 +17,7 @@ if (app.isPackaged && !process.argv.some((value) => value.startsWith("--remote-d
 
 const PORT = 3210;
 const APP_URL = process.env.DESKTOP_APP_URL || (app.isPackaged ? `http://127.0.0.1:${PORT}` : "http://localhost:3000");
-const DESKTOP_FLOW_BRIDGE_REVISION = "flow-ipc-event-v2";
+const DESKTOP_FLOW_BRIDGE_REVISION = "flow-recovery-v3";
 let mainWindow;
 let serverProcess;
 let workerProcess;
@@ -1448,6 +1448,14 @@ async function addFlowAssetToStart(window, filePath) {
       return true;
     })()`);
     if (!selected) await delay(250);
+  }
+  if (!selected) {
+    const tilePoint = await findFlowAssetTilePoint(window, filename);
+    if (tilePoint) {
+      await dispatchBrowserClick(window, tilePoint);
+      await delay(500);
+      selected = true;
+    }
   }
   if (!selected) throw new Error("Không tìm thấy ảnh " + filename + " trong bảng chọn Start frame Google Flow.");
   const hasStartFrame = () => executeFlowJavaScript(window, `(() => {

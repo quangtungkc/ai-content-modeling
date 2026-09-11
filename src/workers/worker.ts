@@ -35,7 +35,11 @@ async function run() {
     activeJob = job;
     const heartbeat = setInterval(() => void queue.touch(job.jobId), 30_000);
     const stallWatchdog = job.name === "codex.runtime.failure" ? undefined : setTimeout(() => {
-      void reportStalledBackgroundJob(job).catch((error) => logger.error("Không ghi được cảnh báo job treo về Codex", { jobId: job.jobId, error: error instanceof Error ? error.message : String(error) }));
+      void (async () => {
+        const stale = await queue.findStale(new Date(Date.now() - 5 * 60_000));
+        if (!stale.some((candidate) => candidate.jobId === job.jobId)) return;
+        await reportStalledBackgroundJob(job);
+      })().catch((error) => logger.error("Không ghi được cảnh báo job treo về Codex", { jobId: job.jobId, error: error instanceof Error ? error.message : String(error) }));
     }, 5 * 60_000);
     try { await handleJob(job.name, job.payload); await queue.markSucceeded(job); logger.info("Job succeeded", { jobId: job.jobId, name: job.name }); }
     catch (error) {

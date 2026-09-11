@@ -5,7 +5,7 @@ import { getEnv } from "@/lib/env";
 import { AppError } from "@/lib/errors";
 import { CodexReasoner } from "./reasoner";
 import { ensureCodexStorage } from "./storage";
-import { buildSceneExpectedState, canAutoResumeAfterFlowRuntimeRepair, chooseRecoveryStrategy, classifyFailure, createErrorSignature, findIncompleteFinalAuditPrerequisite, nextPendingAction, recoveryStrategies, redactSecrets, validateExpectedActual } from "./policy";
+import { buildSceneExpectedState, canAutoResumeAfterFlowRuntimeRepair, chooseRecoveryStrategy, classifyFailure, createErrorSignature, extractRecoveryTargetIds, findIncompleteFinalAuditPrerequisite, nextPendingAction, recoveryActionFor, recoveryStrategies, redactSecrets, retryCountForSignature, validateExpectedActual } from "./policy";
 import { CODEX_STAGES, type CodexAction, type CodexEventType, type CodexStage, type CodexStageSnapshot, type ExpectedState, type ReportCodexEventInput, type ValidationOutput } from "./types";
 import { validateQuality } from "./quality-validator";
 import { LocalJobQueue } from "@/lib/jobs/queue";
@@ -21,6 +21,10 @@ const labels: Record<CodexStage, string> = {
   POST_RUN_REVIEW: "Post-Run Improvement Review",
 };
 const automationKey = (stage: CodexStage) => stage === "FINAL_ASSEMBLY" ? "final-video" : stage.toLowerCase().replaceAll("_", "-");
+const executableActions = new Set<CodexAction["name"]>([
+  "runAnalysisStage", "runModelingStage", "runProjectDevelopmentStage", "runAssetStage", "validateAssets", "regenerateAsset",
+  "runSceneGenerationStage", "validateScenes", "regenerateScene", "runFinalAssembly", "runFinalAudit", "runPostRunReview",
+]);
 
 type CreateJobInput = {
   sourceVideoId: string;
@@ -32,6 +36,7 @@ type StoredStage = { stage: string; status: string; retryCount: number; maxRetri
 
 const json = (value: unknown) => redactSecrets(value) as Prisma.InputJsonValue;
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+const stringArray = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 const stageSnapshot = (stage: StoredStage): CodexStageSnapshot => ({
   stage: stage.stage as CodexStage,
   status: stage.status as CodexStageSnapshot["status"],
@@ -57,7 +62,7 @@ export async function appendCodexEvent(jobId: string, type: CodexEventType, stag
 const appendEvent = appendCodexEvent;
 
 export async function confirmDesktopFlowRuntime(userId: string, runtimeRevision: string, appVersion?: string | null) {
-  if (runtimeRevision !== "flow-ipc-event-v2") return { confirmed: false, resumedJobIds: [] as string[] };
+  if (!["flow-ipc-event-v2", "flow-recovery-v3"].includes(runtimeRevision)) return { confirmed: false, resumedJobIds: [] as string[] };
   const candidates = await db.codexJob.findMany({
     where: { userId, status: { in: ["NEEDS_HUMAN", "NEEDS_ENGINEERING"] }, currentStage: { in: ["ASSETS", "SCENES"] } },
     select: { id: true, status: true, currentStage: true, failureReason: true, automationRunId: true },
@@ -68,7 +73,9 @@ export async function confirmDesktopFlowRuntime(userId: string, runtimeRevision:
   for (const candidate of candidates) {
     if (!canAutoResumeAfterFlowRuntimeRepair({ status: candidate.status, stage: candidate.currentStage, failureReason: candidate.failureReason, runtimeRevision })) continue;
     const stage = candidate.currentStage as "ASSETS" | "SCENES";
-    const action = stage === "ASSETS" ? "runAssetStage" : "runSceneGenerationStage";
+    const validatorRetry = /quality validator|semantic_audit_required/i.test(candidate.failureReason ?? "");
+    const action = validatorRetry ? (stage === "ASSETS" ? "validateAssets" : "validateScenes") : stage === "ASSETS" ? "regenerateAsset" : "regenerateScene";
+    const repairStrategy = validatorRetry ? "runtime-repair:retry-quality-validation" : `runtime-repair:${runtimeRevision}`;
     const claimed = await db.codexJob.updateMany({
       where: { id: candidate.id, status: candidate.status, currentStage: stage, failureReason: candidate.failureReason },
       data: { status: "RECOVERING", currentAction: action, failureReason: null, completedAt: null },
@@ -78,7 +85,7 @@ export async function confirmDesktopFlowRuntime(userId: string, runtimeRevision:
       await db.$transaction([
         db.codexStageState.update({
           where: { jobId_stage: { jobId: candidate.id, stage } },
-          data: { status: "RETRYING", retryCount: 1, lastStrategy: `runtime-repair:${runtimeRevision}`, validationResult: null, validationIssues: Prisma.JsonNull, completedAt: null },
+          data: { status: "RETRYING", retryCount: 0, lastStrategy: repairStrategy, validationResult: null, validationIssues: Prisma.JsonNull, completedAt: null },
         }),
         ...(candidate.automationRunId ? [db.automationRun.update({ where: { id: candidate.automationRunId }, data: { status: "RUNNING", error: null, completedAt: null } })] : []),
         db.runtimeFailure.updateMany({ where: { codexJobId: candidate.id, status: { not: "SENT_TO_CODEX" } }, data: { status: "RECOVERY_REQUESTED", resolvedAt: new Date() } }),
@@ -146,33 +153,52 @@ async function presentJob(jobId: string, userId: string) {
   const job = await db.codexJob.findFirst({ where: { id: jobId, userId }, include: { stages: { orderBy: { id: "asc" } }, events: { orderBy: { sequence: "asc" }, take: 250 }, runtimeFailures: { orderBy: { createdAt: "desc" }, take: 20, select: { id: true, source: true, stage: true, failureKind: true, code: true, message: true, status: true, attempts: true, codexResponseId: true, lastAttemptAt: true, resolvedAt: true, createdAt: true } } } });
   if (!job) throw new AppError("CODEX_JOB_NOT_FOUND", "Không tìm thấy Codex job.", 404);
   const snapshots = CODEX_STAGES.map((name) => job.stages.find((stage) => stage.stage === name)).filter((stage): stage is NonNullable<typeof stage> => Boolean(stage)).map(stageSnapshot);
-  return { ...job, stages: snapshots, nextAction: job.status === "COMPLETED" ? { name: "jobComplete" } : job.status === "NEEDS_HUMAN" || job.status === "NEEDS_ENGINEERING" || job.status === "FAILED" ? { name: "waitForHuman", reason: job.failureReason } : nextPendingAction(snapshots) };
+  const activeStage = snapshots.find((stage) => stage.stage === job.currentStage);
+  const persistedAction = job.currentAction && executableActions.has(job.currentAction as CodexAction["name"])
+    ? { name: job.currentAction as CodexAction["name"], stage: job.currentStage as CodexStage, strategy: activeStage?.lastStrategy, targetIds: stringArray(activeStage?.actualState?.recoveryTargetIds) }
+    : null;
+  return { ...job, stages: snapshots, nextAction: job.status === "COMPLETED" ? { name: "jobComplete" } : job.status === "NEEDS_HUMAN" || job.status === "NEEDS_ENGINEERING" || job.status === "FAILED" ? { name: "waitForHuman", reason: job.failureReason } : persistedAction ?? nextPendingAction(snapshots) };
 }
 
-async function diagnoseAndRecover(jobId: string, userId: string, stage: CodexStage, message: string, actual: Record<string, unknown>, provider?: string, validationFailure = false): Promise<CodexAction> {
+async function diagnoseAndRecover(jobId: string, userId: string, stage: CodexStage, message: string, actual: Record<string, unknown>, provider?: string, validation?: ValidationOutput): Promise<CodexAction> {
   const env = getEnv();
   const job = await db.codexJob.findFirst({ where: { id: jobId, userId }, include: { stages: true, events: { where: { type: "RECOVERY_STARTED", stage }, orderBy: { sequence: "asc" } } } });
   if (!job) throw new AppError("CODEX_JOB_NOT_FOUND", "Không tìm thấy Codex job.", 404);
   const stageState = job.stages.find((item) => item.stage === stage);
   if (!stageState) throw new AppError("CODEX_STAGE_NOT_FOUND", "Không tìm thấy stage cần recovery.", 404);
-  const kind = classifyFailure(message, validationFailure);
+  const kind = validation?.failureKind ?? classifyFailure(message, validation?.verdict === "FAIL");
   const signature = createErrorSignature(stage, message);
-  const attempted = job.events.map((event) => String(record(event.payload).strategy ?? "")).filter(Boolean);
+  const attempted = job.events
+    .filter((event) => record(event.payload).errorSignature === signature)
+    .map((event) => String(record(event.payload).strategy ?? ""))
+    .filter(Boolean);
+  const signatureRetryCount = retryCountForSignature(stageState.lastErrorSignature, signature, stageState.retryCount);
+  let targetIds = extractRecoveryTargetIds(message, actual);
   const experience = await db.agentExperience.findFirst({ where: { stage, provider: provider ?? null, errorSignature: signature, result: "SUCCEEDED", successfulFix: { not: null } }, orderBy: { lastSeenAt: "desc" } });
   const candidates = recoveryStrategies(stage, kind, message);
   let strategy = chooseRecoveryStrategy(candidates, attempted, experience?.successfulFix);
+  let selectedTool: CodexAction["name"] = kind === "ENGINEERING_FAILURE" ? "repairProductionCode" : recoveryActionFor(stage, strategy);
+  let reasonerMode: "CODEX" | "DETERMINISTIC_FALLBACK" = "DETERMINISTIC_FALLBACK";
+  let reasonerError: string | undefined;
   let reason = experience?.successfulFix ? "Ưu tiên cách sửa đã thành công với lỗi cùng chữ ký." : `Áp dụng recovery khác với ${attempted.length} lần thử trước.`;
-  if (strategy && env.CODEX_ORCHESTRATOR_ENABLED) {
+  if (env.CODEX_ORCHESTRATOR_ENABLED) {
     try {
-      const result = await new CodexReasoner().decide(userId, { purpose: "RECOVERY", stage, state: { failureKind: kind, errorSignature: signature, message, expectedState: stageState.expectedState, actualState: actual, previousAttempts: attempted, experienceMatch: experience, candidateStrategies: candidates }, allowedTools: kind === "ENGINEERING_FAILURE" ? ["repairProductionCode"] : stage === "ASSETS" ? ["regenerateAsset", "runAssetStage", "waitForHuman"] : stage === "SCENES" ? ["regenerateScene", "runSceneGenerationStage", "waitForHuman"] : ["runAnalysisStage", "runModelingStage", "runProjectDevelopmentStage", "runFinalAssembly", "runFinalAudit", "waitForHuman"] }, job.previousResponseId);
-      if (result.decision.strategy && (candidates.includes(result.decision.strategy) || result.decision.strategy === experience?.successfulFix)) strategy = result.decision.strategy;
+      const allowedTools = kind === "ENGINEERING_FAILURE" ? ["repairProductionCode"] : stage === "ASSETS" ? ["validateAssets", "regenerateAsset", "runAssetStage", "waitForHuman"] : stage === "SCENES" ? ["validateScenes", "regenerateScene", "runSceneGenerationStage", "waitForHuman"] : ["runAnalysisStage", "runModelingStage", "runProjectDevelopmentStage", "runFinalAssembly", "runFinalAudit", "waitForHuman"];
+      const result = await new CodexReasoner().decide(userId, { purpose: "RECOVERY", stage, state: { failureKind: kind, validationVerdict: validation?.verdict, errorSignature: signature, message, expectedState: stageState.expectedState, actualState: actual, previousAttempts: attempted, experienceMatch: experience, candidateStrategies: candidates, derivedTargetIds: targetIds }, allowedTools }, job.previousResponseId);
+      if (result.decision.strategy && !attempted.includes(result.decision.strategy)) strategy = result.decision.strategy;
+      selectedTool = allowedTools.includes(result.decision.selectedTool) && result.decision.selectedTool !== "waitForHuman"
+        ? result.decision.selectedTool
+        : recoveryActionFor(stage, strategy);
+      if (result.decision.targetIds?.length) targetIds = [...new Set([...targetIds, ...result.decision.targetIds])];
       reason = result.decision.shortReason;
+      reasonerMode = "CODEX";
       if (result.responseId) await db.codexJob.update({ where: { id: jobId }, data: { previousResponseId: result.responseId } });
-    } catch {
+    } catch (error) {
+      reasonerError = redactSecrets(error instanceof Error ? error.message : "Codex reasoner không phản hồi.");
       reason = `${reason} Codex API tạm thời không khả dụng; policy an toàn dùng chiến lược xác định sẵn.`;
     }
   }
-  await appendCodexEvent(jobId, "ERROR_DIAGNOSED", stage, { failureKind: kind, errorSignature: signature, evidence: redactSecrets(message) }, reason);
+  await appendCodexEvent(jobId, "ERROR_DIAGNOSED", stage, { failureKind: kind, validationVerdict: validation?.verdict, errorSignature: signature, evidence: redactSecrets(message), candidateStrategies: candidates, previousAttempts: attempted, selectedStrategy: strategy, selectedTool, targetIds, reasonerMode, reasonerError }, reason);
   if (kind === "ENGINEERING_FAILURE") {
     await db.codexStageState.update({ where: { jobId_stage: { jobId, stage } }, data: { status: "FAILED", lastErrorSignature: signature, actualState: json(actual) } });
     await db.codexJob.update({ where: { id: jobId }, data: { status: "NEEDS_ENGINEERING", currentStage: stage, currentAction: "codexGuardedCodeRepair", failureReason: redactSecrets(message) } });
@@ -180,24 +206,28 @@ async function diagnoseAndRecover(jobId: string, userId: string, stage: CodexSta
     await syncAutomation(jobId);
     return { name: "waitForHuman", stage, strategy: "codex-guarded-code-repair", reason: message };
   }
-  const exhausted = stageState.retryCount >= stageState.maxRetries || !strategy || /request-human/.test(strategy) || !env.CODEX_AUTO_RECOVERY_ENABLED;
+  const exhausted = signatureRetryCount >= stageState.maxRetries || !strategy || /request-human/.test(strategy) || !env.CODEX_AUTO_RECOVERY_ENABLED;
   if (exhausted) {
-    await db.codexStageState.update({ where: { jobId_stage: { jobId, stage } }, data: { status: "FAILED", validationResult: validationFailure ? "FAIL" : undefined, lastErrorSignature: signature } });
+    await db.codexStageState.update({ where: { jobId_stage: { jobId, stage } }, data: { status: "FAILED", validationResult: validation?.verdict, lastErrorSignature: signature } });
     await db.codexJob.update({ where: { id: jobId }, data: { status: "NEEDS_HUMAN", currentStage: stage, currentAction: "waitForHuman", failureReason: redactSecrets(message) } });
-    await appendCodexEvent(jobId, "RECOVERY_FAILED", stage, { errorSignature: signature, attempts: stageState.retryCount });
+    const failedExperience = await db.agentExperience.findFirst({ where: { stage, provider: provider ?? null, errorSignature: signature, result: "FAILED" }, orderBy: { lastSeenAt: "desc" } });
+    if (failedExperience) await db.agentExperience.update({ where: { id: failedExperience.id }, data: { jobId, occurrenceCount: { increment: 1 }, lastSeenAt: new Date(), errorMessage: redactSecrets(message), expectedState: stageState.expectedState ?? undefined, actualState: json(actual), rootCause: reason } });
+    else await db.agentExperience.create({ data: { jobId, stage, provider, errorSignature: signature, errorMessage: redactSecrets(message), expectedState: stageState.expectedState ?? undefined, actualState: json(actual), rootCause: reason, result: "FAILED" } });
+    await appendCodexEvent(jobId, "RECOVERY_FAILED", stage, { errorSignature: signature, attempts: signatureRetryCount });
     await appendCodexEvent(jobId, "JOB_NEEDS_HUMAN", stage, { reason: redactSecrets(message) });
     await syncAutomation(jobId);
     return { name: "waitForHuman", stage, reason: message };
   }
   const selectedStrategy = strategy as string;
-  const nextRetry = stageState.retryCount + 1;
-  await db.codexStageState.update({ where: { jobId_stage: { jobId, stage } }, data: { status: "RETRYING", retryCount: nextRetry, lastErrorSignature: signature, lastStrategy: selectedStrategy, actualState: json(actual), validationResult: validationFailure ? "FAIL" : undefined } });
-  await db.codexJob.update({ where: { id: jobId }, data: { status: "RECOVERING", currentStage: stage, currentAction: stage === "ASSETS" ? "regenerateAsset" : stage === "SCENES" ? "regenerateScene" : undefined, retryCount: { increment: 1 }, failureReason: null } });
+  const nextRetry = signatureRetryCount + 1;
+  const recoveryActual = { ...actual, recoveryTargetIds: targetIds };
+  await db.codexStageState.update({ where: { jobId_stage: { jobId, stage } }, data: { status: "RETRYING", retryCount: nextRetry, lastErrorSignature: signature, lastStrategy: selectedStrategy, actualState: json(recoveryActual), validationResult: validation?.verdict } });
+  await db.codexJob.update({ where: { id: jobId }, data: { status: "RECOVERING", currentStage: stage, currentAction: selectedTool, retryCount: { increment: 1 }, failureReason: null } });
   const priorAttempt = await db.agentExperience.findFirst({ where: { stage, provider: provider ?? null, errorSignature: signature, attemptedFix: selectedStrategy, result: "ATTEMPTED" }, orderBy: { lastSeenAt: "desc" } });
-  if (priorAttempt) await db.agentExperience.update({ where: { id: priorAttempt.id }, data: { jobId, occurrenceCount: { increment: 1 }, lastSeenAt: new Date(), errorMessage: redactSecrets(message), expectedState: stageState.expectedState ?? undefined, actualState: json(actual), rootCause: reason } });
-  else await db.agentExperience.create({ data: { jobId, stage, provider, errorSignature: signature, errorMessage: redactSecrets(message), expectedState: stageState.expectedState ?? undefined, actualState: json(actual), attemptedFix: selectedStrategy, rootCause: reason, result: "ATTEMPTED" } });
-  await appendCodexEvent(jobId, "RECOVERY_STARTED", stage, { strategy: selectedStrategy, retry: nextRetry, errorSignature: signature }, reason);
-  const issueTargets = Array.isArray(actual.issues) ? actual.issues.map((issue) => record(issue)).map((issue) => String(issue.targetId ?? issue.sceneNumber ?? "")).filter(Boolean) : [];
+  if (priorAttempt) await db.agentExperience.update({ where: { id: priorAttempt.id }, data: { jobId, occurrenceCount: { increment: 1 }, lastSeenAt: new Date(), errorMessage: redactSecrets(message), expectedState: stageState.expectedState ?? undefined, actualState: json(recoveryActual), rootCause: reason } });
+  else await db.agentExperience.create({ data: { jobId, stage, provider, errorSignature: signature, errorMessage: redactSecrets(message), expectedState: stageState.expectedState ?? undefined, actualState: json(recoveryActual), attemptedFix: selectedStrategy, rootCause: reason, result: "ATTEMPTED" } });
+  await appendCodexEvent(jobId, "RECOVERY_STARTED", stage, { strategy: selectedStrategy, tool: selectedTool, targetIds, retry: nextRetry, errorSignature: signature }, reason);
+  const issueTargets = targetIds;
   if (stage === "FINAL_AUDIT") {
     if (issueTargets.length) {
       await db.$transaction([
@@ -218,7 +248,7 @@ async function diagnoseAndRecover(jobId: string, userId: string, stage: CodexSta
     return { name: "runFinalAssembly", stage: "FINAL_ASSEMBLY", strategy: selectedStrategy, reason };
   }
   await syncAutomation(jobId);
-  return { name: stage === "ASSETS" ? "regenerateAsset" : stage === "SCENES" ? "regenerateScene" : nextPendingAction([stageSnapshot({ ...stageState, status: "RETRYING", retryCount: nextRetry, lastStrategy: selectedStrategy })]).name, stage, targetIds: issueTargets, strategy: selectedStrategy, reason };
+  return { name: selectedTool, stage, targetIds: issueTargets, strategy: selectedStrategy, reason };
 }
 
 export async function createCodexJob(userId: string, input: CreateJobInput) {
@@ -301,10 +331,10 @@ export async function reportCodexEvent(userId: string, jobId: string, input: Rep
   }
   if (input.type === "STAGE_STARTED") {
     await db.codexStageState.update({ where: { jobId_stage: { jobId, stage: input.stage } }, data: { status: "RUNNING", startedAt: stageState.startedAt ?? new Date() } });
-    await db.codexJob.update({ where: { id: jobId }, data: { status: stageState.retryCount ? "RECOVERING" : "RUNNING", currentStage: input.stage, currentAction: null } });
-    await appendEvent(jobId, "STAGE_STARTED", input.stage, { retry: stageState.retryCount, strategy: stageState.lastStrategy });
-    const calledTool = stageState.status === "RETRYING" && input.stage === "ASSETS" ? "regenerateAsset" : stageState.status === "RETRYING" && input.stage === "SCENES" ? "regenerateScene" : nextPendingAction([stageSnapshot({ ...stageState, status: "RUNNING" })]).name;
-    await appendEvent(jobId, "TOOL_CALLED", input.stage, { tool: calledTool, strategy: stageState.lastStrategy });
+    await db.codexJob.update({ where: { id: jobId }, data: { status: stageState.status === "RETRYING" || stageState.retryCount ? "RECOVERING" : "RUNNING", currentStage: input.stage, currentAction: null } });
+    await appendEvent(jobId, "STAGE_STARTED", input.stage, { retry: stageState.retryCount, strategy: input.strategy ?? stageState.lastStrategy });
+    const calledTool = input.action ?? (stageState.status === "RETRYING" && input.stage === "ASSETS" ? "regenerateAsset" : stageState.status === "RETRYING" && input.stage === "SCENES" ? "regenerateScene" : nextPendingAction([stageSnapshot({ ...stageState, status: "RUNNING" })]).name);
+    await appendEvent(jobId, "TOOL_CALLED", input.stage, { tool: calledTool, strategy: input.strategy ?? stageState.lastStrategy });
     await syncAutomation(jobId);
     return presentJob(jobId, userId);
   }
@@ -348,9 +378,9 @@ export async function reportCodexEvent(userId: string, jobId: string, input: Rep
     await appendEvent(jobId, "VALIDATION_FAILED", input.stage, { verdict: validation.verdict, issues: validation.issues });
     if (input.stage === "FINAL_AUDIT") await appendEvent(jobId, "FINAL_AUDIT_FAILED", input.stage, { issues: validation.issues });
     const message = validation.issues.map((issue) => issue.message).join(" ") || "Validation failed.";
-    return { ...(await presentJob(jobId, userId)), nextAction: await diagnoseAndRecover(jobId, userId, input.stage, message, { ...actual, issues: validation.issues }, input.provider, true) };
+    return { ...(await presentJob(jobId, userId)), nextAction: await diagnoseAndRecover(jobId, userId, input.stage, message, { ...actual, issues: validation.issues }, input.provider, validation) };
   }
-  const hadRecovery = stageState.retryCount > 0;
+  const hadRecovery = stageState.retryCount > 0 || Boolean(stageState.lastStrategy);
   await db.codexStageState.update({ where: { jobId_stage: { jobId, stage: input.stage } }, data: { status: "COMPLETED", actualState: json(actual), validationResult: "PASS", validationIssues: json([]), completedAt: new Date() } });
   await db.codexJob.update({ where: { id: jobId }, data: { checkpoint: json({ ...record(job.checkpoint), ...actual, lastCompletedStage: input.stage }) } });
   await appendEvent(jobId, "STAGE_COMPLETED", input.stage, { validation: "PASS", actualState: actual });

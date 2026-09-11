@@ -268,8 +268,10 @@ export async function reportBackgroundJobFailure(job: { jobId: string; name: str
 export async function reportStalledBackgroundJob(job: { jobId: string; name: string; payload: Record<string, unknown> }) {
   if (job.name === "codex.runtime.failure" || job.name.startsWith("desktop.flow.")) return null;
   const payload = job.payload;
+  const codexJobId = job.name === "codex.job.execute" && typeof payload.jobId === "string" ? payload.jobId : undefined;
   return reportRuntimeFailure({
     userId: typeof payload.userId === "string" ? payload.userId : undefined,
+    codexJobId,
     backgroundJobId: job.jobId,
     source: "background-job:stall-watchdog",
     code: "JOB_STALLED_OVER_5_MINUTES",

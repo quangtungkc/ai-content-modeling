@@ -82,8 +82,9 @@ type CodexJobResult = {
   id: string;
   automationRunId?: string | null;
   status: string;
-  stages: Array<{ stage: CodexStage; status: string; retryCount: number; validationResult?: string }>;
-  events?: Array<{ type: string; stage?: string | null; payload?: unknown }>;
+  currentStage?: CodexStage;
+  stages: Array<{ stage: CodexStage; status: string; retryCount: number; maxRetries?: number; validationResult?: string }>;
+  events?: Array<{ type: string; stage?: string | null; payload?: Record<string, unknown>; reasoningSummary?: string | null }>;
   runtimeFailures?: Array<{ id: string; source: string; stage?: string | null; failureKind: string; code: string; message: string; status: string; attempts: number; codexResponseId?: string | null; lastAttemptAt?: string | null; resolvedAt?: string | null; createdAt: string }>;
   nextAction: CodexAction;
 };
@@ -843,7 +844,18 @@ export function ViralDashboard() {
       status: stage.status === "COMPLETED" || stage.status === "SKIPPED" ? "completed" : stage.status === "RUNNING" || stage.status === "RETRYING" ? "running" : stage.status === "FAILED" ? "failed" : "pending",
       detail: stage.validationResult ? `Validation: ${stage.validationResult}` : undefined,
     })));
-    setCodexStatus(job.status === "RECOVERING" ? `Codex đang recovery: ${job.nextAction.strategy ?? job.nextAction.reason ?? "đang chọn chiến lược"}` : job.status === "NEEDS_ENGINEERING" ? `NEEDS_ENGINEERING: ${job.nextAction.reason ?? "Codex đang xử lý lỗi code trong workspace được bảo vệ."}` : job.status === "NEEDS_HUMAN" ? `Cần kiểm tra thủ công: ${job.nextAction.reason ?? "đã hết giới hạn recovery"}` : job.status === "COMPLETED" ? "Final Audit PASS — VIDEO COMPLETE" : job.status === "PLANNING" ? "Worker nền đang tạo Execution Plan..." : `Bước tiếp theo: ${job.nextAction.stage ?? job.nextAction.name}`);
+    const latestDiagnosis = [...(job.events ?? [])].reverse().find((event) => event.type === "ERROR_DIAGNOSED");
+    const diagnosisPayload = latestDiagnosis?.payload ?? {};
+    const activeStage = job.stages.find((stage) => stage.stage === (job.currentStage ?? job.nextAction.stage));
+    const targetIds = Array.isArray(diagnosisPayload.targetIds) ? diagnosisPayload.targetIds.filter((value): value is string => typeof value === "string") : job.nextAction.targetIds ?? [];
+    const recoveryDetail = [
+      latestDiagnosis?.reasoningSummary ? `Chẩn đoán: ${latestDiagnosis.reasoningSummary}` : null,
+      `Strategy: ${String(diagnosisPayload.selectedStrategy ?? job.nextAction.strategy ?? "đang chọn")}`,
+      `Tool: ${String(diagnosisPayload.selectedTool ?? job.nextAction.name)}`,
+      targetIds.length ? `Mục tiêu: ${targetIds.join(", ")}` : null,
+      activeStage ? `Retry: ${activeStage.retryCount}/${activeStage.maxRetries ?? 3}` : null,
+    ].filter(Boolean).join(" · ");
+    setCodexStatus(job.status === "RECOVERING" ? recoveryDetail : job.status === "NEEDS_ENGINEERING" ? `NEEDS_ENGINEERING: ${job.nextAction.reason ?? "Codex đang xử lý lỗi code trong workspace được bảo vệ."}` : job.status === "NEEDS_HUMAN" ? `Cần kiểm tra thủ công: ${job.nextAction.reason ?? "đã hết giới hạn recovery"}` : job.status === "COMPLETED" ? "Final Audit PASS — VIDEO COMPLETE" : job.status === "PLANNING" ? "Worker nền đang tạo Execution Plan..." : `Bước tiếp theo: ${job.nextAction.stage ?? job.nextAction.name}`);
     const latestResumeEvent = [...(job.events ?? [])].reverse().find((event) => event.type === "JOB_AUTO_RESUMED" || event.type === "RUNTIME_REPAIR_VERIFIED");
     if (latestResumeEvent?.type === "JOB_AUTO_RESUMED") {
       setCodexErrorDeliveryStatus(`Bản sửa đã được nạp · Codex đã tự tiếp tục stage ${latestResumeEvent.stage ?? job.nextAction.stage ?? "đang lỗi"}`);

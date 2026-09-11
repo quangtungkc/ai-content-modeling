@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { CodexAction, CodexStage, CodexStageSnapshot, ExpectedState, FailureKind, SceneExpectedState, ValidationIssue, ValidationOutput } from "./types";
+import type { CodexAction, CodexActionName, CodexStage, CodexStageSnapshot, ExpectedState, FailureKind, SceneExpectedState, ValidationIssue, ValidationOutput } from "./types";
 
 const stageAction: Record<CodexStage, CodexAction["name"]> = {
   ANALYSIS: "runAnalysisStage",
@@ -44,10 +44,11 @@ export function classifyFailure(message: string, validationFailure = false): Fai
 export function canAutoResumeAfterFlowRuntimeRepair(input: { status: string; stage: string; failureReason?: string | null; runtimeRevision: string }) {
   if (!['NEEDS_HUMAN', 'NEEDS_ENGINEERING'].includes(input.status)) return false;
   if (!['ASSETS', 'SCENES'].includes(input.stage)) return false;
-  if (input.runtimeRevision !== 'flow-ipc-event-v2') return false;
+  if (!['flow-ipc-event-v2', 'flow-recovery-v3'].includes(input.runtimeRevision)) return false;
   const message = input.failureReason ?? '';
   if (/sign[ -]?in|log[ -]?in|đăng nhập|permission|quyền truy cập|captcha|two-factor|2fa|oauth/i.test(message)) return false;
-  return /cannot read properties of undefined \(reading ['"]send['"]\)|flow bridge.*sender|ipc.*sender/i.test(message);
+  if (/cannot read properties of undefined \(reading ['"]send['"]\)|flow bridge.*sender|ipc.*sender/i.test(message)) return true;
+  return input.runtimeRevision === 'flow-recovery-v3' && /quality validator|semantic_audit_required|không tìm thấy ảnh scene[-\s]?\d+|start frame google flow/i.test(message);
 }
 
 export function createErrorSignature(stage: CodexStage, message: string) {
@@ -64,6 +65,12 @@ export function nextPendingAction(stages: CodexStageSnapshot[]): CodexAction {
 export function recoveryStrategies(stage: CodexStage, kind: FailureKind, errorMessage: string): string[] {
   if (kind === "ENGINEERING_FAILURE") return ["codex-guarded-code-repair"];
   const message = errorMessage.toLowerCase();
+  if (stage === "SCENES" && /không tìm thấy ảnh scene[-\s]?\d+|start frame google flow|ảnh cảnh .*start frame/.test(message)) {
+    return ["reupload-missing-start-frame", "refresh-flow-media-picker", "regenerate-failed-scenes-only"];
+  }
+  if (/quality_provider_failure|gemini_quality|quality provider|quality validator.*(?:connection|required|không khả dụng)|429|rate.?limit|quota/.test(message)) {
+    if (stage === "ASSETS" || stage === "SCENES") return ["retry-quality-validation", "provider-backoff", "retry-quality-validation-after-backoff"];
+  }
   if (/api_provider_unavailable|google api-first|image api|veo api|provider.*unavailable/.test(message)) {
     if (stage === "ASSETS") return ["use-flow-browser", "retry-failed-assets-only", "request-human-flow-login"];
     if (stage === "SCENES") return ["use-flow-browser", "retry-failed-scenes-only", "request-human-flow-login"];
@@ -76,6 +83,30 @@ export function recoveryStrategies(stage: CodexStage, kind: FailureKind, errorMe
   if (stage === "SCENES") return kind === "SEMANTIC_FAILURE" ? ["strengthen-scene-expected-state", "regenerate-failed-scenes-only", "request-human-scene-review"] : ["refresh-flow-page", "retry-failed-scenes-only", "resume-from-checkpoint"];
   if (stage === "FINAL_ASSEMBLY" || stage === "FINAL_AUDIT") return ["reassemble-failed-scene-set", "reencode-final-output", "request-human-final-review"];
   return ["retry-stage-once", "resume-from-checkpoint", "request-human-review"];
+}
+
+export function recoveryActionFor(stage: CodexStage, strategy?: string | null): CodexActionName {
+  if (strategy && /quality-validation|provider-backoff/.test(strategy) && stage === "ASSETS") return "validateAssets";
+  if (strategy && /quality-validation|provider-backoff/.test(strategy) && stage === "SCENES") return "validateScenes";
+  if (stage === "ASSETS") return "regenerateAsset";
+  if (stage === "SCENES") return "regenerateScene";
+  if (stage === "FINAL_ASSEMBLY") return "runFinalAssembly";
+  if (stage === "FINAL_AUDIT") return "runFinalAudit";
+  return stageAction[stage];
+}
+
+export function extractRecoveryTargetIds(message: string, actual: Record<string, unknown>) {
+  const targets = new Set<string>();
+  if (Array.isArray(actual.issues)) {
+    for (const value of actual.issues) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const issue = value as Record<string, unknown>;
+      const target = issue.targetId ?? issue.sceneNumber;
+      if (typeof target === "string" || typeof target === "number") targets.add(String(target));
+    }
+  }
+  for (const match of message.matchAll(/(?:scene[-_\s]?|cảnh\s+)(\d+)/gi)) targets.add(match[1]);
+  return [...targets];
 }
 
 export function chooseRecoveryStrategy(strategies: string[], attempted: string[], successfulExperience?: string | null) {
@@ -92,6 +123,7 @@ export function planSceneBatches(sceneNumbers: number[], maxConcurrency: number)
 }
 
 export const hasReachedRetryLimit = (retryCount: number, maxRetries: number) => retryCount >= maxRetries;
+export const retryCountForSignature = (lastErrorSignature: string | null | undefined, currentErrorSignature: string, retryCount: number) => lastErrorSignature === currentErrorSignature ? retryCount : 0;
 export const shouldCreateImprovementCandidate = (occurrenceCount: number, rootCauseConfirmedInCode = false) => rootCauseConfirmedInCode || occurrenceCount >= 2;
 export const shouldUseCodexPipeline = (enabled: boolean) => enabled;
 export const findIncompleteFinalAuditPrerequisite = (stages: Array<{ stage: string; status: string }>) => ["ANALYSIS", "MODELING", "PROJECT", "ASSETS", "SCENES", "FINAL_ASSEMBLY"].map((name) => stages.find((stage) => stage.stage === name)).find((stage) => !stage || stage.status !== "COMPLETED");
@@ -118,8 +150,17 @@ export function validateExpectedActual(expected: ExpectedState | undefined, actu
   if (expected.expectedAspectRatio && actual.aspectRatio !== expected.expectedAspectRatio) issues.push({ code: "ASPECT_RATIO_MISMATCH", message: "Sai tỷ lệ khung hình.", expected: expected.expectedAspectRatio, actual: actual.aspectRatio });
   if (expected.requireAudio && actual.hasAudio !== true) issues.push({ code: "AUDIO_MISSING", message: "Video cuối chưa xác nhận có âm thanh." });
   if (expected.requireFinalVideo && actual.finalVideoAvailable !== true) issues.push({ code: "FINAL_VIDEO_MISSING", message: "Chưa có video cuối hợp lệ." });
-  if (actual.semanticVerdict === "FAIL") issues.push(...((Array.isArray(actual.semanticIssues) ? actual.semanticIssues : []) as ValidationIssue[]));
+  const semanticIssues = (Array.isArray(actual.semanticIssues) ? actual.semanticIssues : []) as ValidationIssue[];
+  if (actual.semanticVerdict === "FAIL") issues.push(...semanticIssues);
   if (issues.length) return { verdict: "FAIL", failureKind: "SEMANTIC_FAILURE", issues };
+  if (actual.semanticVerdict === "UNCERTAIN") {
+    const providerFailure = actual.semanticFailureKind === "TECHNICAL_FAILURE" || semanticIssues.some((issue) => /PROVIDER|CONNECTION|RATE_LIMIT|QUOTA|429/i.test(issue.code));
+    return {
+      verdict: "UNCERTAIN",
+      failureKind: providerFailure ? "TECHNICAL_FAILURE" : "SEMANTIC_FAILURE",
+      issues: semanticIssues.length ? semanticIssues : [{ code: "SEMANTIC_AUDIT_REQUIRED", message: "Cần Quality Validator xác nhận nội dung hình ảnh/video." }],
+    };
+  }
   if (expected.scenes?.length && actual.semanticVerdict !== "PASS" && (expected.stage === "SCENES" || expected.stage === "FINAL_AUDIT")) {
     return { verdict: "UNCERTAIN", failureKind: "SEMANTIC_FAILURE", issues: [{ code: "SEMANTIC_AUDIT_REQUIRED", message: "Cần Quality Validator xác nhận nội dung hình ảnh/video." }] };
   }
