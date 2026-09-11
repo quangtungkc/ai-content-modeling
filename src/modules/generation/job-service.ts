@@ -6,20 +6,24 @@ import { veoRequestSchema } from "@/services/video-generation/request-schema";
 import type { VeoRequest } from "@/services/video-generation/types";
 import { UsageMetric } from "@prisma/client";
 import { recordUsage } from "@/modules/usage/service";
+import { requireProviderApiKey } from "@/modules/ai-connections/credentials";
+import { writeProjectVideo } from "@/modules/assets/image-generation-service";
 
 async function getOwnedScene(sceneId: string, userId: string) {
   const scene = await db.storyboardScene.findFirst({ where: { id: sceneId, project: { channel: { userId } } }, select: { id: true } });
   if (!scene) throw new AppError("SCENE_NOT_FOUND", "Không tìm thấy scene.", 404);
 }
 
-export async function createGenerationJob(sceneId: string, userId: string, request: VeoRequest) {
+export async function createGenerationJob(sceneId: string, userId: string, request: VeoRequest, options: { enqueue?: boolean } = {}) {
   await getOwnedScene(sceneId, userId);
   const parsed = veoRequestSchema.parse({ ...request, sceneId });
   const latest = await db.sceneGenerationVersion.findFirst({ where: { sceneId }, orderBy: { version: "desc" }, select: { version: true } });
   const job = await db.videoGenerationJob.create({ data: { sceneId, provider: "veo", prompt: parsed.prompt } });
   await db.sceneGenerationVersion.create({ data: { sceneId, version: (latest?.version ?? 0) + 1, generationJobId: job.id, prompt: parsed.prompt, provider: "veo" } });
-  const queue = new LocalJobQueue();
-  await queue.enqueue("video.generate", { jobId: job.id, request: parsed }, `video-generate:${job.id}`);
+  if (options.enqueue !== false) {
+    const queue = new LocalJobQueue();
+    await queue.enqueue("video.generate", { jobId: job.id, request: parsed }, `video-generate:${job.id}`);
+  }
   return job;
 }
 
@@ -31,8 +35,9 @@ export async function getGenerationJob(id: string, userId: string) {
 
 export async function runGenerationJob(jobId: string, request: VeoRequest) {
   const { VeoProvider } = await import("@/services/video-generation/veo");
-  const provider = new VeoProvider();
-  const ownership = await db.videoGenerationJob.findUniqueOrThrow({ where: { id: jobId }, select: { scene: { select: { project: { select: { id: true, channelId: true, channel: { select: { userId: true } } } } } } } });
+  const ownership = await db.videoGenerationJob.findUniqueOrThrow({ where: { id: jobId }, select: { scene: { select: { sceneNumber: true, project: { select: { id: true, channelId: true, channel: { select: { userId: true } } } } } } } });
+  const apiKey = await requireProviderApiKey(ownership.scene.project.channel.userId, ["VEO", "GEMINI"], "VIDEO_GENERATION", "Veo/Google Video");
+  const provider = new VeoProvider(apiKey);
   await db.videoGenerationJob.update({ where: { id: jobId }, data: { status: "RUNNING", startedAt: new Date(), error: null } });
   try {
     const operation = await provider.generateScene(request);
@@ -40,8 +45,14 @@ export async function runGenerationJob(jobId: string, request: VeoRequest) {
     await db.videoGenerationJob.update({ where: { id: jobId }, data: { externalOperationId: operation.operationId } });
     const current = await pollGenerationOperation(provider, operation.operationId);
     if (current.status === "failed") throw new Error(current.error ?? "Veo generation failed");
-    await db.sceneGenerationVersion.update({ where: { generationJobId: jobId }, data: { status: "READY", previewUrl: current.previewUrl } });
-    return db.videoGenerationJob.update({ where: { id: jobId }, data: { status: "COMPLETED", resultUrl: current.previewUrl, completedAt: new Date() } });
+    if (!current.previewUrl) throw new Error("Veo không trả về URL video.");
+    const videoResponse = await fetch(current.previewUrl, { headers: { "x-goog-api-key": apiKey } });
+    if (!videoResponse.ok) throw new Error(`Không tải được video Veo (${videoResponse.status}).`);
+    const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
+    await writeProjectVideo(ownership.scene.project.id, ownership.scene.sceneNumber, videoBuffer);
+    const resultUrl = `/api/v1/projects/${ownership.scene.project.id}/videos?sceneNumber=${ownership.scene.sceneNumber}`;
+    await db.sceneGenerationVersion.update({ where: { generationJobId: jobId }, data: { status: "READY", previewUrl: resultUrl } });
+    return db.videoGenerationJob.update({ where: { id: jobId }, data: { status: "COMPLETED", resultUrl, completedAt: new Date() } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown generation failure";
     await db.sceneGenerationVersion.update({ where: { generationJobId: jobId }, data: { status: "FAILED", reviewNotes: { error: message } } });
@@ -50,9 +61,16 @@ export async function runGenerationJob(jobId: string, request: VeoRequest) {
   }
 }
 
-export async function pollGenerationOperation(provider: { getOperation(operationId: string): Promise<{ status: "queued" | "running" | "succeeded" | "failed"; error?: string; previewUrl?: string }> }, operationId: string, waitMs = 5_000, sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))) {
+export async function pollGenerationOperation(provider: { getOperation(operationId: string): Promise<{ status: "queued" | "running" | "succeeded" | "failed"; error?: string; previewUrl?: string }> }, operationId: string, waitMs = 5_000, sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)), maxWaitMs = 15 * 60_000) {
+  const startedAt = Date.now();
+  let attempt = 0;
   let current = await provider.getOperation(operationId);
-  while (current.status === "queued" || current.status === "running") { await sleep(waitMs); current = await provider.getOperation(operationId); }
+  while (current.status === "queued" || current.status === "running") {
+    if (Date.now() - startedAt >= maxWaitMs) throw new Error("Veo operation vượt quá thời gian chờ cho phép.");
+    await sleep(Math.min(waitMs * (2 ** attempt), 30_000));
+    attempt += 1;
+    current = await provider.getOperation(operationId);
+  }
   return current;
 }
 

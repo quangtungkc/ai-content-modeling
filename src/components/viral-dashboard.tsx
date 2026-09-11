@@ -75,6 +75,10 @@ type ContentProjectResult = { id: string; artDirection: Record<string, unknown>;
 type AutomationStep = { key: string; label: string; status: "pending" | "running" | "completed" | "failed"; detail?: string; error?: string; startedAt?: string; completedAt?: string };
 type AutomationSettings = { artStyle: string; aspectRatio: "9:16" | "16:9" | "1:1" | "4:5"; postText?: string; hashtags?: string; language?: string; targetCountry?: string };
 type AutomationRunResult = { id: string; status: "RUNNING" | "SUCCEEDED" | "FAILED"; steps: AutomationStep[] };
+type CodexStage = "ANALYSIS" | "MODELING" | "PROJECT" | "ASSETS" | "SCENES" | "FINAL_ASSEMBLY" | "FINAL_AUDIT" | "POST_RUN_REVIEW";
+type CodexAction = { name: string; stage?: CodexStage; targetIds?: string[]; strategy?: string; reason?: string };
+type CodexJobResult = { id: string; automationRunId?: string | null; status: string; stages: Array<{ stage: CodexStage; status: string; retryCount: number; validationResult?: string }>; nextAction: CodexAction };
+type QualityResult = { verdict: "PASS" | "FAIL" | "UNCERTAIN"; issues: Array<{ code: string; message: string; sceneNumber?: number; targetId?: string }> };
 type SelectedModelingVideo = { videoId: string; modelingUrl: string; sourceUrl: string };
 const accents = [
   "border-l-emerald-600",
@@ -158,10 +162,12 @@ export function ViralDashboard() {
   const [videoPage, setVideoPage] = useState(1);
   const [autoSyncRequested, setAutoSyncRequested] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("autoSync") === "1");
   const [manualVideo, setManualVideo] = useState({ competitorId: "", url: "", publishedAt: new Date().toISOString().slice(0, 16), views: "", likes: "0", comments: "0", shares: "0", caption: "" });
-  const [executionMode, setExecutionMode] = useState<"manual" | "automatic">("manual");
+  const [executionMode, setExecutionMode] = useState<"manual" | "automatic" | "codex">("manual");
   const [isAutomaticRunning, setIsAutomaticRunning] = useState(false);
   const [automationRunId, setAutomationRunId] = useState("");
   const [automationSteps, setAutomationSteps] = useState<AutomationStep[]>([]);
+  const [codexJobId, setCodexJobId] = useState("");
+  const [codexStatus, setCodexStatus] = useState("");
   const [selectedModelingVideo, setSelectedModelingVideo] = useState<SelectedModelingVideo | null>(null);
   useEffect(() => {
     const controller = new AbortController();
@@ -550,29 +556,48 @@ export function ViralDashboard() {
     });
     return [{ kind: "background", sceneNumber: 0, label: "Bối cảnh đồng nhất", aspectRatio: "9:16", prompt: backgroundPrompt }, ...sceneSlots];
   }
-  async function generateAllProjectImages(project = contentProject): Promise<Record<string, string> | null> {
+  async function generateAllProjectImages(project = contentProject, onlySceneNumbers?: number[], existingImages = generatedImages): Promise<Record<string, string> | null> {
     if (!project) return null;
     setIsGeneratingImages(true);
     setContentProjectError("");
     try {
-      const slots = buildFlowImageSlots(project);
-      const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
-      if (!flow) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
+      const allSlots = buildFlowImageSlots(project);
+      const selected = onlySceneNumbers?.length ? new Set(onlySceneNumbers) : null;
+      const slots = selected ? allSlots.filter((slot) => slot.kind === "scene" && slot.sceneNumber !== undefined && selected.has(slot.sceneNumber)) : allSlots;
+      if (!slots.length) throw new Error("Không xác định được ảnh cần tạo lại.");
       const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
       if (!selectedChannelId) throw new Error("Hãy chọn kênh trước khi tạo ảnh.");
       setFlowImageSlots(slots);
       setFlowImageProgress({ processed: 0, total: slots.length });
-      const result = await flow.runImageJob(project.id, selectedChannelId, slots, (progress) => { setFlowImageProgress({ processed: progress.processed, total: progress.total }); setFlowImageMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`); });
-      setGeneratedImages(result.images);
+      setFlowImageMessage("Đang tạo ảnh bằng Google Image API...");
+      const apiResponse = await fetch(`/api/v1/projects/${project.id}/images`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channelId: selectedChannelId, slots }) });
+      const apiBody = await apiResponse.json() as { data?: { status?: string; images: Record<string, string> }; error?: { code?: string; message?: string; details?: { browserFallback?: boolean } } };
+      let result: { status: string; images: Record<string, string> };
+      if (apiResponse.ok && apiBody.data) {
+        result = { status: apiBody.data.status ?? "completed", images: apiBody.data.images };
+        setFlowImageProgress({ processed: slots.length, total: slots.length });
+        setFlowImageMessage("Đã tạo và lưu ảnh bằng Google Image API.");
+      } else if (["API_PROVIDER_DISABLED", "API_PROVIDER_UNAVAILABLE"].includes(apiBody.error?.code ?? "") && apiBody.error?.details?.browserFallback !== false) {
+        const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
+        if (!flow) throw new Error(apiBody.error?.message ?? "Google API chưa sẵn sàng và không có Flow fallback.");
+        await reportCodexProviderFallback("ASSETS", apiBody.error?.message ?? "Google Image API chưa sẵn sàng.");
+        setFlowImageMessage("Google API chưa sẵn sàng; chuyển sang Flow fallback...");
+        result = await flow.runImageJob(project.id, selectedChannelId, slots, (progress) => { setFlowImageProgress({ processed: progress.processed, total: progress.total }); setFlowImageMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`); });
+      } else {
+        throw new Error(apiBody.error?.message ?? "Không thể tạo ảnh bằng Google Image API.");
+      }
+      const mergedImages = { ...existingImages, ...result.images };
+      setGeneratedImages(mergedImages);
       setShowGeneratedImages(true);
-      setFlowImageMessage("Đã tạo và đưa toàn bộ ảnh từ Google Flow vào app theo đúng thứ tự.");
-      return result.images;
-    } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo ảnh bằng Google Flow."); return null; }
+      setFlowImageMessage("Đã tạo và đưa toàn bộ ảnh vào app theo đúng thứ tự.");
+      return mergedImages;
+    } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo ảnh bằng Google Image API/Flow."); return null; }
     finally { setIsGeneratingImages(false); }
   }
-  async function generateAllProjectVideos(project = contentProject, images = generatedImages): Promise<Record<string, string> | null> {
+  async function generateAllProjectVideos(project = contentProject, images = generatedImages, onlySceneNumbers?: number[], existingVideos = generatedVideos): Promise<Record<string, string> | null> {
     if (!project) return null;
-    const sceneSlots: VideoSlot[] = project.scenes.map((scene) => ({
+    const selected = onlySceneNumbers?.length ? new Set(onlySceneNumbers) : null;
+    const sceneSlots: VideoSlot[] = project.scenes.filter((scene) => !selected || selected.has(scene.sceneNumber)).map((scene) => ({
       sceneNumber: scene.sceneNumber,
       label: `Video cảnh ${scene.sceneNumber}`,
       visualBlock: scene.visualBlock,
@@ -581,33 +606,68 @@ export function ViralDashboard() {
       englishPrompt: scene.englishPrompt?.trim() || `Create one 4-second video starting from the approved start image for scene ${scene.sceneNumber}. Preserve the character, background, composition, story meaning, and ending, and animate only the specified primary action with synchronized sound.`,
       aspectRatio,
     }));
-    if (!images["background-0"] || sceneSlots.some((scene) => !images[`scene-${scene.sceneNumber}`])) {
+    if (!sceneSlots.length || !images["background-0"] || sceneSlots.some((scene) => !images[`scene-${scene.sceneNumber}`])) {
       setContentProjectError("Hãy tạo bối cảnh đồng nhất và đầy đủ ảnh phân cảnh trước khi tạo video.");
       return null;
     }
     setIsGeneratingVideos(true);
     setContentProjectError("");
     setGeminiVideoProgress({ processed: 0, total: sceneSlots.length });
-    setGeminiVideoMessage("Đang mở Google Flow...");
+    setGeminiVideoMessage("Đang tạo video bằng Veo API...");
     try {
-      const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
-      if (!flow) throw new Error("Tính năng này chỉ dùng trong ứng dụng Modeling AI trên máy tính.");
       const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
       if (!selectedChannelId) throw new Error("Hãy chọn kênh trước khi tạo video.");
-      const result = await flow.runVideoJob(project.id, selectedChannelId, sceneSlots, (progress) => {
-        setGeminiVideoProgress({ processed: progress.processed, total: progress.total });
-        setGeminiVideoMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`);
-      });
-      setGeneratedVideos(result.videos);
+      const apiResponse = await fetch(`/api/v1/projects/${project.id}/videos`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channelId: selectedChannelId, slots: sceneSlots }) });
+      const apiBody = await apiResponse.json() as { data?: { status?: string; queueJobId?: string; videos: Record<string, string>; error?: string | null }; error?: { code?: string; message?: string; details?: { browserFallback?: boolean } } };
+      let result: { status: string; videos: Record<string, string> };
+      if (apiResponse.ok && apiBody.data) {
+        if (apiBody.data.queueJobId && apiBody.data.status !== "completed") {
+          result = await waitForApiVideos(project.id, sceneSlots, apiBody.data.queueJobId);
+        } else {
+          result = { status: apiBody.data.status ?? "completed", videos: apiBody.data.videos };
+          setGeminiVideoProgress({ processed: sceneSlots.length, total: sceneSlots.length });
+          setGeminiVideoMessage("Đã tạo và lưu video bằng Veo API.");
+        }
+      } else if (["API_PROVIDER_DISABLED", "API_PROVIDER_UNAVAILABLE"].includes(apiBody.error?.code ?? "") && apiBody.error?.details?.browserFallback !== false) {
+        const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
+        if (!flow) throw new Error(apiBody.error?.message ?? "Veo API chưa sẵn sàng và không có Flow fallback.");
+        await reportCodexProviderFallback("SCENES", apiBody.error?.message ?? "Veo API chưa sẵn sàng.");
+        setGeminiVideoMessage("Veo API chưa sẵn sàng; chuyển sang Flow fallback...");
+        result = await flow.runVideoJob(project.id, selectedChannelId, sceneSlots, (progress) => {
+          setGeminiVideoProgress({ processed: progress.processed, total: progress.total });
+          setGeminiVideoMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`);
+        });
+      } else {
+        throw new Error(apiBody.error?.message ?? "Không thể tạo video bằng Veo API.");
+      }
+      const mergedVideos = { ...existingVideos, ...result.videos };
+      setGeneratedVideos(mergedVideos);
       setShowGeneratedVideos(true);
       setGeminiVideoMessage("Đã tạo và lưu toàn bộ video 4 giây theo đúng thứ tự phân cảnh.");
-      return result.videos;
+      return mergedVideos;
     } catch (caught) {
-      setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo video bằng Google Flow.");
+      setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo video bằng Veo API/Flow.");
       return null;
     } finally {
       setIsGeneratingVideos(false);
     }
+  }
+  async function waitForApiVideos(projectId: string, sceneSlots: VideoSlot[], queueJobId: string): Promise<{ status: string; videos: Record<string, string> }> {
+    for (let attempt = 0; attempt < 450; attempt += 1) {
+      const response = await fetch(`/api/v1/projects/${projectId}/videos?status=1&queueJobId=${encodeURIComponent(queueJobId)}`);
+      const body = await response.json() as { data?: { status?: string; videos?: Record<string, string>; error?: string | null }; error?: { message?: string } };
+      if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể đọc tiến độ tạo video Veo.");
+      const videos = body.data.videos ?? {};
+      setGeminiVideoProgress({ processed: Object.keys(videos).filter((key) => sceneSlots.some((slot) => `scene-${slot.sceneNumber}` === key)).length, total: sceneSlots.length });
+      if (body.data.status === "completed" || body.data.status === "succeeded") {
+        setGeminiVideoMessage("Đã tạo và lưu video bằng Veo API.");
+        return { status: "completed", videos };
+      }
+      if (body.data.status === "failed") throw new Error(body.data.error ?? "Worker Veo không hoàn tất.");
+      setGeminiVideoMessage(`Worker Veo đang chạy — đã nhận ${Object.keys(videos).length}/${sceneSlots.length} video cảnh.`);
+      await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+    }
+    throw new Error("Tạo video Veo vượt quá thời gian chờ. Có thể mở Lịch sử hoạt động để chạy lại.");
   }
   function defaultVideoEditScenes(project: ContentProjectResult): VideoEditScene[] {
     return project.scenes.map((scene) => ({ sceneNumber: scene.sceneNumber, trimStart: 0, trimEnd: 0 }));
@@ -695,8 +755,8 @@ export function ViralDashboard() {
     return [
       { key: "modeling-idea", label: "Tạo Modeling Idea", status: "pending" },
       { key: "content-project", label: "Tạo Content Project và phân cảnh", status: "pending" },
-      { key: "images", label: "Tạo toàn bộ ảnh bằng Google Flow", status: "pending" },
-      { key: "videos", label: "Tạo video theo từng phân cảnh bằng Google Flow", status: "pending" },
+      { key: "images", label: "Tạo và kiểm tra ảnh bằng Google Image API", status: "pending" },
+      { key: "videos", label: "Tạo video phân cảnh bằng Veo API", status: "pending" },
       { key: "final-video", label: "Ghép và xuất video hoàn chỉnh", status: "pending" },
     ];
   }
@@ -760,15 +820,15 @@ export function ViralDashboard() {
       await updateAutomationRun(runId, currentSteps, { projectId: project.id, ideaId: idea.id });
 
       activeStep = "images";
-      await changeStep(activeStep, "running", "Đang mở Google Flow và tạo ảnh...");
+      await changeStep(activeStep, "running", "Đang tạo ảnh bằng Google Image API...");
       const images = await generateAllProjectImages(project);
-      if (!images) throw new Error("Không tạo đủ ảnh bằng Google Flow.");
+      if (!images) throw new Error("Không tạo đủ ảnh bằng Google Image API/Flow.");
       await changeStep(activeStep, "completed", `Đã tạo ${Object.keys(images).length} ảnh và lưu vào app.`);
 
       activeStep = "videos";
       await changeStep(activeStep, "running", "Đang tạo video cho từng phân cảnh...");
       const videos = await generateAllProjectVideos(project, images);
-      if (!videos) throw new Error("Không tạo đủ video phân cảnh bằng Google Flow.");
+      if (!videos) throw new Error("Không tạo đủ video bằng Veo API/Flow.");
       await changeStep(activeStep, "completed", `Đã tạo ${Object.keys(videos).length} video phân cảnh.`);
 
       activeStep = "final-video";
@@ -792,6 +852,129 @@ export function ViralDashboard() {
           setError(`${message} Không thể lưu đầy đủ lịch sử hoạt động.`);
         }
       }
+    } finally {
+      setIsAutomaticRunning(false);
+    }
+  }
+  function showCodexProgress(job: CodexJobResult) {
+    setCodexJobId(job.id);
+    setAutomationRunId(job.automationRunId ?? job.id);
+    setAutomationSteps(job.stages.map((stage) => ({
+      key: stage.stage.toLowerCase(),
+      label: stage.stage === "ANALYSIS" ? "Phân tích Source Video" : stage.stage === "MODELING" ? "Tạo Modeling Idea" : stage.stage === "PROJECT" ? "Tạo Content Project và phân cảnh" : stage.stage === "ASSETS" ? "Tạo và kiểm tra ảnh" : stage.stage === "SCENES" ? "Tạo và kiểm tra video phân cảnh" : stage.stage === "FINAL_ASSEMBLY" ? "Ghép video hoàn chỉnh" : stage.stage === "FINAL_AUDIT" ? "Final Audit" : "Post-Run Review",
+      status: stage.status === "COMPLETED" || stage.status === "SKIPPED" ? "completed" : stage.status === "RUNNING" || stage.status === "RETRYING" ? "running" : stage.status === "FAILED" ? "failed" : "pending",
+      detail: stage.validationResult ? `Validation: ${stage.validationResult}` : undefined,
+    })));
+    setCodexStatus(job.status === "RECOVERING" ? `Codex đang recovery: ${job.nextAction.strategy ?? job.nextAction.reason ?? "đang chọn chiến lược"}` : job.status === "NEEDS_HUMAN" ? `Cần kiểm tra thủ công: ${job.nextAction.reason ?? "đã hết giới hạn recovery"}` : job.status === "COMPLETED" ? "Final Audit PASS — VIDEO COMPLETE" : `Bước tiếp theo: ${job.nextAction.stage ?? job.nextAction.name}`);
+  }
+  async function createCodexRun(settings: AutomationSettings) {
+    const response = await fetch("/api/v1/codex/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sourceVideoId: analysisVideoId, idempotencyKey: `codex:${analysisVideoId}:${crypto.randomUUID()}`, settings }) });
+    const body = await response.json() as { data?: CodexJobResult; error?: { message?: string } };
+    if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể tạo Codex job.");
+    return body.data;
+  }
+  async function reportCodexStage(jobId: string, type: "STAGE_STARTED" | "STAGE_COMPLETED" | "STAGE_FAILED" | "PROVIDER_FALLBACK", stage: CodexStage, fields: { actualState?: Record<string, unknown>; error?: string; provider?: string; fallbackProvider?: string } = {}) {
+    const response = await fetch(`/api/v1/codex/jobs/${jobId}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type, stage, ...fields }) });
+    const body = await response.json() as { data?: CodexJobResult; error?: { message?: string } };
+    if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể ghi Codex event.");
+    showCodexProgress(body.data);
+    return body.data;
+  }
+  async function reportCodexProviderFallback(stage: "ASSETS" | "SCENES", reason: string) {
+    if (!codexJobId) return;
+    try {
+      await reportCodexStage(codexJobId, "PROVIDER_FALLBACK", stage, { provider: stage === "ASSETS" ? "GOOGLE_IMAGE_API" : "VEO_API", fallbackProvider: "FLOW_BROWSER", error: reason });
+    } catch {
+      // Fallback remains usable even if the optional Codex telemetry call fails.
+    }
+  }
+  async function requestQualityValidation(jobId: string, stage: "ASSETS" | "SCENES" | "FINAL_AUDIT") {
+    const response = await fetch(`/api/v1/codex/jobs/${jobId}/validate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ stage }) });
+    const body = await response.json() as { data?: QualityResult; error?: { message?: string } };
+    if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Quality Validator không thể kiểm tra kết quả.");
+    return body.data;
+  }
+  const targetSceneNumbers = (action: CodexAction) => (action.targetIds ?? []).map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0);
+  async function runWithCodex() {
+    if (!analysisVideoId || isAutomaticRunning) return;
+    const settings: AutomationSettings = { artStyle: ideaArtStyle.trim() || "Hoạt hình 3D", aspectRatio };
+    let idea = modelingIdea;
+    let project = contentProject;
+    let images = generatedImages;
+    let videos = generatedVideos;
+    let finalVideo = finalVideoUrl;
+    let job: CodexJobResult | null = null;
+    setExecutionMode("codex");
+    setIsAutomaticRunning(true);
+    setCodexStatus("Đang tạo Execution Plan...");
+    setContentProjectError("");
+    setError("");
+    try {
+      job = await createCodexRun(settings);
+      showCodexProgress(job);
+      let action = job.nextAction;
+      for (let guard = 0; guard < 30 && action.name !== "jobComplete"; guard += 1) {
+        if (action.name === "waitForHuman") throw new Error(action.reason ?? "Codex job cần người dùng kiểm tra.");
+        const stage = action.stage;
+        if (!stage) throw new Error("Codex không trả về stage hợp lệ.");
+        await reportCodexStage(job.id, "STAGE_STARTED", stage);
+        try {
+          let actualState: Record<string, unknown> = {};
+          if (action.name === "runAnalysisStage") {
+            if (!analysisResult) throw new Error("Cần hoàn thành phân tích Source Video trước khi tiếp tục.");
+            actualState = { analysisId: analysisVideoId };
+          } else if (action.name === "runModelingStage") {
+            idea = await generateModelingIdea();
+            if (!idea) throw new Error("Không tạo được Modeling Idea.");
+            actualState = { ideaId: idea.id, title: idea.title };
+          } else if (action.name === "runProjectDevelopmentStage") {
+            if (!idea) throw new Error("Thiếu Modeling Idea để tạo Content Project.");
+            project = await createContentProject(idea);
+            if (!project) throw new Error("Không tạo được Content Project.");
+            actualState = { projectId: project.id, sceneCount: project.scenes.length };
+          } else if (action.name === "runAssetStage" || action.name === "regenerateAsset") {
+            if (!project) throw new Error("Thiếu Content Project để tạo ảnh.");
+            const targets = action.name === "regenerateAsset" ? targetSceneNumbers(action) : undefined;
+            images = await generateAllProjectImages(project, targets, images) ?? images;
+            if (!images["background-0"] || project.scenes.some((scene) => !images[`scene-${scene.sceneNumber}`])) throw new Error("Chưa tạo đủ ảnh bắt đầu phân cảnh.");
+            const quality = await requestQualityValidation(job.id, "ASSETS");
+            actualState = { generatedAssetKeys: Object.keys(images), semanticVerdict: quality.verdict, semanticIssues: quality.issues };
+          } else if (action.name === "runSceneGenerationStage" || action.name === "regenerateScene") {
+            if (!project) throw new Error("Thiếu Content Project để tạo video.");
+            const targets = action.name === "regenerateScene" ? targetSceneNumbers(action) : undefined;
+            videos = await generateAllProjectVideos(project, images, targets, videos) ?? videos;
+            if (project.scenes.some((scene) => !videos[`scene-${scene.sceneNumber}`])) throw new Error("Chưa tạo đủ video phân cảnh.");
+            const quality = await requestQualityValidation(job.id, "SCENES");
+            actualState = { generatedSceneNumbers: project.scenes.filter((scene) => videos[`scene-${scene.sceneNumber}`]).map((scene) => scene.sceneNumber), semanticVerdict: quality.verdict, semanticIssues: quality.issues };
+          } else if (action.name === "runFinalAssembly") {
+            if (!project) throw new Error("Thiếu Content Project để ghép video.");
+            finalVideo = await renderFinalProjectVideo(project, videos) ?? "";
+            if (!finalVideo) throw new Error("Không xuất được video hoàn chỉnh.");
+            actualState = { finalVideoAvailable: true, finalVideoUrl: finalVideo, sceneOrder: project.scenes.map((scene) => scene.sceneNumber), aspectRatio, hasAudio: true };
+          } else if (action.name === "runFinalAudit") {
+            if (!project || !finalVideo) throw new Error("Chưa có video cuối để Final Audit.");
+            const quality = await requestQualityValidation(job.id, "FINAL_AUDIT");
+            actualState = { finalVideoAvailable: true, finalVideoUrl: finalVideo, generatedSceneNumbers: project.scenes.map((scene) => scene.sceneNumber), sceneOrder: project.scenes.map((scene) => scene.sceneNumber), aspectRatio, hasAudio: true, semanticVerdict: quality.verdict, semanticIssues: quality.issues };
+          } else if (action.name === "runPostRunReview") {
+            actualState = { completed: true };
+          } else {
+            throw new Error(`Codex tool không được UI hỗ trợ: ${action.name}`);
+          }
+          job = await reportCodexStage(job.id, "STAGE_COMPLETED", stage, { actualState, provider: stage === "ASSETS" || stage === "SCENES" || stage === "FINAL_AUDIT" ? "GEMINI" : undefined });
+          action = job.nextAction;
+        } catch (caught) {
+          const failure = caught instanceof Error ? caught.message : "Stage không hoàn tất.";
+          job = await reportCodexStage(job.id, "STAGE_FAILED", stage, { error: failure, provider: stage === "ASSETS" || stage === "SCENES" ? "FLOW" : undefined });
+          action = job.nextAction;
+        }
+      }
+      if (!job || job.status !== "COMPLETED") throw new Error("Codex job chưa đạt Final Audit PASS.");
+      setMessage("Codex đã hoàn thành video, Final Audit PASS và lưu Post-Run Review trong Lịch sử hoạt động.");
+    } catch (caught) {
+      const failure = caught instanceof Error ? caught.message : "Codex job chưa hoàn tất.";
+      setContentProjectError(failure);
+      setError(failure);
+      setCodexStatus(failure);
     } finally {
       setIsAutomaticRunning(false);
     }
@@ -966,9 +1149,11 @@ export function ViralDashboard() {
               <div className="mt-4 flex flex-wrap gap-3">
                 <button type="button" onClick={() => { setExecutionMode("manual"); setMessage("Đã chọn chạy thủ công. Thực hiện từng bước bên dưới."); }} disabled={isAutomaticRunning} className={`rounded-lg px-4 py-2.5 text-sm font-bold ${executionMode === "manual" ? "bg-[#0b5799] text-white" : "border border-[#cbd9ea] bg-white text-[#0b3262]"}`}>Chạy thủ công</button>
                 <button type="button" onClick={() => void runAutomaticPipeline()} disabled={isAutomaticRunning} className="rounded-lg bg-[#7c3aed] px-4 py-2.5 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60">{isAutomaticRunning ? "Đang chạy tự động..." : "Chạy tự động đến video hoàn chỉnh"}</button>
+                <button type="button" onClick={() => void runWithCodex()} disabled={isAutomaticRunning} className={`rounded-lg px-4 py-2.5 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60 ${executionMode === "codex" ? "bg-slate-950" : "bg-[#0f766e]"}`}>{isAutomaticRunning && executionMode === "codex" ? "Codex đang điều phối..." : "Run with Codex"}</button>
               </div>
               {automationSteps.length > 0 && <div className="mt-4 space-y-2 rounded-lg border border-violet-200 bg-white p-3">{automationSteps.map((step) => <div key={step.key} className="flex items-center justify-between gap-3 text-sm"><span className="font-semibold text-[#0b3262]">{step.label}</span><span className={step.status === "completed" ? "font-bold text-emerald-700" : step.status === "failed" ? "font-bold text-rose-700" : step.status === "running" ? "font-bold text-amber-700" : "text-[#7990b0]"}>{step.status === "completed" ? "Đã xong" : step.status === "failed" ? "Lỗi" : step.status === "running" ? "Đang chạy" : "Chờ chạy"}</span></div>)}</div>}
               {automationRunId && <p className="mt-2 text-xs text-[#7990b0]">Mã phiên: {automationRunId}. Có thể xem lại tại Lịch sử hoạt động.</p>}
+              {codexJobId && <p className="mt-2 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-xs font-semibold text-teal-800">CODEX AGENT · {codexStatus} · Job {codexJobId}</p>}
             </div>
             <div className="mt-6 rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4">
               <p className="font-extrabold text-[#0b3262]">Tạo Modeling Idea</p>
@@ -982,8 +1167,8 @@ export function ViralDashboard() {
                  <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Tạo hình và phân cảnh</p><p className="mt-1 text-sm text-[#6883aa]">Giữ nhân vật và bối cảnh đồng nhất trong toàn bộ video.</p><div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end"><label className="flex-1 text-sm font-semibold text-[#0b3262]">Kích thước khung hình<select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value as AutomationSettings["aspectRatio"])} disabled={isAutomaticRunning} className="mt-1 w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-2.5 font-normal"><option value="9:16">9:16 · Dọc</option><option value="16:9">16:9 · Ngang</option><option value="1:1">1:1 · Vuông</option><option value="4:5">4:5 · Dọc mạng xã hội</option></select></label><button type="button" onClick={() => void createContentProject()} disabled={isCreatingProject || isAutomaticRunning} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isCreatingProject ? "Đang tạo..." : "Tạo hình tượng & phân cảnh"}</button></div>{contentProjectError && <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{contentProjectError}</p>}{contentProject && <div className="mt-5 space-y-4 border-t border-[#d8e3f1] pt-4"><AnalysisBlock label="Thiết kế nhân vật đồng nhất" value={JSON.stringify(contentProject.characterDesign, null, 2)} /><AnalysisBlock label="Bối cảnh đồng nhất" value={JSON.stringify(contentProject.backgroundDesign, null, 2)} /><AnalysisBlock label="Khung hình" value={String(contentProject.artDirection.aspectRatio ?? aspectRatio)} /><div><p className="font-extrabold text-[#0b3262]">Các phân cảnh</p><div className="mt-2 space-y-3">{contentProject.scenes.map((scene) => <div key={scene.sceneNumber} className="rounded-lg border border-[#d8e3f1] bg-white p-3"><p className="font-bold text-[#0b5799]">Cảnh {scene.sceneNumber}</p><p className="mt-1"><strong>Hình ảnh:</strong> {scene.visualBlock}</p><p className="mt-1"><strong>Hành động:</strong> {scene.actionBlock}</p><p className="mt-1"><strong>Âm thanh:</strong> {scene.audioBlock}</p><p className="mt-1"><strong>Prompt ảnh bắt đầu:</strong> {scene.startFramePrompt ?? "Chưa có; app sẽ dùng prompt dự phòng cho ảnh bắt đầu."}</p><p className="mt-1"><strong>Prompt video 4 giây:</strong> {scene.englishPrompt ?? "Chưa có; app sẽ dùng prompt dự phòng cho video."}</p></div>)}</div></div></div>}</div>
               </div>}
               {contentProject && <div className="mt-4 space-y-3">
-                <button type="button" onClick={() => void generateAllProjectImages()} disabled={isGeneratingImages || isAutomaticRunning} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isGeneratingImages ? `Đang tạo ảnh ${flowImageProgress.processed}/${flowImageProgress.total}...` : "Tự động tạo toàn bộ ảnh bằng Google Flow"}</button>
-                {flowImageSlots.length > 0 && <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Quy trình Google Flow</p><p className="mt-1 text-sm leading-6 text-[#6883aa]">App tạo bối cảnh đồng nhất trước, sau đó mỗi ảnh cảnh dùng lần lượt ảnh nhân vật chính và ảnh bối cảnh làm tham chiếu. Mỗi ảnh được tạo và tải về thành công rồi mới chuyển sang bước tiếp theo.</p>{flowImageMessage && <p className="mt-2 text-sm font-semibold text-[#0b5799]">{flowImageMessage}</p>}<p className="mt-2 text-xs text-[#6883aa]">Nếu lần đầu dùng, hãy đăng nhập Google Flow trong cửa sổ mở ra. Không xử lý CAPTCHA tự động.</p></div>}
+                <button type="button" onClick={() => void generateAllProjectImages()} disabled={isGeneratingImages || isAutomaticRunning} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isGeneratingImages ? `Đang tạo ảnh ${flowImageProgress.processed}/${flowImageProgress.total}...` : "Tự động tạo toàn bộ ảnh bằng Google Image API"}</button>
+                {flowImageSlots.length > 0 && <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Quy trình Google Image API</p><p className="mt-1 text-sm leading-6 text-[#6883aa]">App tạo bối cảnh đồng nhất trước, sau đó mỗi ảnh cảnh dùng lần lượt ảnh nhân vật chính và ảnh bối cảnh làm tham chiếu. Mỗi ảnh được tạo và lưu thành công rồi mới chuyển sang bước tiếp theo; nếu API chưa sẵn sàng, Flow fallback hiện tại sẽ được dùng khi được bật.</p>{flowImageMessage && <p className="mt-2 text-sm font-semibold text-[#0b5799]">{flowImageMessage}</p>}<p className="mt-2 text-xs text-[#6883aa]">Flow fallback vẫn cần đăng nhập Google Flow trong cửa sổ mở ra. Không xử lý CAPTCHA tự động.</p></div>}
                 {Object.keys(generatedImages).length > 0 && <button type="button" onClick={() => setShowGeneratedImages((visible) => !visible)} className="ml-2 rounded-lg border border-[#0b5799] px-4 py-2.5 text-sm font-bold text-[#0b5799]">{showGeneratedImages ? "Ẩn ảnh" : "Xem ảnh"}</button>}
                 {showGeneratedImages && <div className="mt-4 grid gap-4 sm:grid-cols-2">{generatedImages["character-0"] && <figure><img src={generatedImages["character-0"]} alt="Hình tượng nhân vật" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Nhân vật</figcaption></figure>}{generatedImages["background-0"] && <figure><img src={generatedImages["background-0"]} alt="Bối cảnh đồng nhất" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Bối cảnh</figcaption></figure>}{contentProject.scenes.map((scene) => generatedImages[`scene-${scene.sceneNumber}`] && <figure key={`image-${scene.sceneNumber}`}><img src={generatedImages[`scene-${scene.sceneNumber}`]} alt={`Ảnh cảnh ${scene.sceneNumber}`} className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Cảnh {scene.sceneNumber}</figcaption></figure>)}</div>}
               </div>}

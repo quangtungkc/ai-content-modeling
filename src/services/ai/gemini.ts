@@ -100,18 +100,27 @@ export class GeminiProvider implements AIProvider {
     const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     try { return assetValidationSchema.parse(parseJsonText(body.candidates?.[0]?.content?.parts?.[0]?.text ?? "")); } catch (error) { throw new AIStructuredOutputError(this.name, error); }
   }
-  async generateImage(prompt: string, aspectRatio: string) {
+  async generateImage(prompt: string, aspectRatio: string, references: Array<{ mimeType: string; data: string }> = []) {
     if (!this.apiKey) throw new AIProviderNotConfiguredError(this.name);
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/${process.env.GEMINI_IMAGE_MODEL ?? "gemini-3.1-flash-image"}:generateContent`, {
+    const input = [
+      ...references.map((reference) => ({ type: "image", mime_type: reference.mimeType, data: reference.data })),
+      { type: "text", text: `${prompt}\nOutput aspect ratio: ${aspectRatio}.` },
+    ];
+    const response = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": this.apiKey },
-      body: JSON.stringify({ contents: [{ parts: [{ text: `${prompt}\nOutput aspect ratio: ${aspectRatio}.` }] }], generationConfig: { responseModalities: ["TEXT", "IMAGE"] } }),
+      body: JSON.stringify({ model: process.env.GEMINI_IMAGE_MODEL ?? "gemini-3.1-flash-image", input, response_format: { type: "image", mime_type: "image/jpeg", aspect_ratio: aspectRatio, image_size: "1K" } }),
     });
     if (!response.ok) throw new AIStructuredOutputError(this.name, await readApiError(response));
-    const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ inlineData?: { mimeType?: string; data?: string } }> } }> };
-    const image = body.candidates?.[0]?.content?.parts?.find((part) => part.inlineData?.data)?.inlineData;
-    if (!image?.data) throw new AIStructuredOutputError(this.name, { message: "Gemini không trả về dữ liệu ảnh. Kiểm tra quyền truy cập model tạo ảnh của API key." });
-    return { mimeType: image.mimeType ?? "image/png", data: image.data };
+    const body = await response.json() as { output_image?: { mime_type?: string; data?: string }; steps?: Array<{ type?: string; content?: Array<{ type?: string; mime_type?: string; data?: string }> }> };
+    const image = body.output_image?.data
+      ? { mimeType: body.output_image.mime_type ?? "image/png", data: body.output_image.data }
+      : (() => {
+        const part = body.steps?.flatMap((step) => step.type === "model_output" ? (step.content ?? []) : []).find((item) => item.type === "image" && item.data);
+        return part?.data ? { mimeType: part.mime_type ?? "image/png", data: part.data } : undefined;
+      })();
+    if (!image?.data) throw new AIStructuredOutputError(this.name, { message: "Gemini Image API không trả về dữ liệu ảnh." });
+    return { mimeType: image.mimeType, data: image.data };
   }
   private async request<T>(instruction: string, input: unknown, schema: { parse(value: unknown): T }, normalize?: (value: unknown) => unknown, responseSchema?: Record<string, unknown>, options?: { includeMainCharacterImage?: boolean }): Promise<T> {
     if (!this.apiKey) throw new AIProviderNotConfiguredError(this.name);
@@ -132,10 +141,10 @@ export class GeminiProvider implements AIProvider {
       // Ưu tiên chuyển ngay sang model nhẹ hơn khi model chính báo quá tải.
       const attempts = modelIndex === 0 ? 1 : 3;
       for (let attempt = 0; attempt < attempts; attempt += 1) {
-        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${this.apiKey}`;
+        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
         const response = await fetch(endpoint, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "x-goog-api-key": this.apiKey },
           body: JSON.stringify(body),
         });
         if (response.ok) return response;

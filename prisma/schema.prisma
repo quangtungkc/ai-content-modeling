@@ -519,3 +519,124 @@ model AutomationRun {
 
   @@index([userId, startedAt])
 }
+
+model CodexJob {
+  id                 String   @id @default(cuid())
+  userId             String
+  channelId          String
+  sourceVideoId      String
+  contentProjectId   String?
+  automationRunId    String?
+  idempotencyKey     String   @unique
+  sessionId          String   @unique
+  previousResponseId String?
+  status             String   @default("PLANNING")
+  currentStage       String   @default("PLAN")
+  currentAction      String?
+  retryCount         Int      @default(0)
+  checkpoint         Json     @default("{}")
+  finalVideoId       String?
+  finalVideoPath     String?
+  finalVideoUrl      String?
+  failureReason      String?
+  startedAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  completedAt        DateTime?
+  stages             CodexStageState[]
+  events             CodexEvent[]
+  experiences        AgentExperience[]
+  improvements       AppImprovementCandidate[]
+
+  @@index([userId, startedAt(sort: Desc)])
+  @@index([status, updatedAt])
+  @@index([sourceVideoId, status])
+}
+
+model CodexStageState {
+  id                 String   @id @default(cuid())
+  jobId              String
+  stage              String
+  status             String   @default("PENDING")
+  expectedState      Json?
+  actualState        Json?
+  validationResult   String?
+  validationIssues   Json?
+  retryCount         Int      @default(0)
+  maxRetries         Int      @default(3)
+  lastErrorSignature String?
+  lastStrategy       String?
+  startedAt          DateTime?
+  completedAt        DateTime?
+  updatedAt          DateTime @updatedAt
+  job                CodexJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, stage])
+  @@index([jobId, status])
+}
+
+model CodexEvent {
+  id               String   @id @default(cuid())
+  jobId            String
+  sequence         Int
+  type             String
+  stage            String?
+  level            String   @default("INFO")
+  payload          Json     @default("{}")
+  reasoningSummary String?
+  createdAt        DateTime @default(now())
+  job              CodexJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, sequence])
+  @@index([jobId, createdAt])
+  @@index([type, createdAt])
+}
+
+model AgentExperience {
+  id             String    @id @default(cuid())
+  jobId          String?
+  stage          String
+  provider       String?
+  errorSignature String
+  errorMessage   String?
+  expectedState  Json?
+  actualState    Json?
+  rootCause      String?
+  attemptedFix   String?
+  successfulFix  String?
+  result         String
+  occurrenceCount Int      @default(1)
+  createdAt      DateTime  @default(now())
+  lastSeenAt     DateTime  @default(now())
+  job            CodexJob? @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  @@index([stage, provider, errorSignature])
+  @@index([result, lastSeenAt])
+}
+
+model AppImprovementCandidate {
+  id                   String    @id @default(cuid())
+  jobId                String?
+  title                String
+  category             String
+  affectedModule       String
+  evidence             Json
+  relatedJobs          Json      @default("[]")
+  occurrenceCount      Int       @default(1)
+  rootCause            String
+  currentBehavior      String
+  desiredBehavior      String
+  proposedFix          String
+  externalReferences   Json      @default("[]")
+  alternativeSolutions Json      @default("[]")
+  riskLevel            String
+  expectedBenefit      String
+  requiredTests        Json      @default("[]")
+  migrationImpact      String
+  status               String    @default("PROPOSED")
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  job                  CodexJob? @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt(sort: Desc)])
+  @@index([affectedModule, category])
+}

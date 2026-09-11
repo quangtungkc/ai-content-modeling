@@ -9,6 +9,17 @@ const envSchema = z.object({
   META_APP_ID: z.string().optional(),
   META_APP_SECRET: z.string().optional(),
   META_GRAPH_VERSION: z.string().default("v24.0"),
+  CODEX_ORCHESTRATOR_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  CODEX_AUTO_RECOVERY_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  CODEX_POST_RUN_REVIEW_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  CODEX_EXTERNAL_RESEARCH_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  CODEX_MODEL: z.string().default("gpt-5"),
+  CODEX_MAX_RECOVERY_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
+  GOOGLE_API_FIRST_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  GOOGLE_BROWSER_FALLBACK_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  GEMINI_API_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  GOOGLE_IMAGE_API_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  VEO_API_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
 });
 
 export function getEnv() {
@@ -21,5 +32,16 @@ export function getEnv() {
     META_APP_ID: process.env.META_APP_ID,
     META_APP_SECRET: process.env.META_APP_SECRET,
     META_GRAPH_VERSION: process.env.META_GRAPH_VERSION,
+    CODEX_ORCHESTRATOR_ENABLED: process.env.CODEX_ORCHESTRATOR_ENABLED,
+    CODEX_AUTO_RECOVERY_ENABLED: process.env.CODEX_AUTO_RECOVERY_ENABLED,
+    CODEX_POST_RUN_REVIEW_ENABLED: process.env.CODEX_POST_RUN_REVIEW_ENABLED,
+    CODEX_EXTERNAL_RESEARCH_ENABLED: process.env.CODEX_EXTERNAL_RESEARCH_ENABLED,
+    CODEX_MODEL: process.env.CODEX_MODEL,
+    CODEX_MAX_RECOVERY_ATTEMPTS: process.env.CODEX_MAX_RECOVERY_ATTEMPTS,
+    GOOGLE_API_FIRST_ENABLED: process.env.GOOGLE_API_FIRST_ENABLED,
+    GOOGLE_BROWSER_FALLBACK_ENABLED: process.env.GOOGLE_BROWSER_FALLBACK_ENABLED,
+    GEMINI_API_ENABLED: process.env.GEMINI_API_ENABLED,
+    GOOGLE_IMAGE_API_ENABLED: process.env.GOOGLE_IMAGE_API_ENABLED,
+    VEO_API_ENABLED: process.env.VEO_API_ENABLED,
   });
 }

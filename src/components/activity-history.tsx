@@ -24,6 +24,16 @@ type AutomationRun = {
   completedAt: string | null;
   sourceVideoUrl: string | null;
   finalVideoUrl: string | null;
+  codexAgent?: {
+    id: string;
+    status: string;
+    sessionId: string;
+    currentStage: string;
+    currentAction: string | null;
+    retryCount: number;
+    stages: Array<{ stage: string; status: string; retryCount: number; validationResult: string | null; lastStrategy: string | null }>;
+    events: Array<{ id: string; sequence: number; type: string; stage: string | null; payload: Record<string, unknown>; reasoningSummary: string | null; createdAt: string }>;
+  } | null;
 };
 
 export function ActivityHistory() {
@@ -107,7 +117,7 @@ export function ActivityHistory() {
             {runs.map((run) => (
               <button type="button" key={run.id} onClick={() => setSelectedRunId(run.id)} className={`w-full rounded-xl border p-4 text-left shadow-sm ${selectedRunId === run.id ? "border-[#7c3aed] bg-violet-50" : "border-[#d8e3f1] bg-white"}`}>
                 <div className="flex items-center justify-between gap-3">
-                  <p className="font-extrabold text-[#0b3262]">Chạy tự động</p>
+                  <p className="font-extrabold text-[#0b3262]">{run.codexAgent ? "Run with Codex" : "Chạy tự động"}</p>
                   <StatusBadge status={run.status} />
                 </div>
                 <p className="mt-2 text-xs text-[#6883aa]">{formatDate(run.startedAt)}</p>
@@ -134,6 +144,12 @@ export function ActivityHistory() {
                 {activeStep && <p className="mt-1">Đang thực hiện: {activeStep.label}</p>}
                 {selectedRun.status === "SUCCEEDED" && <p className="mt-1">Quy trình đã hoàn thành toàn bộ.</p>}
               </div>
+              {selectedRun.codexAgent && <div className="mt-4 rounded-lg border border-teal-200 bg-teal-50 px-4 py-3 text-sm text-teal-950">
+                <p className="font-extrabold">CODEX AGENT · {selectedRun.codexAgent.status}</p>
+                <p className="mt-1 text-xs">Session: {selectedRun.codexAgent.sessionId}</p>
+                <p className="mt-1">Stage: {selectedRun.codexAgent.currentStage}{selectedRun.codexAgent.currentAction ? ` · Action: ${selectedRun.codexAgent.currentAction}` : ""}</p>
+                <p className="mt-1">Tổng recovery: {selectedRun.codexAgent.retryCount}</p>
+              </div>}
               <div className="mt-5 rounded-lg bg-[#f7f9fc] p-4 text-sm text-[#0b3262]">
                 <p><strong>Phong cách:</strong> {selectedRun.settings.artStyle}</p>
                 <p className="mt-1"><strong>Khung hình:</strong> {selectedRun.settings.aspectRatio}</p>
@@ -156,6 +172,7 @@ export function ActivityHistory() {
                       {step.detail && <p className="mt-1 text-[#6883aa]">{step.detail}</p>}
                       {step.error && <p className="mt-1 text-rose-700">{step.error}</p>}
                       {(step.startedAt || step.completedAt) && <p className="mt-2 text-xs text-[#7990b0]">{step.startedAt && `Bắt đầu: ${formatDate(step.startedAt)}`}{step.completedAt && ` · Kết thúc: ${formatDate(step.completedAt)}`}</p>}
+                      {selectedRun.codexAgent && <CodexStepEvents events={selectedRun.codexAgent.events.filter((event) => normalizeStageKey(event.stage) === step.key)} />}
                       {step.key === "final-video" && selectedRun.finalVideoUrl && <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
                         <p className="font-extrabold text-emerald-800">Video kết quả cuối cùng</p>
                         <video controls preload="metadata" src={selectedRun.finalVideoUrl} className="mt-3 max-h-[420px] w-full rounded-lg bg-black" />
@@ -191,6 +208,23 @@ export function ActivityHistory() {
       )}
     </section>
   );
+}
+
+function normalizeStageKey(stage: string | null) {
+  if (stage === "FINAL_ASSEMBLY") return "final-video";
+  return stage?.toLowerCase().replaceAll("_", "-") ?? "";
+}
+
+function CodexStepEvents({ events }: { events: NonNullable<AutomationRun["codexAgent"]>["events"] }) {
+  if (!events.length) return <p className="mt-2 text-xs text-[#7990b0]">Chưa có Codex event cho bước này.</p>;
+  return <div className="mt-3 space-y-2 border-t border-[#e4ebf4] pt-3">
+    <p className="text-xs font-extrabold uppercase tracking-wide text-teal-700">Event log có cấu trúc</p>
+    {events.map((event) => <div key={event.id} className="rounded-md bg-white px-3 py-2 text-xs text-[#0b3262]">
+      <div className="flex flex-wrap justify-between gap-2"><strong>#{event.sequence} · {event.type}</strong><span className="text-[#7990b0]">{formatDate(event.createdAt)}</span></div>
+      {event.reasoningSummary && <p className="mt-1">{event.reasoningSummary}</p>}
+      {Object.keys(event.payload ?? {}).length > 0 && <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words text-[11px] text-[#6883aa]">{JSON.stringify(event.payload, null, 2)}</pre>}
+    </div>)}
+  </div>;
 }
 
 function StatusBadge({ status }: { status: AutomationRun["status"] }) {

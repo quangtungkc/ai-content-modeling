@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { getRequiredSession } from "@/lib/auth/provider";
 import { AppError, toErrorResponse } from "@/lib/errors";
 import { readProjectImage, type GeneratedImageKind } from "@/modules/assets/image-generation-service";
+import { generateProjectImagesWithGoogleApi } from "@/modules/generation/google-api-pipeline";
 
 type Context = { params: Promise<{ id: string }> };
 const normalize = (error: unknown) => error instanceof Error && error.message === "AUTHENTICATION_REQUIRED" ? new AppError("AUTHENTICATION_REQUIRED", "Yêu cầu đăng nhập.", 401) : error;
@@ -10,11 +11,13 @@ const kinds = new Set<GeneratedImageKind>(["character", "background", "scene"]);
 export async function POST(request: Request, context: Context) {
   const requestId = randomUUID();
   try {
-    await getRequiredSession();
-    await context.params;
-    const body = await request.json() as { kind?: GeneratedImageKind; sceneNumber?: number; prompt?: string; aspectRatio?: string };
-    if (!body.kind || !kinds.has(body.kind) || !body.prompt?.trim()) throw new AppError("VALIDATION_ERROR", "Thiếu loại ảnh hoặc prompt.", 400);
-    throw new AppError("FLOW_IMAGE_GENERATION_REQUIRED", "Tạo ảnh hiện được thực hiện bằng Google Flow trong ứng dụng Modeling AI trên máy tính.", 409);
+    const session = await getRequiredSession();
+    const { id } = await context.params;
+    const body = await request.json() as { channelId?: string; slots?: Array<{ kind?: GeneratedImageKind; sceneNumber?: number; label?: string; prompt?: string; aspectRatio?: string }> };
+    if (!body.channelId || !Array.isArray(body.slots) || !body.slots.length) throw new AppError("VALIDATION_ERROR", "Thiếu channelId hoặc danh sách ảnh.", 400);
+    const slots = body.slots.map((slot) => ({ kind: slot.kind, sceneNumber: slot.sceneNumber, label: slot.label, prompt: slot.prompt, aspectRatio: slot.aspectRatio })).filter((slot) => slot.kind && kinds.has(slot.kind) && typeof slot.prompt === "string" && slot.prompt.trim()) as Array<{ kind: "background" | "scene"; sceneNumber?: number; label?: string; prompt: string; aspectRatio?: string }>;
+    if (slots.length !== body.slots.length) throw new AppError("VALIDATION_ERROR", "Dữ liệu ảnh không hợp lệ.", 400);
+    return Response.json({ data: await generateProjectImagesWithGoogleApi(id, session.userId, body.channelId, slots), requestId }, { status: 202 });
   } catch (error) { return toErrorResponse(normalize(error), requestId); }
 }
 

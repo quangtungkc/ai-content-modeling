@@ -6,6 +6,7 @@ import { AppError, toErrorResponse } from "@/lib/errors";
 import { db } from "@/lib/db";
 import { hasProjectFinalVideo } from "@/modules/assets/image-generation-service";
 import { deleteAutomationRunWithProject } from "@/modules/projects/deletion-service";
+import { ensureCodexStorage } from "@/modules/codex-orchestrator/storage";
 
 const stepSchema = z.object({
   key: z.string().min(1).max(80),
@@ -110,11 +111,15 @@ export async function GET() {
   try {
     const session = await getRequiredSession();
     await ensureAutomationRunTable();
+    await ensureCodexStorage();
     const runs = await db.automationRun.findMany({ where: { userId: session.userId }, orderBy: { startedAt: "desc" }, take: 50 });
     const sourceVideos = await db.competitorVideo.findMany({ where: { id: { in: runs.map((run) => run.sourceVideoId) }, competitor: { channel: { userId: session.userId } } }, select: { id: true, url: true } });
     const sourceVideoUrls = new Map(sourceVideos.map((video) => [video.id, video.url]));
+    const codexJobs = await db.codexJob.findMany({ where: { userId: session.userId, automationRunId: { in: runs.map((run) => run.id) } }, include: { stages: true, events: { orderBy: { sequence: "asc" }, take: 250 } } });
+    const codexByRun = new Map(codexJobs.map((job) => [job.automationRunId, job]));
     const data = await Promise.all(runs.map(async (run) => ({
       ...run,
+      codexAgent: codexByRun.get(run.id) ?? null,
       sourceVideoUrl: sourceVideoUrls.get(run.sourceVideoId) ?? null,
       finalVideoUrl: run.status === "SUCCEEDED" && run.projectId && await hasProjectFinalVideo(run.projectId)
         ? `/api/v1/projects/${run.projectId}/videos?final=1`

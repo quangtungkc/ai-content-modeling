@@ -1,4 +1,4 @@
-import { access, readFile, stat } from "node:fs/promises";
+import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { db } from "@/lib/db";
 import { AppError } from "@/lib/errors";
@@ -19,6 +19,10 @@ const imageFormats = [
   { extension: ".bmp", mimeType: "image/bmp" },
   { extension: ".avif", mimeType: "image/avif" },
 ] as const;
+
+function imageFormat(mimeType: string) {
+  return imageFormats.find((format) => format.mimeType === mimeType.toLowerCase()) ?? imageFormats[0];
+}
 
 async function ownedProject(projectId: string, userId: string) {
   const project = await db.contentProject.findFirst({ where: { id: projectId, channel: { userId } }, select: { id: true } });
@@ -80,4 +84,23 @@ export async function hasProjectFinalVideo(projectId: string) {
     }
   }
   return false;
+}
+
+export async function writeProjectImage(projectId: string, kind: GeneratedImageKind, sceneNumber: number, data: Buffer, mimeType: string) {
+  if (data.length < 1024 || data.length > 20 * 1024 * 1024) throw new AppError("IMAGE_INVALID", "Provider không trả về ảnh hợp lệ.", 502);
+  const format = imageFormat(mimeType);
+  const directory = path.join(root(), projectId);
+  await mkdir(directory, { recursive: true });
+  const target = path.join(directory, `${kind}-${sceneNumber}${format.extension}`);
+  await writeFile(target, data);
+  return target;
+}
+
+export async function writeProjectVideo(projectId: string, sceneNumber: number, data: Buffer) {
+  if (data.length < 1024 || data.length > 200 * 1024 * 1024) throw new AppError("VIDEO_INVALID", "Provider không trả về video hợp lệ.", 502);
+  const directory = path.join(videoRoot(), projectId);
+  await mkdir(directory, { recursive: true });
+  const target = path.join(directory, `scene-${sceneNumber}.mp4`);
+  await writeFile(target, data);
+  return target;
 }

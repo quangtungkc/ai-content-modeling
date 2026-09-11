@@ -75,6 +75,7 @@ export async function deleteAutomationRunWithProject(runId: string, userId: stri
     ? await db.contentProject.findFirst({ where: { id: run.projectId, channel: { userId } }, select: { id: true } })
     : null;
   if (ownedProject) await deleteContentProjects([ownedProject.id], userId);
+  await db.codexJob.deleteMany({ where: { userId, automationRunId: run.id } });
   await db.automationRun.delete({ where: { id: run.id } });
   return { deletedRunId: run.id, deletedProjectId: run.projectId };
 }
