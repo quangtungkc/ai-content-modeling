@@ -103,7 +103,7 @@ async function syncAutomation(jobId: string) {
 }
 
 async function presentJob(jobId: string, userId: string) {
-  const job = await db.codexJob.findFirst({ where: { id: jobId, userId }, include: { stages: { orderBy: { id: "asc" } }, events: { orderBy: { sequence: "asc" }, take: 250 } } });
+  const job = await db.codexJob.findFirst({ where: { id: jobId, userId }, include: { stages: { orderBy: { id: "asc" } }, events: { orderBy: { sequence: "asc" }, take: 250 }, runtimeFailures: { orderBy: { createdAt: "desc" }, take: 20, select: { id: true, source: true, stage: true, failureKind: true, code: true, message: true, status: true, attempts: true, codexResponseId: true, lastAttemptAt: true, resolvedAt: true, createdAt: true } } } });
   if (!job) throw new AppError("CODEX_JOB_NOT_FOUND", "Không tìm thấy Codex job.", 404);
   const snapshots = CODEX_STAGES.map((name) => job.stages.find((stage) => stage.stage === name)).filter((stage): stage is NonNullable<typeof stage> => Boolean(stage)).map(stageSnapshot);
   return { ...job, stages: snapshots, nextAction: job.status === "COMPLETED" ? { name: "jobComplete" } : job.status === "NEEDS_HUMAN" || job.status === "NEEDS_ENGINEERING" || job.status === "FAILED" ? { name: "waitForHuman", reason: job.failureReason } : nextPendingAction(snapshots) };
@@ -271,6 +271,8 @@ export async function reportCodexEvent(userId: string, jobId: string, input: Rep
   if (input.type === "STAGE_FAILED") {
     const message = input.error || "Stage failed without an error message.";
     await appendEvent(jobId, "TOOL_FAILED", input.stage, { provider: input.provider, error: message }, message);
+    await appendEvent(jobId, "RUNTIME_FAILURE_REPORTED", input.stage, { source: "codex-stage", provider: input.provider, error: redactSecrets(message) }, "Lỗi stage đã được ghi nhận trước khi Codex chẩn đoán.");
+    await appendEvent(jobId, "CODEX_WAKE_REQUESTED", input.stage, { source: "codex-stage", provider: input.provider }, "Đánh thức vòng điều phối Codex để chọn recovery.");
     return { ...(await presentJob(jobId, userId)), nextAction: await diagnoseAndRecover(jobId, userId, input.stage, message, actual, input.provider) };
   }
   let expected = stageState.expectedState as ExpectedState | null;

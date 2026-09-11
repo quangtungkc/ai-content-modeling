@@ -209,7 +209,7 @@ export async function requeueStaleRuntimeFailures(staleBefore: Date) {
 }
 
 export async function reportBackgroundJobFailure(job: { jobId: string; name: string; payload: Record<string, unknown> }, error: unknown) {
-  if (job.name === "codex.runtime.failure") return null;
+  if (job.name === "codex.runtime.failure" || job.name.startsWith("desktop.flow.")) return null;
   const payload = job.payload;
   const codexJobId = job.name === "codex.job.execute" && typeof payload.jobId === "string" ? payload.jobId : undefined;
   return reportRuntimeFailure({
@@ -225,7 +225,7 @@ export async function reportBackgroundJobFailure(job: { jobId: string; name: str
 }
 
 export async function reportStalledBackgroundJob(job: { jobId: string; name: string; payload: Record<string, unknown> }) {
-  if (job.name === "codex.runtime.failure") return null;
+  if (job.name === "codex.runtime.failure" || job.name.startsWith("desktop.flow.")) return null;
   const payload = job.payload;
   return reportRuntimeFailure({
     userId: typeof payload.userId === "string" ? payload.userId : undefined,

@@ -4,13 +4,14 @@ import { analyzeCompetitorVideo } from "@/modules/videos/analysis-service";
 import { generateIdeasFromVideo } from "@/modules/ideas/service";
 import { developApprovedIdea, setIdeaStatus } from "@/modules/ideas/approval-service";
 import { readProjectImage, readProjectVideo } from "@/modules/assets/image-generation-service";
-import { generateProjectImagesWithGoogleApi, generateProjectVideosWithVeoApi, type VideoSlot } from "@/modules/generation/google-api-pipeline";
+import { generateProjectImagesWithFlowBrowser, generateProjectVideosWithFlowBrowser, type BrowserFlowImageSlot, type BrowserFlowVideoSlot } from "@/modules/generation/browser-flow-bridge";
 import { assembleProjectVideo } from "@/modules/generation/final-assembly-service";
 import { appendCodexEvent, getCodexJob, initializeCodexPlan, recordCodexProgress, reportCodexEvent, validateCodexStage } from "./service";
 import { attemptGuardedProductionRepair } from "./self-repair";
 import type { CodexAction, CodexStage } from "./types";
 
-type ImageSlot = { kind: "background" | "scene"; sceneNumber?: number; label?: string; prompt: string; aspectRatio?: string };
+type ImageSlot = BrowserFlowImageSlot;
+type VideoSlot = BrowserFlowVideoSlot;
 
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -21,7 +22,7 @@ async function exists(check: () => Promise<unknown>) {
 }
 
 function stageProvider(stage: CodexStage) {
-  return stage === "ASSETS" ? "GOOGLE_IMAGE_API" : stage === "SCENES" ? "VEO_API" : stage === "MODELING" || stage === "PROJECT" || stage === "FINAL_AUDIT" ? "AI" : undefined;
+  return stage === "ASSETS" || stage === "SCENES" ? "FLOW_BROWSER" : stage === "MODELING" || stage === "PROJECT" || stage === "FINAL_AUDIT" ? "AI" : undefined;
 }
 
 function targetSceneNumbers(targetIds: string[] | undefined) {
@@ -90,7 +91,7 @@ async function executeStage(jobId: string, userId: string, action: CodexAction, 
       const available = await exists(() => readProjectImage(project.id, userId, "scene", scene.sceneNumber));
       if (requested && (!available || action.name === "regenerateAsset")) slots.push({ kind: "scene", sceneNumber: scene.sceneNumber, label: `Cảnh ${scene.sceneNumber}`, prompt: scene.startFramePrompt || `${scene.visualBlock}\nInitial state only.`, aspectRatio });
     }
-    if (slots.length) await generateProjectImagesWithGoogleApi(project.id, userId, job.channelId, slots, (detail, processed, total) => progress(detail, { processed, total }));
+    if (slots.length) await generateProjectImagesWithFlowBrowser(project.id, userId, job.channelId, slots, progress, `codex-flow:${jobId}:ASSETS:${action.strategy ?? "initial"}:${[...targetNumbers].join(",") || "all"}`, jobId);
     const generatedAssetKeys = ["background-0"];
     for (const scene of project.scenes) if (await exists(() => readProjectImage(project.id, userId, "scene", scene.sceneNumber))) generatedAssetKeys.push(`scene-${scene.sceneNumber}`);
     const quality = await validateCodexStage(userId, jobId, "ASSETS");
@@ -104,7 +105,7 @@ async function executeStage(jobId: string, userId: string, action: CodexAction, 
       const available = await exists(() => readProjectVideo(project.id, userId, scene.sceneNumber));
       if (requested && (!available || action.name === "regenerateScene")) slots.push({ sceneNumber: scene.sceneNumber, label: `Cảnh ${scene.sceneNumber}`, visualBlock: scene.visualBlock, actionBlock: scene.actionBlock, audioBlock: scene.audioBlock, englishPrompt: scene.englishPrompt || scene.actionBlock, aspectRatio });
     }
-    if (slots.length) await generateProjectVideosWithVeoApi(project.id, userId, job.channelId, slots, (detail, processed, total) => progress(detail, { processed, total }));
+    if (slots.length) await generateProjectVideosWithFlowBrowser(project.id, userId, job.channelId, slots, progress, `codex-flow:${jobId}:SCENES:${action.strategy ?? "initial"}:${[...targetNumbers].join(",") || "all"}`, jobId);
     const generatedSceneNumbers: number[] = [];
     for (const scene of project.scenes) if (await exists(() => readProjectVideo(project.id, userId, scene.sceneNumber))) generatedSceneNumbers.push(scene.sceneNumber);
     const quality = await validateCodexStage(userId, jobId, "SCENES");

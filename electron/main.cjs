@@ -28,6 +28,10 @@ let flowLoadPromise;
 let flowRemoteClient;
 let isQuitting = false;
 let fatalRuntimeReported = false;
+let desktopFlowBridgeTimer;
+let desktopFlowBridgeBusy = false;
+let lastDesktopFlowBridgeErrorAt = 0;
+let activeDesktopFlowBridgeContext = {};
 
 function notifyUpdate(event, payload = {}) {
   mainWindow?.webContents.send(`desktop-update:${event}`, payload);
@@ -134,7 +138,7 @@ async function ensureDesktopSession() {
 
 async function reportDesktopRuntimeFailure(source, error, context = {}) {
   const details = error instanceof Error ? { message: error.message, stack: error.stack } : { message: String(error) };
-  const payload = redactDesktopRuntime({ source, code: "DESKTOP_RUNTIME_INTERRUPTED", message: String(details.message).slice(0, 4000), stack: details.stack?.slice(0, 12000), context });
+  const payload = redactDesktopRuntime({ source, code: "DESKTOP_RUNTIME_INTERRUPTED", message: String(details.message).slice(0, 4000), stack: details.stack?.slice(0, 12000), ...(typeof context.codexJobId === "string" ? { codexJobId: context.codexJobId } : {}), ...(typeof context.stage === "string" ? { stage: context.stage } : {}), context });
   try {
     const session = await ensureDesktopSession();
     if (!session) { queueDesktopRuntimeFailure(payload); return false; }
@@ -184,6 +188,67 @@ async function flushDesktopRuntimeFailures() {
   } catch { /* Retry the spool during the next startup. */ }
 }
 
+async function requestDesktopFlowBridge(pathname, options = {}) {
+  const session = await ensureDesktopSession();
+  if (!session) return null;
+  const headers = { ...(options.headers || {}), Cookie: `ai_content_modeling_session=${session.token}` };
+  const response = await fetch(`${APP_URL}${pathname}`, { ...options, headers });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body?.error?.message || `Desktop Flow bridge trả về HTTP ${response.status}.`);
+  return body?.data;
+}
+
+async function processDesktopFlowBridgeJob(job) {
+  const claimed = await requestDesktopFlowBridge(`/api/v1/desktop-flow/jobs/${encodeURIComponent(job.id)}/claim`, { method: "POST" });
+  if (!claimed) return;
+  const payload = claimed.payload || {};
+  activeDesktopFlowBridgeContext = { bridgeJobId: claimed.id, bridgeJobName: claimed.name, ...(typeof payload.codexJobId === "string" ? { codexJobId: payload.codexJobId } : {}), ...(typeof payload.stage === "string" ? { stage: payload.stage } : {}) };
+  const sender = { send: (channel, update) => notifyUpdate("flow-bridge-progress", { jobId: claimed.id, channel, payload: update }) };
+  try {
+    let result;
+    if (claimed.name === "desktop.flow.images") {
+      result = await runFlowImageJob(sender, payload.projectId, payload.channelId, payload.slots);
+    } else if (claimed.name === "desktop.flow.videos") {
+      result = await runFlowVideoJob(sender, payload.projectId, payload.channelId, payload.slots);
+    } else {
+      throw new Error(`Không hỗ trợ loại job Flow ${claimed.name}.`);
+    }
+    await requestDesktopFlowBridge(`/api/v1/desktop-flow/jobs/${encodeURIComponent(claimed.id)}/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "succeeded", result: redactDesktopRuntime(result) }) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      await requestDesktopFlowBridge(`/api/v1/desktop-flow/jobs/${encodeURIComponent(claimed.id)}/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "failed", error: redactDesktopRuntime(message) }) });
+    } catch (reportError) {
+      void reportDesktopRuntimeFailure("electron:flow-bridge:complete", reportError, activeDesktopFlowBridgeContext);
+    }
+  } finally {
+    closeFlowWindow();
+    activeDesktopFlowBridgeContext = {};
+  }
+}
+
+async function pollDesktopFlowBridge() {
+  if (desktopFlowBridgeBusy || isQuitting) return;
+  desktopFlowBridgeBusy = true;
+  try {
+    const jobs = await requestDesktopFlowBridge("/api/v1/desktop-flow/jobs");
+    if (Array.isArray(jobs)) for (const job of jobs) await processDesktopFlowBridgeJob(job);
+  } catch (error) {
+    if (Date.now() - lastDesktopFlowBridgeErrorAt >= 60_000) {
+      lastDesktopFlowBridgeErrorAt = Date.now();
+      void reportDesktopRuntimeFailure("electron:flow-bridge:poll", error, { appUrl: APP_URL });
+    }
+  } finally {
+    desktopFlowBridgeBusy = false;
+  }
+}
+
+function startDesktopFlowBridge() {
+  if (desktopFlowBridgeTimer) return;
+  void pollDesktopFlowBridge();
+  desktopFlowBridgeTimer = setInterval(() => { void pollDesktopFlowBridge(); }, 1_000);
+}
+
 function monitorChildProcess(child, name) {
   child.on("error", (error) => { void reportDesktopRuntimeFailure(`electron:${name}:error`, error, { process: name }); });
   child.on("exit", (code, signal) => {
@@ -195,12 +260,12 @@ function monitorChildProcess(child, name) {
 process.on("uncaughtException", (error) => {
   if (fatalRuntimeReported) return;
   fatalRuntimeReported = true;
-  void reportDesktopRuntimeFailure("electron:main:uncaught-exception", error).finally(() => app.quit());
+  void reportDesktopRuntimeFailure("electron:main:uncaught-exception", error, activeDesktopFlowBridgeContext).finally(() => app.quit());
 });
 process.on("unhandledRejection", (reason) => {
   if (fatalRuntimeReported) return;
   fatalRuntimeReported = true;
-  void reportDesktopRuntimeFailure("electron:main:unhandled-rejection", reason).finally(() => app.quit());
+  void reportDesktopRuntimeFailure("electron:main:unhandled-rejection", reason, activeDesktopFlowBridgeContext).finally(() => app.quit());
 });
 
 function runtimeRoot() {
@@ -2212,6 +2277,7 @@ app.whenReady()
     await waitForServer();
     await flushDesktopRuntimeFailures();
     await createWindow(consumeSyncAfterUpdate());
+    startDesktopFlowBridge();
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) void createWindow();
     });
@@ -2229,6 +2295,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  if (desktopFlowBridgeTimer) clearInterval(desktopFlowBridgeTimer);
   serverProcess?.kill();
   workerProcess?.kill();
 });

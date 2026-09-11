@@ -1,6 +1,6 @@
 import { syncChannelVideos } from "@/modules/videos/sync-service";
 import { runGenerationJob } from "@/modules/generation/job-service";
-import { generateProjectVideosWithVeoApi } from "@/modules/generation/google-api-pipeline";
+import { generateProjectVideosWithFlowBrowser } from "@/modules/generation/browser-flow-bridge";
 import type { VeoRequest } from "@/services/video-generation/types";
 import { prepareDailyReport, publishDailyReport } from "@/modules/reports/service";
 import { markSyncChannelComplete, markSyncFailed } from "@/modules/videos/sync-progress";
@@ -20,7 +20,7 @@ export async function handleJob(name: string, payload: Record<string, unknown>) 
     }
   }
   if (name === "video.generate") return runGenerationJob(String(payload.jobId), payload.request as VeoRequest);
-  if (name === "video.project.generate") return generateProjectVideosWithVeoApi(String(payload.projectId), String(payload.userId), String(payload.channelId), payload.slots as Parameters<typeof generateProjectVideosWithVeoApi>[3]);
+  if (name === "video.project.generate") return generateProjectVideosWithFlowBrowser(String(payload.projectId), String(payload.userId), String(payload.channelId), payload.slots as Parameters<typeof generateProjectVideosWithFlowBrowser>[3], undefined, `desktop-flow-legacy-videos:${String(payload.batchId ?? payload.projectId)}`);
   if (name === "codex.job.execute") return executeCodexJob(String(payload.jobId), String(payload.userId));
   if (name === "codex.runtime.failure") return dispatchRuntimeFailure(String(payload.runtimeFailureId));
   if (name === "daily.report.prepare") return prepareDailyReport(String(payload.channelId));

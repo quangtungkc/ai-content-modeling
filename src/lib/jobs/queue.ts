@@ -12,7 +12,7 @@ export class LocalJobQueue implements JobQueue {
   }
 
   async claim(): Promise<QueuedJob | null> {
-    const job = await db.backgroundJob.findFirst({ where: { status: "queued" }, orderBy: { createdAt: "asc" } });
+    const job = await db.backgroundJob.findFirst({ where: { status: "queued", NOT: { name: { startsWith: "desktop.flow." } } }, orderBy: { createdAt: "asc" } });
     if (!job) return null;
     const claimed = await db.backgroundJob.updateMany({ where: { id: job.id, status: "queued" }, data: { status: "running", startedAt: new Date() } });
     if (!claimed.count) return this.claim();

@@ -55,6 +55,10 @@ export function nextPendingAction(stages: CodexStageSnapshot[]): CodexAction {
 export function recoveryStrategies(stage: CodexStage, kind: FailureKind, errorMessage: string): string[] {
   if (kind === "ENGINEERING_FAILURE") return ["codex-guarded-code-repair"];
   const message = errorMessage.toLowerCase();
+  if (/api_provider_unavailable|google api-first|image api|veo api|provider.*unavailable/.test(message)) {
+    if (stage === "ASSETS") return ["use-flow-browser", "retry-failed-assets-only", "request-human-flow-login"];
+    if (stage === "SCENES") return ["use-flow-browser", "retry-failed-scenes-only", "request-human-flow-login"];
+  }
   if (kind === "TECHNICAL_FAILURE" && /invalid_(?:type|value|input)|expected .*received|structured output/.test(message)) return ["retry-structured-output", "switch-ai-provider", "resume-from-checkpoint"];
   if (/reference.*(?:reject|invalid)|unsupported.*image/.test(message)) return ["normalize-reference-image", "convert-reference-to-png", "use-single-start-frame-reference"];
   if (/rate.?limit|429|quota/.test(message)) return ["provider-backoff", "reduce-batch-size", "resume-from-checkpoint"];
