@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CODEX_EVENT_TYPES, type CodexStageSnapshot, type ExpectedState } from "./types";
-import { buildSceneExpectedState, chooseRecoveryStrategy, classifyFailure, createErrorSignature, findIncompleteFinalAuditPrerequisite, hasReachedRetryLimit, nextPendingAction, planSceneBatches, recoveryStrategies, redactSecrets, shouldCreateImprovementCandidate, shouldUseCodexPipeline, validateExpectedActual } from "./policy";
+import { buildSceneExpectedState, canAutoResumeAfterFlowRuntimeRepair, chooseRecoveryStrategy, classifyFailure, createErrorSignature, findIncompleteFinalAuditPrerequisite, hasReachedRetryLimit, nextPendingAction, planSceneBatches, recoveryStrategies, redactSecrets, shouldCreateImprovementCandidate, shouldUseCodexPipeline, validateExpectedActual } from "./policy";
 import { CODEX_REQUEST_TIMEOUT_MS } from "./reasoner";
 
 const stage = (name: CodexStageSnapshot["stage"], status: CodexStageSnapshot["status"]): CodexStageSnapshot => ({ stage: name, status, retryCount: 0, maxRetries: 3 });
@@ -38,10 +38,13 @@ describe("Codex orchestrator policy", () => {
   it("22. Event logging có đủ lifecycle bắt buộc", () => expect(CODEX_EVENT_TYPES).toEqual(expect.arrayContaining(["CODEX_JOB_STARTED", "VALIDATION_FAILED", "RECOVERY_SUCCEEDED", "FINAL_AUDIT_PASSED", "JOB_COMPLETED"])));
   it("23. Improvement candidate chỉ tạo cho lỗi lặp hoặc root cause rõ", () => { expect(shouldCreateImprovementCandidate(1)).toBe(false); expect(shouldCreateImprovementCandidate(2)).toBe(true); expect(shouldCreateImprovementCandidate(1, true)).toBe(true); });
   it("24. External research disabled không ảnh hưởng recovery policy", () => expect(recoveryStrategies("ASSETS", "TECHNICAL_FAILURE", "network").length).toBeGreaterThan(0));
-  it("25. Secret redaction loại credential nhưng giữ Expected State", () => {
+  it("25. Lỗi JavaScript thiếu sender được phân loại là lỗi code", () => expect(classifyFailure("Cannot read properties of undefined (reading 'send')")).toBe("ENGINEERING_FAILURE"));
+  it("26. Runtime Flow mới tự resume đúng stage lỗi code", () => expect(canAutoResumeAfterFlowRuntimeRepair({ status: "NEEDS_HUMAN", stage: "ASSETS", failureReason: "Cannot read properties of undefined (reading 'send')", runtimeRevision: "flow-ipc-event-v2" })).toBe(true));
+  it("27. Không tự resume lỗi cần đăng nhập", () => expect(canAutoResumeAfterFlowRuntimeRepair({ status: "NEEDS_HUMAN", stage: "ASSETS", failureReason: "Hãy đăng nhập Google Flow", runtimeRevision: "flow-ipc-event-v2" })).toBe(false));
+  it("28. Secret redaction loại credential nhưng giữ Expected State", () => {
     const redacted = redactSecrets({ apiKey: "credential-value", note: "Bearer abc.def.ghi", password: "pw", requiredAssetKeys: ["background-0", "scene-1"] });
     expect(JSON.stringify(redacted)).not.toContain("real-secret");
     expect(redacted.requiredAssetKeys).toEqual(["background-0", "scene-1"]);
   });
-  it("26. Feature flag disabled giữ pipeline cũ", () => { expect(shouldUseCodexPipeline(false)).toBe(false); expect(shouldUseCodexPipeline(true)).toBe(true); });
+  it("29. Feature flag disabled giữ pipeline cũ", () => { expect(shouldUseCodexPipeline(false)).toBe(false); expect(shouldUseCodexPipeline(true)).toBe(true); });
 });

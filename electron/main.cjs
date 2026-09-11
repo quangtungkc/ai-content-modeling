@@ -17,6 +17,7 @@ if (app.isPackaged && !process.argv.some((value) => value.startsWith("--remote-d
 
 const PORT = 3210;
 const APP_URL = process.env.DESKTOP_APP_URL || (app.isPackaged ? `http://127.0.0.1:${PORT}` : "http://localhost:3000");
+const DESKTOP_FLOW_BRIDGE_REVISION = "flow-ipc-event-v2";
 let mainWindow;
 let serverProcess;
 let workerProcess;
@@ -191,7 +192,12 @@ async function flushDesktopRuntimeFailures() {
 async function requestDesktopFlowBridge(pathname, options = {}) {
   const session = await ensureDesktopSession();
   if (!session) return null;
-  const headers = { ...(options.headers || {}), Cookie: `ai_content_modeling_session=${session.token}` };
+  const headers = {
+    ...(options.headers || {}),
+    Cookie: `ai_content_modeling_session=${session.token}`,
+    "X-Modeling-App-Version": app.getVersion(),
+    "X-Modeling-Flow-Bridge-Revision": DESKTOP_FLOW_BRIDGE_REVISION,
+  };
   const response = await fetch(`${APP_URL}${pathname}`, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body?.error?.message || `Desktop Flow bridge trả về HTTP ${response.status}.`);
@@ -204,12 +210,13 @@ async function processDesktopFlowBridgeJob(job) {
   const payload = claimed.payload || {};
   activeDesktopFlowBridgeContext = { bridgeJobId: claimed.id, bridgeJobName: claimed.name, ...(typeof payload.codexJobId === "string" ? { codexJobId: payload.codexJobId } : {}), ...(typeof payload.stage === "string" ? { stage: payload.stage } : {}) };
   const sender = { send: (channel, update) => notifyUpdate("flow-bridge-progress", { jobId: claimed.id, channel, payload: update }) };
+  const event = { sender };
   try {
     let result;
     if (claimed.name === "desktop.flow.images") {
-      result = await runFlowImageJob(sender, payload.projectId, payload.channelId, payload.slots);
+      result = await runFlowImageJob(event, payload.projectId, payload.channelId, payload.slots);
     } else if (claimed.name === "desktop.flow.videos") {
-      result = await runFlowVideoJob(sender, payload.projectId, payload.channelId, payload.slots);
+      result = await runFlowVideoJob(event, payload.projectId, payload.channelId, payload.slots);
     } else {
       throw new Error(`Không hỗ trợ loại job Flow ${claimed.name}.`);
     }

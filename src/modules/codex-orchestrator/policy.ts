@@ -35,10 +35,19 @@ export function redactSecrets<T>(value: T): T {
 export function classifyFailure(message: string, validationFailure = false): FailureKind {
   if (validationFailure) return "SEMANTIC_FAILURE";
   if (/\binvalid_(?:type|value|input)\b|expected .*received|path.*storyboard|structured output/i.test(message)) return "TECHNICAL_FAILURE";
-  if (/\b(?:TypeError|ReferenceError|SyntaxError)\b|cannot find module|prisma.*validation|schema.*(?:parse|invalid)|structured output.*(?:invalid|không hợp lệ)|code defect|invariant/i.test(message)) return "ENGINEERING_FAILURE";
+  if (/\b(?:TypeError|ReferenceError|SyntaxError)\b|cannot (?:read|set) propert(?:y|ies) of (?:undefined|null)|is not a function|cannot find module|prisma.*validation|schema.*(?:parse|invalid)|structured output.*(?:invalid|không hợp lệ)|code defect|invariant/i.test(message)) return "ENGINEERING_FAILURE";
   return /wrong|mismatch|missing (?:character|prop|scene|action|background)|continuity|deviation|gag|semantic/i.test(message)
     ? "SEMANTIC_FAILURE"
     : "TECHNICAL_FAILURE";
+}
+
+export function canAutoResumeAfterFlowRuntimeRepair(input: { status: string; stage: string; failureReason?: string | null; runtimeRevision: string }) {
+  if (!['NEEDS_HUMAN', 'NEEDS_ENGINEERING'].includes(input.status)) return false;
+  if (!['ASSETS', 'SCENES'].includes(input.stage)) return false;
+  if (input.runtimeRevision !== 'flow-ipc-event-v2') return false;
+  const message = input.failureReason ?? '';
+  if (/sign[ -]?in|log[ -]?in|đăng nhập|permission|quyền truy cập|captcha|two-factor|2fa|oauth/i.test(message)) return false;
+  return /cannot read properties of undefined \(reading ['"]send['"]\)|flow bridge.*sender|ipc.*sender/i.test(message);
 }
 
 export function createErrorSignature(stage: CodexStage, message: string) {

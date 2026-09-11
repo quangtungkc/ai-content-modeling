@@ -844,6 +844,11 @@ export function ViralDashboard() {
       detail: stage.validationResult ? `Validation: ${stage.validationResult}` : undefined,
     })));
     setCodexStatus(job.status === "RECOVERING" ? `Codex đang recovery: ${job.nextAction.strategy ?? job.nextAction.reason ?? "đang chọn chiến lược"}` : job.status === "NEEDS_ENGINEERING" ? `NEEDS_ENGINEERING: ${job.nextAction.reason ?? "Codex đang xử lý lỗi code trong workspace được bảo vệ."}` : job.status === "NEEDS_HUMAN" ? `Cần kiểm tra thủ công: ${job.nextAction.reason ?? "đã hết giới hạn recovery"}` : job.status === "COMPLETED" ? "Final Audit PASS — VIDEO COMPLETE" : job.status === "PLANNING" ? "Worker nền đang tạo Execution Plan..." : `Bước tiếp theo: ${job.nextAction.stage ?? job.nextAction.name}`);
+    const latestResumeEvent = [...(job.events ?? [])].reverse().find((event) => event.type === "JOB_AUTO_RESUMED" || event.type === "RUNTIME_REPAIR_VERIFIED");
+    if (latestResumeEvent?.type === "JOB_AUTO_RESUMED") {
+      setCodexErrorDeliveryStatus(`Bản sửa đã được nạp · Codex đã tự tiếp tục stage ${latestResumeEvent.stage ?? job.nextAction.stage ?? "đang lỗi"}`);
+      return;
+    }
     const latestFailure = job.runtimeFailures?.[0];
     if (latestFailure) {
       const delivery = latestFailure.status === "SENT_TO_CODEX" || latestFailure.status === "RECOVERY_REQUESTED"

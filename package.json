@@ -1,6 +1,6 @@
 {
   "name": "ai-content-modeling",
-  "version": "0.2.82",
+  "version": "0.2.83",
   "private": true,
   "main": "electron/main.cjs",
   "scripts": {

@@ -5,7 +5,7 @@ import { getEnv } from "@/lib/env";
 import { AppError } from "@/lib/errors";
 import { CodexReasoner } from "./reasoner";
 import { ensureCodexStorage } from "./storage";
-import { buildSceneExpectedState, chooseRecoveryStrategy, classifyFailure, createErrorSignature, findIncompleteFinalAuditPrerequisite, nextPendingAction, recoveryStrategies, redactSecrets, validateExpectedActual } from "./policy";
+import { buildSceneExpectedState, canAutoResumeAfterFlowRuntimeRepair, chooseRecoveryStrategy, classifyFailure, createErrorSignature, findIncompleteFinalAuditPrerequisite, nextPendingAction, recoveryStrategies, redactSecrets, validateExpectedActual } from "./policy";
 import { CODEX_STAGES, type CodexAction, type CodexEventType, type CodexStage, type CodexStageSnapshot, type ExpectedState, type ReportCodexEventInput, type ValidationOutput } from "./types";
 import { validateQuality } from "./quality-validator";
 import { LocalJobQueue } from "@/lib/jobs/queue";
@@ -55,6 +55,46 @@ export async function appendCodexEvent(jobId: string, type: CodexEventType, stag
   throw new Error("Không thể ghi Codex event.");
 }
 const appendEvent = appendCodexEvent;
+
+export async function confirmDesktopFlowRuntime(userId: string, runtimeRevision: string, appVersion?: string | null) {
+  if (runtimeRevision !== "flow-ipc-event-v2") return { confirmed: false, resumedJobIds: [] as string[] };
+  const candidates = await db.codexJob.findMany({
+    where: { userId, status: { in: ["NEEDS_HUMAN", "NEEDS_ENGINEERING"] }, currentStage: { in: ["ASSETS", "SCENES"] } },
+    select: { id: true, status: true, currentStage: true, failureReason: true, automationRunId: true },
+    orderBy: { updatedAt: "asc" },
+    take: 10,
+  });
+  const resumedJobIds: string[] = [];
+  for (const candidate of candidates) {
+    if (!canAutoResumeAfterFlowRuntimeRepair({ status: candidate.status, stage: candidate.currentStage, failureReason: candidate.failureReason, runtimeRevision })) continue;
+    const stage = candidate.currentStage as "ASSETS" | "SCENES";
+    const action = stage === "ASSETS" ? "runAssetStage" : "runSceneGenerationStage";
+    const claimed = await db.codexJob.updateMany({
+      where: { id: candidate.id, status: candidate.status, currentStage: stage, failureReason: candidate.failureReason },
+      data: { status: "RECOVERING", currentAction: action, failureReason: null, completedAt: null },
+    });
+    if (!claimed.count) continue;
+    try {
+      await db.$transaction([
+        db.codexStageState.update({
+          where: { jobId_stage: { jobId: candidate.id, stage } },
+          data: { status: "RETRYING", retryCount: 1, lastStrategy: `runtime-repair:${runtimeRevision}`, validationResult: null, validationIssues: Prisma.JsonNull, completedAt: null },
+        }),
+        ...(candidate.automationRunId ? [db.automationRun.update({ where: { id: candidate.automationRunId }, data: { status: "RUNNING", error: null, completedAt: null } })] : []),
+        db.runtimeFailure.updateMany({ where: { codexJobId: candidate.id, status: { not: "SENT_TO_CODEX" } }, data: { status: "RECOVERY_REQUESTED", resolvedAt: new Date() } }),
+      ]);
+      await appendEvent(candidate.id, "RUNTIME_REPAIR_VERIFIED", stage, { runtimeRevision, appVersion: appVersion ?? "unknown" }, "Electron đã nạp đúng bản sửa cầu nối Flow.");
+      await appendEvent(candidate.id, "JOB_AUTO_RESUMED", stage, { action, runtimeRevision }, `Tự tiếp tục từ stage ${stage} sau khi xác nhận bản sửa.`);
+      await new LocalJobQueue().enqueue("codex.job.execute", { jobId: candidate.id, userId }, `codex-auto-resume:${candidate.id}:${runtimeRevision}`);
+      resumedJobIds.push(candidate.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Không thể enqueue lại Codex job.";
+      await db.codexJob.update({ where: { id: candidate.id }, data: { status: candidate.status, currentAction: "waitForHuman", failureReason: redactSecrets(message) } });
+      await appendEvent(candidate.id, "CODEX_WAKE_FAILED", stage, { runtimeRevision, error: redactSecrets(message) }, "Không thể tự enqueue lại job sau khi nạp bản sửa.");
+    }
+  }
+  return { confirmed: true, resumedJobIds };
+}
 
 function basicValidation(stage: CodexStage, actual: Record<string, unknown> | undefined): ValidationOutput | null {
   const required: Partial<Record<CodexStage, string>> = { ANALYSIS: "analysisId", MODELING: "ideaId", PROJECT: "projectId" };
