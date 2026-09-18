@@ -7,6 +7,8 @@ const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
+const { initializeUserData } = require("./user-data.cjs");
+initializeUserData(app);
 const { GeminiCommandLifecycle, hashText, redactNetworkUrl, normalizeNetworkInitiator, normalizeDocumentNavigationRequest, extractGeminiJsonCandidate, isGeminiGenerationRequest, findAttributedGeminiGenerationRequest, isGeminiTargetReady, isResponseComplete, canRunFormatRetry, isGenerationTerminal, assertParentTerminal, normalizeGeminiResponseSnapshot, buildGeminiBindingDiagnostic, buildGeminiResponseContentDiagnostic } = require("./gemini-browser-lifecycle.cjs");
 const { isJsonSerializable, wrapGeminiRemoteExpression, normalizeRemoteFailure } = require("./gemini-remote-script.cjs");
 const { EdgeGeminiRuntime, isFlowUrl } = require("./edge-gemini-cdp.cjs");
@@ -15,7 +17,6 @@ const { assertReadableAbsoluteFile, uploadWithEdgeFileChooser } = require("./gem
 const { conversationIdFromUrl, normalizeConversationBinding, bindConversationFromUrl, markConversationStep, assertConversationReady } = require("./gemini-conversation-lifecycle.cjs");
 
 // Keep development Electron and the packaged desktop app on the same local data store.
-app.setPath("userData", path.join(app.getPath("appData"), "ai-content-modeling"));
 if (app.isPackaged && !process.argv.some((value) => value.startsWith("--remote-debugging-port="))) {
   app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
   app.commandLine.appendSwitch("remote-debugging-port", "0");
@@ -1099,6 +1100,7 @@ function ensureRuntime() {
     HOSTNAME: "127.0.0.1",
     DESKTOP_MODE: "1",
     DATABASE_URL: `file:${databasePath.replace(/\\/g, "/")}`,
+    ...(process.env.MODELING_AI_USER_DATA_DIR !== undefined ? { DESKTOP_DATABASE_URL: `file:${databasePath.replace(/\\/g, "/")}`, DESKTOP_CONFIG_PATH: configPath } : {}),
     AUTH_SECRET: config.authSecret,
     CREDENTIAL_ENCRYPTION_KEY: config.credentialEncryptionKey,
     GEMINI_MODEL: process.env.GEMINI_MODEL || "gemini-3.6-flash",

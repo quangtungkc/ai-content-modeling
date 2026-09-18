@@ -1,10 +1,11 @@
 import { rm } from "node:fs/promises";
 import path from "node:path";
+import { applicationDataDirectory } from "@/lib/app-data";
 import { db } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 
-const appDataRoot = () => path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "ai-content-modeling");
-const legacyAppDataRoot = () => path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "Modeling AI");
+const appDataRoot = () => applicationDataDirectory(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd());
+const legacyAppDataRoot = () => applicationDataDirectory(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "Modeling AI");
 
 async function removeProjectMedia(projectIds: string[]) {
   const roots = [

@@ -1,12 +1,13 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { applicationDataDirectory } from "@/lib/app-data";
 import { qaIncidentReportSchema, incidentReportToMarkdown, type QaIncidentReport } from "./report";
 
 export type QaIncidentReportPaths = { jsonReportPath: string; markdownReportPath: string };
 export type ReportFileSystem = { mkdir: typeof mkdir; writeFile: typeof writeFile; readFile: typeof readFile; readdir: typeof readdir };
 
 export function troubleshootingIncidentReportRoot() {
-  return path.join(process.env.APPDATA ?? process.cwd(), "ai-content-modeling", "troubleshooting-incidents");
+  return path.join(applicationDataDirectory(process.env.APPDATA ?? process.cwd()), "troubleshooting-incidents");
 }
 
 function safeSegment(value: string | null | undefined) {

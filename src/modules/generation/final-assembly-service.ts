@@ -2,9 +2,10 @@ import { access, copyFile, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import { applicationDataDirectory } from "@/lib/app-data";
 import { AppError } from "@/lib/errors";
 
-const appDataRoot = () => path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "ai-content-modeling");
+const appDataRoot = () => applicationDataDirectory(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd());
 
 async function firstExisting(candidates: string[]) {
   for (const candidate of candidates) {

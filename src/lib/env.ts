@@ -1,12 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
+import { applicationDataDirectory } from "./app-data";
 import { z } from "zod";
 
 type DesktopRuntimeConfig = { credentialEncryptionKey?: string; authSecret?: string };
 
 function readDesktopRuntimeConfig(): DesktopRuntimeConfig | null {
   if (process.env.DESKTOP_MODE !== "1") return null;
-  const configPath = process.env.DESKTOP_CONFIG_PATH || path.join(process.env.APPDATA || "", "ai-content-modeling", "desktop-config.json");
+  const configPath = process.env.DESKTOP_CONFIG_PATH || path.join(applicationDataDirectory(process.env.APPDATA || ""), "desktop-config.json");
   try {
     const value = JSON.parse(fs.readFileSync(configPath, "utf8")) as DesktopRuntimeConfig;
     return value && typeof value === "object" ? value : null;
@@ -17,6 +18,7 @@ function readDesktopRuntimeConfig(): DesktopRuntimeConfig | null {
 
 export function resolveDesktopDatabaseUrl(value = process.env.DATABASE_URL) {
   if (process.env.DESKTOP_MODE !== "1") return value;
+  if (process.env.MODELING_AI_USER_DATA_DIR !== undefined) return `file:${path.join(applicationDataDirectory(process.env.APPDATA || ""), "modeling-ai.db").replace(/\\/g, "/")}`;
   if (process.env.DESKTOP_DATABASE_URL) return process.env.DESKTOP_DATABASE_URL;
   const runtimePath = path.join(process.env.APPDATA || "", "ai-content-modeling", "modeling-ai.db");
   if (fs.existsSync(runtimePath)) return `file:${runtimePath.replace(/\\/g, "/")}`;

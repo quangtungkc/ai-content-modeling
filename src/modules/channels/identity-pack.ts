@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
+import { applicationDataDirectory } from "@/lib/app-data";
 import { db } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { Prisma } from "@prisma/client";
@@ -29,7 +30,7 @@ export type CharacterIdentityPackInput = {
   negativeRules?: string[];
 };
 
-function appDataRoot() { return path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "ai-content-modeling"); }
+function appDataRoot() { return applicationDataDirectory(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd()); }
 function characterRoot() { return path.join(appDataRoot(), "channel-characters"); }
 function asRecord(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function asStrings(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; }

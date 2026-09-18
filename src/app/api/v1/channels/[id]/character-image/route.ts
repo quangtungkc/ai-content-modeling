@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { applicationDataDirectory } from "@/lib/app-data";
 import { getRequiredSession } from "@/lib/auth/provider";
 import { AppError, toErrorResponse } from "@/lib/errors";
 import { logger } from "@/lib/logger";
@@ -19,7 +20,7 @@ const supportedTypes = new Map([
   ["image/bmp", ".bmp"],
   ["image/avif", ".avif"],
 ]);
-const appDataRoot = () => path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "ai-content-modeling");
+const appDataRoot = () => applicationDataDirectory(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd());
 const characterRoot = () => path.join(appDataRoot(), "channel-characters");
 
 function authError(error: unknown) {

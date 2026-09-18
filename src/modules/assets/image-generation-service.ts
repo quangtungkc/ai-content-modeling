@@ -1,12 +1,13 @@
 import { access, mkdir, readFile, stat, writeFile, rename, copyFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
+import { applicationDataDirectory } from "@/lib/app-data";
 import { db } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 
 export type GeneratedImageKind = "character" | "background" | "scene";
-const appDataRoot = () => path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "ai-content-modeling");
-const legacyAppDataRoot = () => path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "Modeling AI");
+const appDataRoot = () => applicationDataDirectory(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd());
+const legacyAppDataRoot = () => applicationDataDirectory(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "Modeling AI");
 const root = () => path.join(appDataRoot(), "generated-images");
 const videoRoot = () => path.join(appDataRoot(), "generated-videos");
 const legacyImageRoot = () => path.join(legacyAppDataRoot(), "generated-images");

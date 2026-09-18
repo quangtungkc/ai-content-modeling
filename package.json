@@ -66,6 +66,7 @@
     },
     "files": [
     "electron/main.cjs",
+    "electron/user-data.cjs",
     "electron/sqlite-release-schema.cjs",
     "electron/edge-gemini-cdp.cjs",
     "electron/gemini-edge-file-chooser.cjs",

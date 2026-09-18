@@ -3,6 +3,7 @@ import { AppError } from "@/lib/errors";
 import { channelInputSchema, type ChannelInput } from "./schema";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
+import { applicationDataDirectory } from "@/lib/app-data";
 import type { AIImageReference } from "@/services/ai/types";
 import { ensureCharacterIdentityStorage } from "./identity-pack-storage";
 import { ensureChannelCharacterIdentityPack, getCharacterIdentityPack } from "./identity-pack";
@@ -57,7 +58,7 @@ export async function readChannelMainCharacterImage(channel: { id?: string; main
     if (reference) {
       const fileName = path.basename(reference.storageKey);
       if (fileName !== reference.storageKey || !fileName.startsWith(`${channel.id}.`)) throw new AppError("CHANNEL_CHARACTER_IMAGE_INVALID", "Ảnh tham chiếu nhân vật của Channel không hợp lệ.", 409);
-      const root = path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "ai-content-modeling", "channel-characters");
+      const root = path.join(applicationDataDirectory(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd()), "channel-characters");
       const filePath = path.join(root, fileName);
       const metadata = await stat(filePath).catch(() => null);
       if (!metadata?.isFile() || metadata.size <= 0 || metadata.size > 20 * 1024 * 1024) throw new AppError("CHANNEL_CHARACTER_IMAGE_MISSING", "Ảnh tham chiếu nhân vật đã khai báo nhưng không còn trên máy.", 409);
@@ -69,7 +70,7 @@ export async function readChannelMainCharacterImage(channel: { id?: string; main
   if (fileName !== channel.mainCharacterImageKey || !/^[A-Za-z0-9_-]+\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(fileName)) {
     throw new AppError("CHANNEL_CHARACTER_IMAGE_INVALID", "Ảnh nhân vật chính của kênh không hợp lệ.", 409);
   }
-  const root = path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "ai-content-modeling", "channel-characters");
+  const root = path.join(applicationDataDirectory(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd()), "channel-characters");
   const filePath = path.join(root, fileName);
   let metadata;
   try {
