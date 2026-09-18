@@ -4,38 +4,45 @@ import { channelInputSchema, type ChannelInput } from "./schema";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import type { AIImageReference } from "@/services/ai/types";
+import { ensureCharacterIdentityStorage } from "./identity-pack-storage";
+import { ensureChannelCharacterIdentityPack, getCharacterIdentityPack } from "./identity-pack";
 
-function serializeChannel<T extends { id: string; mainCharacterImageKey?: string | null }>(channel: T) {
+async function serializeChannel<T extends { id: string; mainCharacterImageKey?: string | null }>(channel: T, userId: string) {
   return {
     ...channel,
     mainCharacterImageUrl: channel.mainCharacterImageKey
       ? `/api/v1/channels/${channel.id}/character-image`
       : null,
+    characterIdentityPack: await getCharacterIdentityPack(channel.id, userId),
   };
 }
 
 export async function listChannels(userId: string) {
+  await ensureCharacterIdentityStorage();
   const channels = await db.channel.findMany({ where: { userId, status: "ACTIVE" }, orderBy: { createdAt: "asc" } });
-  return channels.map(serializeChannel);
+  return Promise.all(channels.map(channel => serializeChannel(channel, userId)));
 }
 
 export async function getChannel(id: string, userId: string) {
+  await ensureCharacterIdentityStorage();
   const channel = await db.channel.findFirst({ where: { id, userId } });
   if (!channel) throw new AppError("CHANNEL_NOT_FOUND", "Không tìm thấy Channel.", 404);
-  return serializeChannel(channel);
+  return serializeChannel(channel, userId);
 }
 
 export async function createChannel(userId: string, input: unknown) {
+  await ensureCharacterIdentityStorage();
   const data = channelInputSchema.parse(input);
   const { videoDuration, ...channelData } = data;
-  return serializeChannel(await db.channel.create({ data: { ...channelData, userId, videoDurationSec: videoDuration } }));
+  return serializeChannel(await db.channel.create({ data: { ...channelData, userId, videoDurationSec: videoDuration } }), userId);
 }
 
 export async function updateChannel(id: string, userId: string, input: unknown) {
+  await ensureCharacterIdentityStorage();
   const parsed = channelInputSchema.parse(input) as ChannelInput;
   const { videoDuration, ...data } = parsed;
   await getChannel(id, userId);
-  return serializeChannel(await db.channel.update({ where: { id }, data: { ...data, videoDurationSec: videoDuration } }));
+  return serializeChannel(await db.channel.update({ where: { id }, data: { ...data, videoDurationSec: videoDuration } }), userId);
 }
 
 export async function deleteChannel(id: string, userId: string) {
@@ -43,7 +50,20 @@ export async function deleteChannel(id: string, userId: string) {
   return db.channel.update({ where: { id }, data: { status: "INACTIVE" } });
 }
 
-export async function readChannelMainCharacterImage(channel: { mainCharacterImageKey?: string | null; mainCharacterImageMimeType?: string | null; mainCharacterImageName?: string | null }): Promise<AIImageReference | undefined> {
+export async function readChannelMainCharacterImage(channel: { id?: string; mainCharacterImageKey?: string | null; mainCharacterImageMimeType?: string | null; mainCharacterImageName?: string | null }): Promise<AIImageReference | undefined> {
+  if (channel.id) {
+    const pack = await ensureChannelCharacterIdentityPack(channel.id);
+    const reference = pack?.referenceImages.find(item => item.active);
+    if (reference) {
+      const fileName = path.basename(reference.storageKey);
+      if (fileName !== reference.storageKey || !fileName.startsWith(`${channel.id}.`)) throw new AppError("CHANNEL_CHARACTER_IMAGE_INVALID", "Ảnh tham chiếu nhân vật của Channel không hợp lệ.", 409);
+      const root = path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "ai-content-modeling", "channel-characters");
+      const filePath = path.join(root, fileName);
+      const metadata = await stat(filePath).catch(() => null);
+      if (!metadata?.isFile() || metadata.size <= 0 || metadata.size > 20 * 1024 * 1024) throw new AppError("CHANNEL_CHARACTER_IMAGE_MISSING", "Ảnh tham chiếu nhân vật đã khai báo nhưng không còn trên máy.", 409);
+      return { mimeType: reference.mimeType ?? "image/png", data: (await readFile(filePath)).toString("base64"), name: reference.name ?? fileName };
+    }
+  }
   if (!channel.mainCharacterImageKey) return undefined;
   const fileName = path.basename(channel.mainCharacterImageKey);
   if (fileName !== channel.mainCharacterImageKey || !/^[A-Za-z0-9_-]+\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(fileName)) {

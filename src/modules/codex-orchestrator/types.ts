@@ -1,3 +1,5 @@
+import type { SourceValidationContext } from "@/modules/source-validation/multi-stage";
+
 export const CODEX_STAGES = [
   "ANALYSIS",
   "MODELING",
@@ -31,6 +33,7 @@ export const CODEX_EVENT_TYPES = [
   "DECISION_REQUIRED",
   "FINAL_ASSEMBLY_COMPLETED",
   "FINAL_AUDIT_STARTED",
+  "FINAL_AUDIT_RECORDED",
   "FINAL_AUDIT_FAILED",
   "FINAL_AUDIT_PASSED",
   "JOB_COMPLETED",
@@ -48,6 +51,13 @@ export const CODEX_EVENT_TYPES = [
   "CODEX_WAKE_REQUESTED",
   "CODEX_WAKE_FAILED",
   "WORKER_CRASHED",
+  "TROUBLESHOOTING_INCIDENT_CREATED",
+  "TROUBLESHOOTING_MATCHED",
+  "TROUBLESHOOTING_REPORT_EXPORT_WARNING",
+  "TROUBLESHOOTING_REPAIR_ATTEMPTED",
+  "TROUBLESHOOTING_RESUMED",
+  "TROUBLESHOOTING_PAUSED",
+  "GENERATION_SUCCESS",
 ] as const;
 
 export type CodexEventType = (typeof CODEX_EVENT_TYPES)[number];
@@ -80,6 +90,10 @@ export type CodexAction = {
 export type SceneExpectedState = {
   sceneId: string;
   sceneNumber: number;
+  expectedIdentity: unknown;
+  expectedAppearance: unknown;
+  // Kept as a compatibility alias for older checkpoints. New validators must
+  // use expectedIdentity and expectedAppearance separately.
   expectedCharacter: unknown;
   characterVersion: number | null;
   expectedBackground: unknown;
@@ -92,12 +106,20 @@ export type SceneExpectedState = {
   requiredVisualElements: string[];
   forbiddenElements: string[];
   sourceModelingIntent: string;
+  sourceSceneId?: string;
+  sourceSceneOrder?: number;
+  sourceActionSequence?: string[];
+  sourceCameraSpec?: unknown;
+  sourceSpatialSpec?: unknown;
+  sourceMustPreserve?: string[];
+  sourceAllowedTransformations?: string[];
   startFramePrompt: string;
   videoPrompt: string;
 };
 
 export type ExpectedState = {
   stage: CodexStage;
+  candidateId?: string;
   projectId?: string;
   requiredAssetKeys?: string[];
   expectedSceneNumbers?: number[];
@@ -107,6 +129,7 @@ export type ExpectedState = {
   requireAudio?: boolean;
   requireFinalVideo?: boolean;
   scenes?: SceneExpectedState[];
+  sourceValidation?: SourceValidationContext;
 };
 
 export type ValidationIssue = {
@@ -122,6 +145,18 @@ export type ValidationOutput = {
   verdict: ValidationVerdict;
   failureKind?: FailureKind;
   issues: ValidationIssue[];
+  sourceObservation?: Record<string, unknown>;
+  verdictCanonicalization?: {
+    verdictCanonicalizationApplied: boolean;
+    canonicalizedVerdictFields: string[];
+    changes: Array<{
+      path: string;
+      originalValue: unknown;
+      originalType: string;
+      canonicalValue: boolean;
+      canonicalType: "boolean";
+    }>;
+  };
 };
 
 export type CodexStageSnapshot = {

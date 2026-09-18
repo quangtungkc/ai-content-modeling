@@ -1,4 +1,31 @@
+import fs from "node:fs";
+import path from "node:path";
 import { z } from "zod";
+
+type DesktopRuntimeConfig = { credentialEncryptionKey?: string; authSecret?: string };
+
+function readDesktopRuntimeConfig(): DesktopRuntimeConfig | null {
+  if (process.env.DESKTOP_MODE !== "1") return null;
+  const configPath = process.env.DESKTOP_CONFIG_PATH || path.join(process.env.APPDATA || "", "ai-content-modeling", "desktop-config.json");
+  try {
+    const value = JSON.parse(fs.readFileSync(configPath, "utf8")) as DesktopRuntimeConfig;
+    return value && typeof value === "object" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveDesktopDatabaseUrl(value = process.env.DATABASE_URL) {
+  if (process.env.DESKTOP_MODE !== "1") return value;
+  if (process.env.DESKTOP_DATABASE_URL) return process.env.DESKTOP_DATABASE_URL;
+  const runtimePath = path.join(process.env.APPDATA || "", "ai-content-modeling", "modeling-ai.db");
+  if (fs.existsSync(runtimePath)) return `file:${runtimePath.replace(/\\/g, "/")}`;
+  return value;
+}
+
+export function resolveDesktopCredentialEncryptionKey(value = process.env.CREDENTIAL_ENCRYPTION_KEY) {
+  return readDesktopRuntimeConfig()?.credentialEncryptionKey || value;
+}
 
 const envSchema = z.object({
   DATABASE_URL: z.string().url(),
@@ -15,6 +42,9 @@ const envSchema = z.object({
   CODEX_EXTERNAL_RESEARCH_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   CODEX_MODEL: z.string().default("gpt-5"),
   CODEX_MAX_RECOVERY_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
+  CODEX_MAX_RECOVERY_PER_ERROR: z.coerce.number().int().min(1).max(20).default(3),
+  CODEX_MAX_RECOVERY_PER_STAGE: z.coerce.number().int().min(1).max(50).default(8),
+  CODEX_MAX_RECOVERY_PER_JOB: z.coerce.number().int().min(1).max(100).default(20),
   CODEX_STALL_TIMEOUT_MS: z.coerce.number().int().min(60_000).max(30 * 60_000).default(5 * 60_000),
   CODEX_SELF_REPAIR_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
   CODEX_SELF_REPAIR_WORKSPACE: z.string().optional(),
@@ -27,9 +57,9 @@ const envSchema = z.object({
 
 export function getEnv() {
   return envSchema.parse({
-    DATABASE_URL: process.env.DATABASE_URL,
+    DATABASE_URL: resolveDesktopDatabaseUrl(),
     AUTH_SECRET: process.env.AUTH_SECRET,
-    CREDENTIAL_ENCRYPTION_KEY: process.env.CREDENTIAL_ENCRYPTION_KEY,
+    CREDENTIAL_ENCRYPTION_KEY: resolveDesktopCredentialEncryptionKey(),
     AI_PROVIDER: process.env.AI_PROVIDER,
     NODE_ENV: process.env.NODE_ENV,
     META_APP_ID: process.env.META_APP_ID,
@@ -41,6 +71,9 @@ export function getEnv() {
     CODEX_EXTERNAL_RESEARCH_ENABLED: process.env.CODEX_EXTERNAL_RESEARCH_ENABLED,
     CODEX_MODEL: process.env.CODEX_MODEL,
     CODEX_MAX_RECOVERY_ATTEMPTS: process.env.CODEX_MAX_RECOVERY_ATTEMPTS,
+    CODEX_MAX_RECOVERY_PER_ERROR: process.env.CODEX_MAX_RECOVERY_PER_ERROR,
+    CODEX_MAX_RECOVERY_PER_STAGE: process.env.CODEX_MAX_RECOVERY_PER_STAGE,
+    CODEX_MAX_RECOVERY_PER_JOB: process.env.CODEX_MAX_RECOVERY_PER_JOB,
     CODEX_STALL_TIMEOUT_MS: process.env.CODEX_STALL_TIMEOUT_MS,
     CODEX_SELF_REPAIR_ENABLED: process.env.CODEX_SELF_REPAIR_ENABLED,
     CODEX_SELF_REPAIR_WORKSPACE: process.env.CODEX_SELF_REPAIR_WORKSPACE,

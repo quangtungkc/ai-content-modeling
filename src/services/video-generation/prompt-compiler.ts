@@ -13,6 +13,7 @@ export function compileVeoPrompt(input: VeoPromptInput): VeoRequest {
     `AUDIO: ${JSON.stringify(input.audio)}`,
     `DURATION: ${input.duration} seconds`,
     `CONSTRAINTS: ${input.constraints.join("; ") || "None"}`,
+    ...(input.sourceModelingConstraints ? [`SOURCE MODELING CONSTRAINTS:\n${input.sourceModelingConstraints}`] : []),
   ];
   return { sceneId: input.sceneId, prompt: sections.join("\n"), referenceImages: input.assetReferences, aspectRatio: input.aspectRatio ?? "16:9", resolution: input.resolution ?? "1080p", duration: input.duration, firstFrame: input.firstFrame, lastFrame: input.lastFrame, audioEnabled: input.audioEnabled ?? true };
 }

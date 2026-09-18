@@ -65,6 +65,7 @@ export function createErrorSignature(stage: CodexStage, message: string) {
 }
 
 export function nextPendingAction(stages: CodexStageSnapshot[]): CodexAction {
+  if (stages.some((item) => item.stage === "FINAL_ASSEMBLY" && item.status === "COMPLETED")) return { name: "jobComplete", reason: "Final Assembly hợp lệ đã tạo output generation thành công." };
   const stage = stages.find((item) => item.status === "RUNNING" || item.status === "RETRYING") ?? stages.find((item) => item.status === "PENDING");
   if (!stage) return { name: "jobComplete", reason: "Không còn stage chờ chạy." };
   return { name: stageAction[stage.stage], stage: stage.stage, strategy: stage.lastStrategy };
@@ -73,10 +74,13 @@ export function nextPendingAction(stages: CodexStageSnapshot[]): CodexAction {
 export function recoveryStrategies(stage: CodexStage, kind: FailureKind, errorMessage: string): string[] {
   if (kind === "ENGINEERING_FAILURE") return ["codex-guarded-code-repair"];
   const message = errorMessage.toLowerCase();
+  if (/google flow.*(?:không mở được|mở không được|project.*(?:fail|failed|timeout|không))|flow.*project.*(?:fail|failed|timeout|không mở)|flow_project_(?:open|create)_failure/i.test(message)) {
+    return ["flow-refresh-redetect", "flow-home-recreate", "flow-window-recreate", "flow-session-recreate"];
+  }
   if (stage === "SCENES" && /không tìm thấy ảnh scene[-\s]?\d+|start frame google flow|ảnh cảnh .*start frame/.test(message)) {
     return ["reupload-missing-start-frame", "refresh-flow-media-picker", "regenerate-failed-scenes-only"];
   }
-  if (/quality_provider_failure|gemini_quality|quality provider|quality validator.*(?:connection|required|không khả dụng)|429|rate.?limit|quota/.test(message)) {
+  if (/quality_provider_failure|quality_browser|gemini_quality|quality provider|quality validator.*(?:connection|required|không khả dụng)|429|rate.?limit|quota/.test(message)) {
     if (stage === "ASSETS" || stage === "SCENES") return ["retry-quality-validation", "provider-backoff", "retry-quality-validation-after-backoff"];
   }
   if (/api_provider_unavailable|google api-first|image api|veo api|provider.*unavailable/.test(message)) {
@@ -94,6 +98,10 @@ export function recoveryStrategies(stage: CodexStage, kind: FailureKind, errorMe
 }
 
 export function recoveryActionFor(stage: CodexStage, strategy?: string | null): CodexActionName {
+  if (strategy && /^flow-/.test(strategy)) {
+    if (stage === "ASSETS") return "runAssetStage";
+    if (stage === "SCENES") return "runSceneGenerationStage";
+  }
   if (strategy && /quality-validation|provider-backoff/.test(strategy) && stage === "ASSETS") return "validateAssets";
   if (strategy && /quality-validation|provider-backoff/.test(strategy) && stage === "SCENES") return "validateScenes";
   if (stage === "ASSETS") return "regenerateAsset";
@@ -105,8 +113,9 @@ export function recoveryActionFor(stage: CodexStage, strategy?: string | null): 
 
 export function extractRecoveryTargetIds(message: string, actual: Record<string, unknown>) {
   const targets = new Set<string>();
-  if (Array.isArray(actual.issues)) {
-    for (const value of actual.issues) {
+  const issues = Array.isArray(actual.semanticIssues) ? actual.semanticIssues : actual.issues;
+  if (Array.isArray(issues)) {
+    for (const value of issues) {
       if (!value || typeof value !== "object" || Array.isArray(value)) continue;
       const issue = value as Record<string, unknown>;
       const target = issue.targetId ?? issue.sceneNumber;
@@ -124,7 +133,7 @@ export function chooseRecoveryStrategy(strategies: string[], attempted: string[]
 
 export function nextContinuousRecoveryStrategy(strategies: string[], retryIndex: number) {
   const retryable = strategies.filter((strategy) => !/request-human/i.test(strategy));
-  return retryable[retryIndex % retryable.length] ?? "retry-stage-once";
+  return retryable[retryIndex] ?? null;
 }
 
 export function planSceneBatches(sceneNumbers: number[], maxConcurrency: number) {
@@ -184,6 +193,38 @@ function extractList(text: string) {
   return text.split(/[\n,;•]/).map((item) => item.replace(/^\s*\d+[.)-]?\s*/, "").trim()).filter(Boolean).slice(0, 20);
 }
 
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function identityOnly(characterDesign: unknown) {
+  const source = record(characterDesign);
+  const protagonist = typeof source.protagonist === "string"
+    ? source.protagonist.replace(/,?\s*mặc\s+[^.]+/i, ".").replace(/\.{2,}/g, ".").trim()
+    : source.protagonist;
+  return {
+    ...source,
+    ...(protagonist !== undefined ? { protagonist } : {}),
+    invariants: ["face identity", "facial structure", "base hairstyle", "skin tone", "body proportions", "height/build", "age appearance", "distinctive physical traits", "core character design language"],
+  };
+}
+
+function sceneAppearance(characterDesign: unknown, visualBlock: string, startFramePrompt?: string | null, requiredProps: string[] = []) {
+  const protagonist = String(record(characterDesign).protagonist ?? "");
+  const wardrobe = [visualBlock, startFramePrompt ?? "", protagonist]
+    .flatMap((text) => text.match(/(?:mặc|wearing|shirt|tank top|t-shirt|áo\s+[^,.\n]+|pants|quần\s+[^,.\n]+|dress|váy\s+[^,.\n]+|pajamas|coat|shoes|giày|glasses|kính|hat|mũ|jewelry|trang sức)[^.;\n]*/gi) ?? [])
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return {
+    wardrobe: [...new Set(wardrobe)],
+    accessories: [],
+    requiredProps,
+    sceneState: visualBlock,
+    startFrameState: startFramePrompt ?? "",
+    authority: "Storyboard scene appearance overrides the canonical character reference outfit.",
+  };
+}
+
 export function buildSceneExpectedState(input: {
   sceneId: string;
   sceneNumber: number;
@@ -195,22 +236,42 @@ export function buildSceneExpectedState(input: {
   characterDesign: unknown;
   backgroundDesign: unknown;
   sourceModelingIntent: string;
+  sourceSceneId?: string | null;
+  sourceSceneOrder?: number | null;
+  actionSequence?: unknown;
+  cameraSpec?: unknown;
+  spatialSpec?: unknown;
+  mustPreserve?: unknown;
+  allowedTransformations?: unknown;
 }): SceneExpectedState {
+  const requiredProps = extractList(input.visualBlock).filter((item) => /prop|vật|đạo cụ|cầm|trên bàn|trên tay/i.test(item));
+  const sourceActionSequence = Array.isArray(input.actionSequence) && input.actionSequence.every((item): item is string => typeof item === "string") ? input.actionSequence : undefined;
+  const sourceMustPreserve = Array.isArray(input.mustPreserve) && input.mustPreserve.every((item): item is string => typeof item === "string") ? input.mustPreserve : undefined;
+  const sourceAllowedTransformations = Array.isArray(input.allowedTransformations) && input.allowedTransformations.every((item): item is string => typeof item === "string") ? input.allowedTransformations : undefined;
   return {
     sceneId: input.sceneId,
     sceneNumber: input.sceneNumber,
+    expectedIdentity: identityOnly(input.characterDesign),
+    expectedAppearance: sceneAppearance(input.characterDesign, input.visualBlock, input.startFramePrompt, requiredProps),
     expectedCharacter: input.characterDesign,
     characterVersion: 1,
     expectedBackground: input.backgroundDesign,
-    requiredProps: extractList(input.visualBlock).filter((item) => /prop|vật|đạo cụ|cầm|trên bàn|trên tay/i.test(item)),
-    expectedAction: input.actionBlock,
-    expectedCamera: input.visualBlock,
+    requiredProps,
+    expectedAction: sourceActionSequence?.map((action, index) => `${index + 1}. ${action}`).join("\n") ?? input.actionBlock,
+    expectedCamera: input.cameraSpec ? JSON.stringify(input.cameraSpec) : input.visualBlock,
     expectedDuration: 4,
     expectedDialogue: input.audioBlock,
     expectedEmotion: input.visualBlock,
     requiredVisualElements: extractList(input.visualBlock),
     forbiddenElements: ["unrelated character", "unrelated prop", "collage", "storyboard", "split panel", "caption", "logo"],
     sourceModelingIntent: input.sourceModelingIntent,
+    sourceSceneId: input.sourceSceneId ?? undefined,
+    sourceSceneOrder: input.sourceSceneOrder ?? undefined,
+    sourceActionSequence,
+    sourceCameraSpec: input.cameraSpec,
+    sourceSpatialSpec: input.spatialSpec,
+    sourceMustPreserve,
+    sourceAllowedTransformations,
     startFramePrompt: input.startFramePrompt ?? "",
     videoPrompt: input.englishPrompt ?? "",
   };

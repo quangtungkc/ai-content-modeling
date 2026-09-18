@@ -11,3 +11,4 @@ src-tauri/target/
 prisma/*.db
 electron/dist/
 release*/
+/viral-content-modeling-review.zip

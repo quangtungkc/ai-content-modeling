@@ -37,11 +37,14 @@ contextBridge.exposeInMainWorld("desktopGemini", {
   open: (prompt) => invoke("gemini-browser:open", prompt),
   openFlow: () => invoke("gemini-browser:open-flow"),
   copy: (prompt) => invoke("gemini-browser:copy", prompt),
+  analyzeSource: (video, channelDNA, runId) => invoke("gemini-browser:analyze-source", { video, channelDNA, runId }),
+  generateIdea: (video, analysis, channelDNA, artStyle, runId) => invoke("gemini-browser:generate-idea", { video, analysis, channelDNA, artStyle, runId }),
+  developProject: (video, analysis, idea, channelDNA, aspectRatio, runId) => invoke("gemini-browser:develop-project", { video, analysis, idea, channelDNA, aspectRatio, runId }),
   importImages: (projectId, slots) => invoke("gemini-browser:import-images", { projectId, slots }),
-  runJob: (projectId, slots, onProgress) => {
+  runJob: (projectId, slots, onProgress, runId) => {
     const handler = (_event, progress) => onProgress?.(progress);
     ipcRenderer.on("gemini-browser:progress", handler);
-    return invoke("gemini-browser:run-job", { projectId, slots }).finally(() => ipcRenderer.removeListener("gemini-browser:progress", handler));
+    return invoke("gemini-browser:run-job", { projectId, slots, runId }).finally(() => ipcRenderer.removeListener("gemini-browser:progress", handler));
   },
   runVideoJob: (projectId, slots, onProgress) => {
     const handler = (_event, progress) => onProgress?.(progress);
@@ -62,6 +65,8 @@ contextBridge.exposeInMainWorld("desktopFlow", {
     ipcRenderer.on("gemini-browser:video-progress", handler);
     return invoke("gemini-browser:run-video-job", { projectId, channelId, slots }).finally(() => ipcRenderer.removeListener("gemini-browser:video-progress", handler));
   },
+  resumeAfterManualSubmission: (checkpointId) => invoke("flow-browser:resume-after-manual-submission", { checkpointId }),
+  prepareManualSubmission: (projectId, channelId, slot) => invoke("flow-browser:prepare-manual-submission", { projectId, channelId, slot }),
 });
 
 contextBridge.exposeInMainWorld("desktopVideoEditor", {

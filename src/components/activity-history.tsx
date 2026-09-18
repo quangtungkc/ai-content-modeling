@@ -31,6 +31,9 @@ type AutomationRun = {
     currentStage: string;
     currentAction: string | null;
     retryCount: number;
+    generationStatus: string;
+    qualityStatus: string;
+    outputReady: boolean;
     stages: Array<{ stage: string; status: string; retryCount: number; validationResult: string | null; lastStrategy: string | null }>;
     events: Array<{ id: string; sequence: number; type: string; stage: string | null; payload: Record<string, unknown>; reasoningSummary: string | null; createdAt: string }>;
   } | null;
@@ -69,6 +72,7 @@ export function ActivityHistory() {
   const selectedRun = runs.find((run) => run.id === selectedRunId) ?? null;
   const completedSteps = selectedRun?.steps.filter((step) => step.status === "completed").length ?? 0;
   const activeStep = selectedRun?.steps.find((step) => step.status === "running") ?? null;
+  const postAssemblyQa = selectedRun ? getPostAssemblyQaSummary(selectedRun) : null;
 
   useEffect(() => {
     if (!selectedRun) {
@@ -205,6 +209,7 @@ export function ActivityHistory() {
                   </div>
                 ))}
               </div>
+              {postAssemblyQa && <PostAssemblyQaCard qa={postAssemblyQa} />}
               {selectedRun.finalVideoUrl && selectedRun.steps.every((step) => step.key !== "final-video" || step.status !== "completed") && <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">Video cuối đã có sẵn: mở rộng bước “Ghép và xuất video hoàn chỉnh” để xem hoặc tải xuống.</div>}
               {selectedRun.error && <p className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{selectedRun.error}</p>}
             </article>
@@ -230,6 +235,67 @@ function CodexStepEvents({ events }: { events: NonNullable<AutomationRun["codexA
       {Object.keys(event.payload ?? {}).length > 0 && <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words text-[11px] text-[#6883aa]">{JSON.stringify(event.payload, null, 2)}</pre>}
     </div>)}
   </div>;
+}
+
+type PostAssemblyQaSummary = {
+  qualityStatus: string;
+  generationStatus: string;
+  outputReady: boolean;
+  qaRunId: string | null;
+  issueCount: number;
+  incidentId: string | null;
+  repairCount: number;
+  sourceFidelity: { status: string; score: number | null; breakdown: Record<string, number | null> } | null;
+};
+
+function getPostAssemblyQaSummary(run: AutomationRun): PostAssemblyQaSummary | null {
+  const agent = run.codexAgent;
+  if (!agent && !run.finalVideoUrl) return null;
+  const auditEvent = agent?.events.filter((event) => event.type === "FINAL_AUDIT_RECORDED").at(-1);
+  const payload = auditEvent?.payload ?? {};
+  const findings = Array.isArray(payload.findings) ? payload.findings : [];
+  const issueCount = findings.filter((finding) => finding && typeof finding === "object" && (finding as { status?: unknown }).status === "FAIL").length;
+  const incidents = Array.isArray(payload.incidentsCreated) ? payload.incidentsCreated.filter((value): value is string => typeof value === "string") : [];
+  const repairs = Array.isArray(payload.repairsTriggered) ? payload.repairsTriggered : [];
+  const sourceFinding = findings.find((finding) => finding && typeof finding === "object" && (finding as { validatorId?: unknown }).validatorId === "source-fidelity") as { actual?: { validationStatus?: unknown; overallModelingFidelityScore?: unknown; breakdown?: unknown } } | undefined;
+  const sourceActual = sourceFinding?.actual;
+  const sourceFidelity = sourceActual ? { status: typeof sourceActual.validationStatus === "string" ? sourceActual.validationStatus : "NOT_EVALUATED", score: typeof sourceActual.overallModelingFidelityScore === "number" ? sourceActual.overallModelingFidelityScore : null, breakdown: sourceActual.breakdown && typeof sourceActual.breakdown === "object" && !Array.isArray(sourceActual.breakdown) ? sourceActual.breakdown as Record<string, number | null> : {} } : null;
+  return {
+    qualityStatus: agent?.qualityStatus ?? (typeof payload.qualityStatus === "string" ? payload.qualityStatus : "NOT_RUN"),
+    generationStatus: agent?.generationStatus ?? (run.finalVideoUrl ? "SUCCESS" : "RUNNING"),
+    outputReady: agent?.outputReady ?? Boolean(run.finalVideoUrl),
+    qaRunId: typeof payload.qaRunId === "string" ? payload.qaRunId : null,
+    issueCount,
+    incidentId: incidents[0] ?? null,
+    repairCount: repairs.length,
+    sourceFidelity,
+  };
+}
+
+function PostAssemblyQaCard({ qa }: { qa: PostAssemblyQaSummary }) {
+  const copy: Record<string, { title: string; detail: string; style: string }> = {
+    NOT_RUN: { title: "Chưa kiểm tra", detail: "Video đã xuất thành công; hậu kiểm chất lượng chưa chạy.", style: "border-slate-200 bg-slate-50 text-slate-800" },
+    CHECKING: { title: "Đang kiểm tra chất lượng video…", detail: "Video hiện tại vẫn sẵn sàng trong lúc hậu kiểm chạy nền.", style: "border-amber-200 bg-amber-50 text-amber-900" },
+    REPAIRING: { title: "Đã phát hiện vấn đề — Đang tự sửa…", detail: "Bản video hiện tại được giữ nguyên cho đến khi candidate mới đạt kiểm tra.", style: "border-violet-200 bg-violet-50 text-violet-900" },
+    APPROVED: { title: "Kiểm tra hoàn tất — Video đạt yêu cầu", detail: "Hậu kiểm sau khi xuất đã hoàn tất.", style: "border-emerald-200 bg-emerald-50 text-emerald-900" },
+    NEEDS_REVIEW: { title: "Phát hiện vấn đề cần xem xét", detail: "Video hiện tại vẫn được giữ nguyên và vẫn có thể xem hoặc tải xuống.", style: "border-orange-200 bg-orange-50 text-orange-900" },
+    REPAIR_FAILED: { title: "Tự sửa chưa thành công — Video hiện tại vẫn được giữ nguyên", detail: "Candidate không đạt hậu kiểm nên không thay thế video đang có.", style: "border-rose-200 bg-rose-50 text-rose-900" },
+  };
+  const current = copy[qa.qualityStatus] ?? copy.NOT_RUN;
+  return <section className={`mt-5 rounded-lg border p-4 text-sm ${current.style}`}>
+    <p className="text-xs font-extrabold uppercase tracking-wide">Kiểm tra chất lượng sau khi xuất</p>
+    <p className="mt-1 font-extrabold">{current.title}</p>
+    <p className="mt-1 text-xs opacity-85">{current.detail}</p>
+    <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs font-semibold">
+      <span>Xuất video: {qa.generationStatus === "SUCCESS" ? "Hoàn tất" : qa.generationStatus}</span>
+      <span>Video: {qa.outputReady ? "Sẵn sàng xem/tải" : "Chưa sẵn sàng"}</span>
+      {qa.qaRunId && <span>QA run: {qa.qaRunId}</span>}
+      {qa.issueCount > 0 && <span>Vấn đề phát hiện: {qa.issueCount}</span>}
+      {qa.repairCount > 0 && <span>Đã kích hoạt sửa: {qa.repairCount}</span>}
+      {qa.incidentId && <span>Incident: {qa.incidentId}</span>}
+    </div>
+    {qa.sourceFidelity && <div className="mt-3 grid gap-2 border-t border-current/15 pt-3 text-xs sm:grid-cols-4"><span><strong>Modeling Fidelity:</strong> {qa.sourceFidelity.score === null ? "NOT_EVALUATED" : `${Math.round(qa.sourceFidelity.score * 100)}%`}</span><span><strong>Structure:</strong> {qa.sourceFidelity.breakdown.structureFidelity === undefined || qa.sourceFidelity.breakdown.structureFidelity === null ? "NOT_EVALUATED" : qa.sourceFidelity.breakdown.structureFidelity === 1 ? "PASS" : "FAIL"}</span><span><strong>Action:</strong> {qa.sourceFidelity.breakdown.actionFidelity === undefined || qa.sourceFidelity.breakdown.actionFidelity === null ? "NOT_EVALUATED" : qa.sourceFidelity.breakdown.actionFidelity === 1 ? "PASS" : "FAIL"}</span><span><strong>Camera/Timing:</strong> {qa.sourceFidelity.status}</span></div>}
+  </section>;
 }
 
 function StatusBadge({ status }: { status: AutomationRun["status"] }) {

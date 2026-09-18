@@ -4,6 +4,7 @@ import { visualBreakdownSchema } from "./video-schemas";
 import { finalReviewSchema } from "./review-schemas";
 import { assetValidationSchema } from "./asset-schemas";
 import type { AIInput, AIProvider, ModelingDirection, VideoAnalysis, VideoUnderstandingInput, VisualBreakdown, FinalReviewInput, FinalReview, AssetValidationInput, AssetValidation, DevelopedIdea } from "./types";
+import { STRICT_GEMINI_PROMPT_COMPILER_SYSTEM_INSTRUCTION } from "@/modules/prompt-fidelity/validator";
 
 function modelingIdeaInstruction(artStyle?: string) {
   return `Bạn đang ở bước TẠO MODELING IDEA cho một video hài hình ảnh ngắn. Hãy "bắt mạch" bản gốc trước khi sáng tạo, dựa trên dữ liệu phân tích được cung cấp.
@@ -38,7 +39,9 @@ Phong cách mỹ thuật được chọn: ${artStyle ?? "Dùng phong cách hiệ
 }
 
 function developedIdeaInstruction(aspectRatio?: string) {
-  return `Phát triển Modeling Idea này thành gói sản xuất sẵn sàng triển khai cho video hài hình ảnh ngắn. Trước khi viết storyboard, bắt buộc thực hiện đủ ba bước sau:
+  return `${STRICT_GEMINI_PROMPT_COMPILER_SYSTEM_INSTRUCTION}
+
+Phát triển Modeling Idea này thành gói sẵn sàng triển khai cho video hài hình ảnh ngắn. Trong vai trò prompt compiler, không viết lại câu chuyện và không thêm sáng tạo ngoài source evidence. Trước khi viết storyboard, bắt buộc thực hiện đủ ba bước sau:
 
 BƯỚC 1 — PHÂN TÍCH VÀ BẮT MẠCH BẢN GỐC (DECONSTRUCTION):
 - Trong deconstruction, chỉ ra điểm gây cười cốt lõi (The Gag), bằng chứng từ phân tích, góc máy, nhịp điệu, khoảng lặng và phần tối giản cần bảo tồn.
@@ -59,9 +62,11 @@ BƯỚC 3 — STORYBOARD SCRIPT NỐI TIẾP CHẶT CHẼ:
   3. audioBlock: liệt kê Foley đồng bộ 100% với từng hành động; ghi rõ nhịp, cao trào và khoảng lặng. Sự im lặng cũng được coi là một loại âm thanh để tấu hài.
 - startFramePrompt là prompt tiếng Anh riêng để tạo đúng một ảnh bắt đầu đứng yên cho cảnh 4 giây. Prompt phải mô tả chính xác khung hình đầu: không gian, bố cục, tư thế và trạng thái ban đầu, vị trí nhân vật/đạo cụ, ánh sáng, góc máy và phong cách; dùng ảnh nhân vật chính cùng ảnh bối cảnh làm tham chiếu; tuyệt đối không mô tả chuyển động tiếp diễn, không tạo collage, storyboard, sheet, chữ hoặc nhiều biến thể.
 - englishPrompt là prompt tiếng Anh riêng cho video quay 4 giây sau khi đã có ảnh bắt đầu. Prompt phải chỉ rõ cách animate từ đúng ảnh bắt đầu, giữ nguyên ý nghĩa, thứ tự hành động, nhân vật, đạo cụ, bối cảnh, nhịp máy quay, điểm gag và kết thúc; không được biến thành một câu chuyện khác hoặc thêm hành động mới.
+- Trong sourceModelingSpec, chỉ ghi phần bằng chứng nội dung của video gốc; sourceVideoId do ứng dụng lắp ráp từ SourceVideo record, không tự phát minh. sourceEvidence là evidence do Gemini quan sát/tổng hợp, có thể là mảng rỗng nếu không có evidence đủ chắc chắn; nếu có phần tử thì phải đúng shape {"timestamp": string|null, "description": string|null, "frameReference": string|null}. Không nhồi sourceVideoId, sourceVideoUrl, sourceVideoMetadata, sourceDuration hoặc platform vào sourceEvidence. sourceStartTime và sourceEndTime phải là JSON number theo đơn vị giây; sourceStartTime không âm, sourceEndTime dương và lớn hơn sourceStartTime. duration phải là JSON number theo đơn vị giây và khớp sourceEndTime - sourceStartTime trong tolerance của schema. relativeObjectPositions phải là JSON array gồm các string không rỗng; [] hợp lệ nếu không có evidence quan hệ vật thể. Không được trả một string đơn, string phân tách bằng dấu phẩy/chấm phẩy, object hoặc null. actionSequence phải là JSON array gồm ít nhất một string không rỗng cho mỗi action beat theo đúng thứ tự thời gian trong scene. Không gộp toàn bộ chuỗi hành động vào một string, numbered prose, object, null hoặc array rỗng. CAMERA CONTRACT: cameraType, shotSize, cameraAngle và framing phải là JSON string không rỗng mô tả camera intent nguồn; cameraMovement phải là JSON string hoặc null mô tả chuyển động camera, có thể bỏ qua khi dùng default null. Không trả object, array hoặc number cho các field camera. Không tự map synonym về enum vì schema hiện không có enum. Ví dụ hợp lệ: sourceStartTime 0, sourceEndTime 3, duration 3, relativeObjectPositions ["monitor in front of character", "keyboard below monitor"], actionSequence ["Character approaches", "Character opens the door"], cameraType "Medium Shot", shotSize "Medium Shot", cameraAngle "Eye Level", cameraMovement "Static", framing "Centered"; sourceStartTime 1.5, sourceEndTime 5, duration 3.5, relativeObjectPositions [], actionSequence ["Character looks inside"], cameraType "Wide Shot", shotSize "Wide Shot", cameraAngle "Eye Level", cameraMovement null, framing "Full scene". Không được trả chuỗi như "00:03", "3", "3s" hoặc "00:13.5" cho duration hay timestamp. Một source scene cho từng shot/beat lớn gồm sourceSceneId, order, timestamp bắt đầu/kết thúc, storyBeat, camera, framing, vị trí tương đối, actionSequence theo thứ tự, start/end state, transitions, timing/rhythm notes, mustPreserve và allowedTransformations. Chỉ ghi điều quan sát được từ source context; thiếu bằng chứng thì ghi rõ thiếu dữ liệu, không bịa.
+- Mỗi storyboard item ngoài sceneNumber, visualBlock, actionBlock, audioBlock, startFramePrompt và englishPrompt bắt buộc phải có sourceSceneId, sourceBeat, actionSequence (mảng theo thứ tự), cameraSpec, spatialSpec, startState, endState và targetDuration. Đây là bằng chứng cấu trúc để validator so sánh sớm, không được thay bằng prose mơ hồ.
 - Trong visualBlock, startFramePrompt và englishPrompt, phải ghi rõ nhân vật chính cố định của kênh được giữ nguyên nhận diện qua các cảnh; ảnh tham chiếu kênh sẽ được đính kèm ở bước tạo ảnh và video. Không được dùng ảnh tham chiếu để tạo sheet, collage hoặc nhân vật thứ hai.
 
-Trả đúng JSON có schemaVersion là chuỗi "1.0", gồm deconstruction, artDirection, characterDesign, backgroundDesign, storyboard và safetyReview. Mỗi phần tử storyboard bắt buộc có sceneNumber, visualBlock, actionBlock, audioBlock, startFramePrompt và englishPrompt. Viết các trường mô tả bằng tiếng Việt, riêng startFramePrompt và englishPrompt phải viết bằng tiếng Anh để gửi cho Google Flow. Khung hình đã chọn: ${aspectRatio ?? "9:16"}. Chỉ dùng mô tả hình ảnh nguyên bản, không nêu tên hoặc bắt chước studio, thương hiệu, nghệ sĩ hay nhân vật có bản quyền.`;
+Trả đúng JSON có schemaVersion là chuỗi "1.0", gồm sourceModelingSpec, deconstruction, artDirection, characterDesign, backgroundDesign, storyboard và safetyReview. Mỗi phần tử storyboard bắt buộc có sceneNumber, sourceSceneId, sourceBeat, actionSequence, cameraSpec, spatialSpec, startState, endState, targetDuration, visualBlock, actionBlock, audioBlock, startFramePrompt và englishPrompt. Viết các trường mô tả bằng tiếng Việt, riêng startFramePrompt và englishPrompt phải viết bằng tiếng Anh để gửi cho Google Flow. Khung hình đã chọn: ${aspectRatio ?? "9:16"}. Chỉ dùng mô tả hình ảnh nguyên bản, không nêu tên hoặc bắt chước studio, thương hiệu, nghệ sĩ hay nhân vật có bản quyền.`;
 }
 
 export class GeminiProvider implements AIProvider {
@@ -223,6 +228,7 @@ const developedIdeaResponseSchema: Record<string, unknown> = {
     artDirection: { type: "OBJECT" },
     characterDesign: { type: "OBJECT" },
     backgroundDesign: { type: "OBJECT" },
+    sourceModelingSpec: { type: "OBJECT" },
     storyboard: {
       type: "ARRAY",
       minItems: 1,
@@ -230,18 +236,26 @@ const developedIdeaResponseSchema: Record<string, unknown> = {
         type: "OBJECT",
         properties: {
           sceneNumber: { type: "INTEGER" },
+          sourceSceneId: { type: "STRING" },
+          sourceBeat: { type: "STRING" },
+          actionSequence: { type: "ARRAY", items: { type: "STRING" } },
+          cameraSpec: { type: "OBJECT" },
+          spatialSpec: { type: "OBJECT" },
+          startState: { type: "STRING" },
+          endState: { type: "STRING" },
+          targetDuration: { type: "NUMBER" },
           visualBlock: { type: "STRING" },
           actionBlock: { type: "STRING" },
           audioBlock: { type: "STRING" },
           startFramePrompt: { type: "STRING" },
           englishPrompt: { type: "STRING" },
         },
-        required: ["sceneNumber", "visualBlock", "actionBlock", "audioBlock", "startFramePrompt", "englishPrompt"],
+        required: ["sceneNumber", "sourceSceneId", "sourceBeat", "actionSequence", "cameraSpec", "spatialSpec", "startState", "endState", "targetDuration", "visualBlock", "actionBlock", "audioBlock", "startFramePrompt", "englishPrompt"],
       },
     },
     safetyReview: { type: "OBJECT" },
   },
-  required: ["schemaVersion", "deconstruction", "artDirection", "characterDesign", "backgroundDesign", "storyboard", "safetyReview"],
+  required: ["schemaVersion", "deconstruction", "artDirection", "characterDesign", "backgroundDesign", "sourceModelingSpec", "storyboard", "safetyReview"],
 };
 
 function parseJsonText(text: string): unknown {
@@ -329,6 +343,14 @@ function normalizeDevelopedIdea(value: unknown): unknown {
     const parsedNumber = typeof item.sceneNumber === "number" && Number.isFinite(item.sceneNumber) ? item.sceneNumber : index + 1;
     return {
       sceneNumber: parsedNumber > 0 ? Math.trunc(parsedNumber) : index + 1,
+      ...(typeof item.sourceSceneId === "string" ? { sourceSceneId: item.sourceSceneId } : {}),
+      ...(typeof item.sourceBeat === "string" ? { sourceBeat: item.sourceBeat } : {}),
+      ...(Array.isArray(item.actionSequence) ? { actionSequence: item.actionSequence.filter((action): action is string => typeof action === "string") } : {}),
+      ...(item.cameraSpec && typeof item.cameraSpec === "object" && !Array.isArray(item.cameraSpec) ? { cameraSpec: item.cameraSpec } : {}),
+      ...(item.spatialSpec && typeof item.spatialSpec === "object" && !Array.isArray(item.spatialSpec) ? { spatialSpec: item.spatialSpec } : {}),
+      ...(typeof item.startState === "string" ? { startState: item.startState } : {}),
+      ...(typeof item.endState === "string" ? { endState: item.endState } : {}),
+      ...(typeof item.targetDuration === "number" ? { targetDuration: item.targetDuration } : {}),
       visualBlock: text(item.visualBlock ?? item.visual ?? item.image, "Chưa có mô tả hình ảnh cho cảnh này."),
       actionBlock: text(item.actionBlock ?? item.action, "Chưa có mô tả hành động cho cảnh này."),
       audioBlock: text(item.audioBlock ?? item.audio, "Không có âm thanh đặc biệt."),
@@ -342,6 +364,7 @@ function normalizeDevelopedIdea(value: unknown): unknown {
     artDirection: record(source.artDirection),
     characterDesign: record(source.characterDesign ?? source.characters),
     backgroundDesign: record(source.backgroundDesign ?? source.background),
+    ...(source.sourceModelingSpec && typeof source.sourceModelingSpec === "object" ? { sourceModelingSpec: source.sourceModelingSpec } : {}),
     storyboard,
     safetyReview: record(source.safetyReview),
   };

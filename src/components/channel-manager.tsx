@@ -20,6 +20,7 @@ type Channel = {
   timezone: string;
   mainCharacterImageUrl: string | null;
   mainCharacterImageName: string;
+  characterIdentityPack: { characterId: string; name: string; styleType: string; lockedTraits: Record<string, unknown>; allowedVariations: string[]; negativeRules: string[]; referenceImages: Array<{ assetId: string; viewRole: string; active: boolean; name: string | null; url: string }> } | null;
 };
 type Competitor = {
   id: string;
@@ -51,10 +52,11 @@ const emptyChannel: Omit<Channel, "id"> = {
   timezone: "UTC",
   mainCharacterImageUrl: null,
   mainCharacterImageName: "",
+  characterIdentityPack: null,
 };
 
 const fields: Array<
-  [keyof Omit<Channel, "id" | "hasDialogue" | "mainCharacterImageUrl" | "mainCharacterImageName">, string, string]
+  [keyof Omit<Channel, "id" | "hasDialogue" | "mainCharacterImageUrl" | "mainCharacterImageName" | "characterIdentityPack">, string, string]
 > = [
   ["name", "Tên kênh", "Ví dụ: Funny Animals"],
   ["platform", "Nền tảng", "TikTok, YouTube..."],
@@ -90,6 +92,7 @@ function toUiChannel(value: Record<string, unknown>): Channel {
     timezone: String(value.timezone ?? "UTC"),
     mainCharacterImageUrl: typeof value.mainCharacterImageUrl === "string" ? value.mainCharacterImageUrl : null,
     mainCharacterImageName: String(value.mainCharacterImageName ?? ""),
+    characterIdentityPack: value.characterIdentityPack && typeof value.characterIdentityPack === "object" ? value.characterIdentityPack as Channel["characterIdentityPack"] : null,
   };
 }
 
@@ -214,10 +217,19 @@ export function ChannelManager() {
       }
       let saved = toUiChannel(body.data);
       if (pendingCharacterImage) {
+        let replaceExisting = false;
+        if (!isCreating && editing.mainCharacterImageUrl) {
+          if (!window.confirm("Đổi nhân vật chính sẽ cập nhật Character Identity Pack của Channel. Bạn có chắc muốn thực hiện thao tác explicit này không?")) {
+            setFormError("Đã giữ nguyên Character Identity Pack hiện tại.");
+            return;
+          }
+          replaceExisting = true;
+        }
         const formData = new FormData();
         formData.append("file", pendingCharacterImage);
+        if (replaceExisting) formData.append("replaceExisting", "true");
         const imageResponse = await fetch(`/api/v1/channels/${saved.id}/character-image`, { method: "POST", body: formData });
-        const imageBody = await imageResponse.json() as { data?: { mainCharacterImageName?: string; mainCharacterImageUrl?: string }; error?: { message?: string } };
+        const imageBody = await imageResponse.json() as { data?: { mainCharacterImageName?: string; mainCharacterImageUrl?: string; characterIdentityPack?: Channel["characterIdentityPack"] }; error?: { message?: string } };
         if (!imageResponse.ok || !imageBody.data) {
           if (isCreating) {
             setChannels((current) => [...current, saved]);
@@ -226,7 +238,7 @@ export function ChannelManager() {
           }
           throw new Error(imageBody.error?.message ?? "Kênh đã lưu nhưng chưa tải được ảnh nhân vật chính. Hãy thử lại trong mục Sửa kênh.");
         }
-        saved = { ...saved, mainCharacterImageName: imageBody.data.mainCharacterImageName ?? pendingCharacterImage.name, mainCharacterImageUrl: imageBody.data.mainCharacterImageUrl ?? `/api/v1/channels/${saved.id}/character-image` };
+        saved = { ...saved, mainCharacterImageName: imageBody.data.mainCharacterImageName ?? pendingCharacterImage.name, mainCharacterImageUrl: imageBody.data.mainCharacterImageUrl ?? `/api/v1/channels/${saved.id}/character-image`, characterIdentityPack: imageBody.data.characterIdentityPack ?? saved.characterIdentityPack };
       }
       setChannels((current) =>
         isCreating
@@ -305,7 +317,7 @@ export function ChannelManager() {
                     <span className="text-[#9ab0c9]">•</span> {channel.platform}{" "}
                     <span className="text-[#9ab0c9]">•</span> {channel.topic}
                   </p>
-                  <p className="mt-1 truncate text-xs text-[#8aa0bd]">{channel.mainCharacterImageName ? `Nhân vật cố định: ${channel.mainCharacterImageName}` : "Chưa có ảnh nhân vật chính"}</p>
+                  <p className="mt-1 truncate text-xs text-[#8aa0bd]">{channel.characterIdentityPack ? `Identity Pack: LOCKED · ${channel.characterIdentityPack.referenceImages.length} reference` : "MAIN_CHARACTER_IDENTITY_MISSING"}</p>
                 </div>
               </div>
               <span className="rounded-full bg-[#dff7f4] px-2 py-1 text-[11px] text-[#078f86]">
@@ -449,11 +461,12 @@ function ChannelModal({
           ))}
         </div>
         <label className="mt-5 block rounded-xl border border-cyan-400/30 bg-cyan-400/5 p-4 text-sm text-slate-200">
-          <span className="font-semibold text-cyan-300">Ảnh nhân vật chính của kênh</span>
-          <span className="mt-1 block text-xs leading-5 text-slate-400">Ảnh này được lưu xuyên suốt kênh và dùng làm ảnh tham chiếu khi modeling phân cảnh, tạo ảnh và tạo video.</span>
+          <span className="font-semibold text-cyan-300">Character Identity Pack</span>
+          <span className="mt-1 block text-xs leading-5 text-slate-400">Nhân vật chính được khóa theo Channel. Reference này là source-of-truth cho tạo ảnh/video; outfit và props vẫn do Scene Appearance State quyết định.</span>
           <input type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif" required={!channel.mainCharacterImageUrl} onChange={(event) => onCharacterImageChange(event.target.files?.[0] ?? null)} className="mt-3 block w-full text-xs text-slate-300 file:mr-3 file:rounded-md file:border-0 file:bg-cyan-400 file:px-3 file:py-2 file:font-semibold file:text-slate-950 hover:file:bg-cyan-300" />
           {channel.mainCharacterImageUrl && <img src={channel.mainCharacterImageUrl} alt="Xem trước nhân vật chính" className="mt-3 h-28 w-28 rounded-lg object-cover" />}
           {channel.mainCharacterImageName && <span className="mt-2 block text-xs text-slate-400">Đang dùng: {channel.mainCharacterImageName}</span>}
+          {channel.characterIdentityPack && <span className="mt-2 block text-xs font-semibold text-emerald-300">Character Identity: LOCKED · {channel.characterIdentityPack.styleType} · {channel.characterIdentityPack.referenceImages.length} reference</span>}
         </label>
         <div className="mt-3 flex flex-wrap gap-2"><span className="text-xs text-slate-400">Chọn nhanh thời lượng:</span>{[15, 30, 60, 180].map((seconds) => <button type="button" key={seconds} onClick={() => onChange({ ...channel, videoDuration: String(seconds) })} className="rounded border border-white/15 px-2 py-1 text-xs text-cyan-300 hover:bg-white/10">{seconds} giây</button>)}</div>
         <label className="mt-4 flex items-center gap-3 text-sm text-slate-300">
@@ -552,8 +565,9 @@ function ChannelDetails({
           ))}
         </dl>
         <div className="mt-6 rounded-lg bg-white/[.04] p-4">
-          <p className="text-xs text-slate-500">Nhân vật chính cố định của kênh</p>
+          <p className="text-xs text-slate-500">Main Character · Character Identity Pack</p>
           {channel.mainCharacterImageUrl ? <div className="mt-3 flex items-center gap-3"><img src={channel.mainCharacterImageUrl} alt={`Nhân vật chính của ${channel.name}`} className="h-20 w-20 rounded-lg object-cover" /><p className="text-sm text-slate-300">{channel.mainCharacterImageName || "Ảnh tham chiếu đã lưu"}</p></div> : <p className="mt-1 text-sm text-amber-300">Chưa tải ảnh nhân vật chính.</p>}
+          {channel.characterIdentityPack ? <div className="mt-3 rounded-md border border-emerald-400/20 bg-emerald-400/5 p-3 text-xs text-emerald-200"><p className="font-semibold">Character Identity: LOCKED</p><p className="mt-1">Pack: {channel.characterIdentityPack.name} · Style: {channel.characterIdentityPack.styleType}</p><p className="mt-1">Reference images: {channel.characterIdentityPack.referenceImages.length}</p><div className="mt-3 flex flex-wrap gap-2">{channel.characterIdentityPack.referenceImages.filter((reference) => reference.active).map((reference) => <img key={reference.assetId} src={reference.url} alt={`Reference ${reference.viewRole}`} className="h-12 w-12 rounded-md object-cover" />)}</div></div> : <p className="mt-3 text-xs text-amber-300">MAIN_CHARACTER_IDENTITY_MISSING — chưa thể tạo ảnh/video cho Channel này.</p>}
         </div>
         <div className="mt-6 rounded-lg bg-white/[.04] p-4">
           <p className="text-xs text-slate-500">Hướng dẫn sáng tạo</p>

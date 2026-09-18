@@ -21,19 +21,43 @@ process.on("unhandledRejection", (reason) => { void reportFatal(reason, "Worker 
 
 async function run() {
   logger.info("Background worker started");
-  const staleJobs = await queue.findStale(new Date(Date.now() - 5 * 60_000));
-  for (const staleJob of staleJobs) {
-    try { await reportBackgroundJobFailure(staleJob, new Error("Job bị gián đoạn quá 5 phút; worker sẽ resume từ checkpoint.")); } catch (error) { logger.error("Không ghi được lỗi job stale về Codex", { jobId: staleJob.jobId, error: error instanceof Error ? error.message : String(error) }); }
+  try {
+    const interruptedBefore = new Date();
+    await queue.requeueStale(interruptedBefore);
+    await requeueStaleRuntimeFailures(new Date(Date.now() - 5 * 60_000));
+  } catch (error) {
+    logger.error("Không thể khôi phục hàng đợi lúc khởi động; worker sẽ thử lại ở vòng sau", { error: error instanceof Error ? error.message : String(error) });
   }
-  await queue.requeueStale(new Date(Date.now() - 5 * 60_000));
-  await requeueStaleRuntimeFailures(new Date(Date.now() - 5 * 60_000));
   let lastRuntimeSweep = 0;
+  let lastStaleSweep = 0;
   while (true) {
     if (Date.now() - lastRuntimeSweep >= 60_000) { lastRuntimeSweep = Date.now(); try { await pumpPendingRuntimeFailures(); } catch (error) { logger.error("Không quét được hàng đợi lỗi runtime", { error: error instanceof Error ? error.message : String(error) }); } }
-    const job = await queue.claim();
+    if (Date.now() - lastStaleSweep >= 60_000) {
+      lastStaleSweep = Date.now();
+      try {
+        const staleBefore = new Date(Date.now() - 5 * 60_000);
+        const staleJobs = await queue.findStale(staleBefore);
+        for (const staleJob of staleJobs) {
+          try { await reportBackgroundJobFailure(staleJob, new Error("Job bị gián đoạn quá 5 phút; worker sẽ resume từ checkpoint.")); } catch (error) { logger.error("Không ghi được lỗi job stale về Codex", { jobId: staleJob.jobId, error: error instanceof Error ? error.message : String(error) }); }
+        }
+        await queue.requeueStale(staleBefore);
+        await requeueStaleRuntimeFailures(staleBefore);
+      } catch (error) {
+        logger.error("Không thể phục hồi job stale định kỳ", { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    let job: QueuedJob | null = null;
+    try { job = await queue.claim(); }
+    catch (error) {
+      logger.error("Không đọc được hàng đợi; worker sẽ retry với backoff", { error: error instanceof Error ? error.message : String(error) });
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+      continue;
+    }
     if (!job) { await new Promise((resolve) => setTimeout(resolve, 500)); continue; }
     activeJob = job;
-    const heartbeat = setInterval(() => void queue.touch(job.jobId), 30_000);
+    const heartbeat = setInterval(() => {
+      void queue.touch(job.jobId).catch((error) => logger.error("Không cập nhật được heartbeat worker", { jobId: job.jobId, error: error instanceof Error ? error.message : String(error) }));
+    }, 30_000);
     const stallWatchdog = job.name === "codex.runtime.failure" ? undefined : setTimeout(() => {
       void (async () => {
         const stale = await queue.findStale(new Date(Date.now() - 5 * 60_000));

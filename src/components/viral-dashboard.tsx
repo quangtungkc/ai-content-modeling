@@ -1,7 +1,9 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
-import { useCallback, useEffect, useMemo, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { notifyRuntimeFailure } from "@/components/runtime-error-monitor";
+import { assertStrictModelingReady, compileStrictModelingConstraints } from "@/modules/modeling/strict-source-modeling";
+import { assertNoWrongStageRestart, checkpointPatch, prepareResumeSteps, resolveResumableRun, resumeTargetForStage, type AutomationPersistenceFields, type ResumeDecision, type ResumableRunInput } from "@/modules/automations/resume";
 
 type Dashboard = {
   channel: { id: string; name: string } | null;
@@ -9,13 +11,14 @@ type Dashboard = {
   videos: Array<{
     id: string;
     url: string;
+    caption?: string | null;
     modelingVideoUrl: string | null;
     thumbnailUrl?: string | null;
     publishedAt: string;
     score: number;
     relativePerformance: number;
     currentViews: number;
-    analysis: { createdAt: string; content: VideoAnalysisResult["analysis"] } | null;
+    analysis: { id: string; createdAt: string; content: VideoAnalysisResult["analysis"] } | null;
     competitor: {
       handle: string;
       displayName: string | null;
@@ -23,7 +26,8 @@ type Dashboard = {
     };
   }>;
 };
-type ChannelOption = { id: string; name: string; targetCountry?: string; language?: string; hashtags?: string | null; mainCharacterImageUrl?: string | null; mainCharacterImageName?: string };
+type ChannelIdentityPack = { characterId: string; channelId: string; name: string; styleType: string; lockedTraits: Record<string, unknown>; allowedVariations: string[]; negativeRules: string[]; active: boolean; referenceImages: Array<{ assetId: string; storageKey: string; referenceId: string | null; viewRole: string; active: boolean; name: string | null; mimeType: string | null; url: string }> };
+type ChannelOption = { id: string; name: string; targetCountry?: string; language?: string; hashtags?: string | null; mainCharacterImageUrl?: string | null; mainCharacterImageName?: string; characterIdentityPack?: ChannelIdentityPack | null };
 type CompetitorOption = { id: string; handle: string; displayName: string | null; platform: string; url: string };
 type SyncProgress = {
   syncId: string;
@@ -39,18 +43,26 @@ type DesktopUpdater = {
   install: () => Promise<unknown>;
   on: (event: string, listener: (payload?: { version?: string; percent?: number; message?: string }) => void) => () => void;
 };
-type FacebookScanItem = { url: string; caption: string; publishedAt: string | null; views: number | null; likes: number | null; comments: number | null; shares: number | null };
+type FacebookScanItem = { url: string; caption: string; publishedAt: string | null; views: number | null; likes: number | null; comments: number | null; shares: number | null; durationSec: number | null };
 type FacebookScanResult = { competitorId: string; sourceUrl: string; needsLogin: boolean; items: FacebookScanItem[]; error?: string };
 type FacebookScanProgress = { processed: number; total: number };
 type DesktopFacebook = {
   open: () => Promise<{ status: string }>;
   scan: (entries: Array<{ id: string; url: string }>, onProgress?: (progress: FacebookScanProgress) => void) => Promise<FacebookScanResult[]>;
 };
-type ImageSlot = { kind: "character" | "background" | "scene"; sceneNumber?: number; label: string; prompt: string; aspectRatio: string };
-type VideoSlot = { sceneNumber: number; label: string; visualBlock: string; actionBlock: string; audioBlock: string; englishPrompt: string; aspectRatio: string };
+type DesktopGemini = {
+  runJob: (projectId: string, slots: ImageSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void, runId?: string) => Promise<{ status: string; images: Record<string, string> }>;
+  analyzeSource: (video: Record<string, unknown>, channelDNA?: Record<string, unknown>, runId?: string) => Promise<VideoAnalysisResult["analysis"]>;
+  generateIdea: (video: Record<string, unknown>, analysis: VideoAnalysisResult["analysis"], channelDNA?: Record<string, unknown>, artStyle?: string, runId?: string) => Promise<{ schemaVersion: "1.0"; modelingDirections: ModelingIdeaResult[] }>;
+  developProject: (video: Record<string, unknown>, analysis: VideoAnalysisResult["analysis"], idea: ModelingIdeaResult, channelDNA?: Record<string, unknown>, aspectRatio?: string, runId?: string) => Promise<Record<string, unknown>>;
+};
+type ImageSlot = { kind: "background" | "scene"; sceneNumber?: number; label: string; prompt: string; aspectRatio: string; promptId?: string; validatedPrompt?: string; validatedPromptHash?: string };
+type VideoSlot = { sceneNumber: number; label: string; visualBlock: string; actionBlock: string; audioBlock: string; englishPrompt: string; aspectRatio: string; promptId?: string; validatedPrompt?: string; validatedPromptHash?: string };
 type DesktopFlow = {
   runImageJob: (projectId: string, channelId: string, slots: ImageSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; images: Record<string, string> }>;
   runVideoJob: (projectId: string, channelId: string, slots: VideoSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; videos: Record<string, string> }>;
+  resumeAfterManualSubmission: (checkpointId: string) => Promise<{ status: string; checkpointId: string; video?: string }>;
+  prepareManualSubmission: (projectId: string, channelId: string, slot: VideoSlot) => Promise<{ status: string; checkpointId: string; flowProjectUrl: string; startFramePath: string; prompt: string }>;
 };
 type DesktopVideoEditor = {
   pickAudio: () => Promise<{ status: "cancelled" | "selected"; path?: string; name?: string }>;
@@ -59,6 +71,8 @@ type DesktopVideoEditor = {
 type VideoEditScene = { sceneNumber: number; trimStart: number; trimEnd: number; duration?: number };
 type VideoEditOptions = { scenes: VideoEditScene[]; transition: "none" | "fade"; transitionDuration: number; originalVolume: number; musicVolume: number; musicPath?: string };
 type VideoAnalysisResult = {
+  id?: string;
+  analysisId?: string;
   analysis: {
     summary: string;
     hook: string;
@@ -72,10 +86,15 @@ type VideoAnalysisResult = {
   };
 };
 type ModelingIdeaResult = { id: string; title: string; coreConcept: string; script: string; characterDesign: string; setting: string; artStyle: string; sourceMechanism: string; whatIsPreserved: string[]; whatIsChanged: string[]; targetMarketAdaptation: string; similarityRisk: "low" | "medium" | "high"; whyWorthDeveloping: string; postText: string };
-type ContentProjectResult = { id: string; artDirection: Record<string, unknown>; characterDesign: Record<string, unknown>; backgroundDesign: Record<string, unknown>; scenes: Array<{ sceneNumber: number; visualBlock: string; actionBlock: string; audioBlock: string; startFramePrompt?: string | null; englishPrompt?: string | null }> };
+type ContentProjectResult = { id: string; sourceVideoId?: string | null; sourceVideoUrl?: string | null; sourceDuration?: number | null; sourcePlatform?: string | null; modelingPolicy?: string | null; modelingFidelityTarget?: number | null; sourceModelingSpecVersion?: string | null; sourceModelingSpec?: Record<string, unknown> | null; artDirection: Record<string, unknown>; characterDesign: Record<string, unknown>; backgroundDesign: Record<string, unknown>; scenes: Array<{ sceneNumber: number; sourceSceneId?: string | null; sourceSceneOrder?: number | null; sourceSceneStartTime?: number | null; sourceSceneEndTime?: number | null; targetDuration?: number | null; timingStatus?: string | null; cameraSpec?: Record<string, unknown> | null; actionSequence?: string[] | null; visualBlock: string; actionBlock: string; audioBlock: string; startFramePrompt?: string | null; englishPrompt?: string | null }> };
+type ContentProjectTroubleshooting = { disposition?: string; fingerprint?: string; matchDecision?: string; matchedRuleId?: string | null; resumeStage?: string | null; incidentId?: string; repair?: { status?: string; nextAction?: string }; jsonReportPath?: string; markdownReportPath?: string; reportWarning?: string; userMessage?: string };
+function SourceFidelityStatus({ project, promptFidelityStatus }: { project: ContentProjectResult; promptFidelityStatus: "PASS" | "FAIL" | "NEEDS_REVIEW" | "NOT_EVALUATED" }) {
+  const sourceSetupReady = Boolean(project.modelingPolicy === "STRICT_MODELING" && project.sourceModelingSpec && project.scenes.length > 0 && project.scenes.every((scene) => scene.sourceSceneId));
+  return <div className="mt-5 grid gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-[#0b3262] sm:grid-cols-4"><div><p className="font-bold">Character Fidelity</p><p className="mt-1 font-extrabold text-slate-600">NOT_EVALUATED</p><p className="text-xs text-[#6883aa]">Cần kiểm tra trên start-frame.</p></div><div><p className="font-bold">Source Fidelity</p><p className={`mt-1 font-extrabold ${sourceSetupReady ? "text-emerald-700" : "text-amber-700"}`}>{sourceSetupReady ? "PASS · spec/mapping" : "NEEDS_REVIEW"}</p><p className="text-xs text-[#6883aa]">Cấu trúc source được theo dõi riêng.</p></div><div><p className="font-bold">Technical Quality</p><p className="mt-1 font-extrabold text-slate-600">NOT_EVALUATED</p><p className="text-xs text-[#6883aa]">Chưa có output media để kiểm tra.</p></div><div><p className="font-bold">Prompt Fidelity</p><p className={`mt-1 font-extrabold ${promptFidelityStatus === "PASS" ? "text-emerald-700" : promptFidelityStatus === "FAIL" ? "text-rose-700" : "text-amber-700"}`}>{promptFidelityStatus}</p><p className="text-xs text-[#6883aa]">Gate bắt buộc trước khi gửi model.</p></div></div>;
+}
 type AutomationStep = { key: string; label: string; status: "pending" | "running" | "completed" | "failed"; detail?: string; error?: string; startedAt?: string; completedAt?: string };
 type AutomationSettings = { artStyle: string; aspectRatio: "9:16" | "16:9" | "1:1" | "4:5"; postText?: string; hashtags?: string; language?: string; targetCountry?: string };
-type AutomationRunResult = { id: string; status: "RUNNING" | "SUCCEEDED" | "FAILED"; steps: AutomationStep[] };
+type AutomationRunResult = ResumableRunInput & { id: string; status: "RUNNING" | "SUCCEEDED" | "FAILED" | "PAUSED"; steps: AutomationStep[]; modelingIdea?: ModelingIdeaResult | null };
 type CodexStage = "ANALYSIS" | "MODELING" | "PROJECT" | "ASSETS" | "SCENES" | "FINAL_ASSEMBLY" | "FINAL_AUDIT" | "POST_RUN_REVIEW";
 type CodexAction = { name: string; stage?: CodexStage; targetIds?: string[]; strategy?: string; reason?: string };
 type CodexJobResult = {
@@ -109,6 +128,16 @@ function toFlowSafePrompt(prompt: string) {
     .replace(/\b(?:in\s+the\s+style\s+of|style\s+of)\s+[^,.\n]+/gi, "with an original visual treatment");
 }
 
+function buildSceneTextPolicy(...sources: string[]) {
+  const requiredText = sources
+    .flatMap((source) => [...source.matchAll(/[\u0027\u2018\u2019\u201c\u201d]([^\n\u0027\u2018\u2019\u201c\u201d]{2,})[\u0027\u2018\u2019\u201c\u201d]/g)].map((match) => match[1].trim()))
+    .find((text) => /\s/.test(text));
+  if (requiredText) {
+    return `TEXT POLICY: REQUIRED_TEXT is exactly: "${requiredText}". This text may be readable only inside the explicitly requested chat interface on the computer monitor. FORBIDDEN_TEXT: every other readable word, letter, number, sign, label, logo, caption, book-spine text, poster text, or decorative typography anywhere in the image. Do not add any other text.`;
+  }
+  return "TEXT POLICY: FORBIDDEN_TEXT. Do not render any readable text, words, letters, numbers, signs, labels, logos, captions, screen text, book-spine text, poster text, or decorative typography anywhere in the image. Use only blank surfaces or abstract non-linguistic marks.";
+}
+
 export function ViralDashboard() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [error, setError] = useState("");
@@ -140,8 +169,12 @@ export function ViralDashboard() {
   const [modelingIdeaError, setModelingIdeaError] = useState("");
   const [aspectRatio, setAspectRatio] = useState<AutomationSettings["aspectRatio"]>("9:16");
   const [contentProject, setContentProject] = useState<ContentProjectResult | null>(null);
+  const [promptFidelityStatus, setPromptFidelityStatus] = useState<"PASS" | "FAIL" | "NEEDS_REVIEW" | "NOT_EVALUATED">("NOT_EVALUATED");
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [contentProjectError, setContentProjectError] = useState("");
+  const [contentProjectRecoveryStatus, setContentProjectRecoveryStatus] = useState("");
+  const [contentProjectIncidentId, setContentProjectIncidentId] = useState("");
+  const contentProjectTroubleshootingHandled = useRef(false);
   const [generatedImages, setGeneratedImages] = useState<Record<string, string>>({});
   const [isGeneratingImages, setIsGeneratingImages] = useState(false);
   const [showGeneratedImages, setShowGeneratedImages] = useState(false);
@@ -167,6 +200,9 @@ export function ViralDashboard() {
   const [videoEditTransitionDuration, setVideoEditTransitionDuration] = useState(0.3);
   const [videoEditProgress, setVideoEditProgress] = useState({ stage: "", processed: 0, total: 0, label: "" });
   const [videoEditError, setVideoEditError] = useState("");
+  const automaticRunLockRef = useRef(false);
+  const appSessionIdRef = useRef("");
+  const automaticExecutionRef = useRef<{ runId: string; executionId: string; appSessionId: string; startedAt: string; activeStage: string } | null>(null);
   const [analysisFilter, setAnalysisFilter] = useState<"all" | "analyzed" | "unanalyzed">("all");
   const [videoPage, setVideoPage] = useState(1);
   const [autoSyncRequested, setAutoSyncRequested] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("autoSync") === "1");
@@ -175,10 +211,17 @@ export function ViralDashboard() {
   const [isAutomaticRunning, setIsAutomaticRunning] = useState(false);
   const [automationRunId, setAutomationRunId] = useState("");
   const [automationSteps, setAutomationSteps] = useState<AutomationStep[]>([]);
+  const [resumableDecision, setResumableDecision] = useState<ResumeDecision>({ status: "NONE" });
   const [codexJobId, setCodexJobId] = useState("");
   const [codexStatus, setCodexStatus] = useState("");
   const [codexErrorDeliveryStatus, setCodexErrorDeliveryStatus] = useState("");
   const [selectedModelingVideo, setSelectedModelingVideo] = useState<SelectedModelingVideo | null>(null);
+  const [resumeSelection] = useState(() => {
+    if (typeof window === "undefined") return { runId: "", modelingIdeaId: "", stopAfterStage: null as number | null };
+    const params = new URLSearchParams(window.location.search);
+    const stopAfterStage = params.get("validationStopAfterStage");
+    return { runId: params.get("runId")?.trim() ?? "", modelingIdeaId: params.get("modelingIdeaId")?.trim() ?? "", stopAfterStage: stopAfterStage === "2" ? 2 : null };
+  });
   useEffect(() => {
     const controller = new AbortController();
     setIsLoading(true);
@@ -215,6 +258,29 @@ export function ViralDashboard() {
       setChannels(body.data);
     });
   }, []);
+  useEffect(() => {
+    const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
+    if (!analysisVideoId || !selectedChannelId) {
+      setResumableDecision({ status: "NONE" });
+      return;
+    }
+    let cancelled = false;
+    fetch(`/api/v1/automations?sourceVideoId=${encodeURIComponent(analysisVideoId)}&channelId=${encodeURIComponent(selectedChannelId)}`)
+      .then(async (response) => {
+        const body = await response.json() as { data?: AutomationRunResult[]; error?: { message?: string } };
+        if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể kiểm tra checkpoint tự động.");
+        if (cancelled) return;
+        const decision = resolveResumableRun(body.data, { sourceVideoId: analysisVideoId, channelId: selectedChannelId, runId: resumeSelection.runId || undefined, modelingIdeaId: resumeSelection.modelingIdeaId || undefined });
+        setResumableDecision(decision);
+        if (decision.status === "RESUME") {
+          setModelingIdea(decision.modelingIdea as ModelingIdeaResult);
+          setAutomationRunId(decision.run.id);
+          setAutomationSteps(decision.run.steps as AutomationStep[]);
+        }
+      })
+      .catch(() => { if (!cancelled) setResumableDecision({ status: "NONE" }); });
+    return () => { cancelled = true; };
+  }, [analysisVideoId, channelId, channels, dashboard?.channel?.id, resumeSelection.runId, resumeSelection.modelingIdeaId]);
   useEffect(() => {
     if (!showManualEntry || !manualChannelId) return;
     setManualCompetitors([]);
@@ -446,7 +512,8 @@ export function ViralDashboard() {
               views: item.views,
               likes: item.likes ?? 0,
               comments: item.comments ?? 0,
-              shares: item.shares ?? 0,
+                shares: item.shares ?? 0,
+                durationSec: item.durationSec,
             }),
           });
           if (response.ok) stored += 1;
@@ -472,7 +539,14 @@ export function ViralDashboard() {
     setError("");
     setMessage("");
     try {
-      const response = await fetch(`/api/v1/videos/${videoId}/analysis`, { method: "POST" });
+      const video = dashboard?.videos.find((item) => item.id === videoId);
+      const desktopGemini = (window as Window & { desktopGemini?: DesktopGemini }).desktopGemini;
+      const response = desktopGemini && video
+        ? await (async () => {
+          const analysis = await desktopGemini.analyzeSource({ id: video.id, url: video.url, caption: video.url, thumbnailUrl: video.thumbnailUrl, publishedAt: video.publishedAt }, { channel: dashboard?.channel });
+          return fetch(`/api/v1/videos/${videoId}/analysis`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: "gemini-browser", analysis }) });
+        })()
+        : await fetch(`/api/v1/videos/${videoId}/analysis`, { method: "POST" });
       const body = await response.json() as { data?: VideoAnalysisResult; error?: { message?: string } };
       if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể phân tích video.");
       setAnalysisResult(body.data);
@@ -482,7 +556,7 @@ export function ViralDashboard() {
       setExecutionMode("manual");
       setAutomationRunId("");
       setAutomationSteps([]);
-      setDashboard((current) => current ? { ...current, videos: current.videos.map((video) => video.id === videoId ? { ...video, analysis: { createdAt: new Date().toISOString(), content: body.data!.analysis } } : video) } : current);
+      setDashboard((current) => current ? { ...current, videos: current.videos.map((video) => video.id === videoId ? { ...video, analysis: { id: body.data!.id ?? body.data!.analysisId ?? videoId, createdAt: new Date().toISOString(), content: body.data!.analysis } } : video) } : current);
     } catch (caught) {
       notifyRuntimeFailure(caught, { operation: "analyze-video" });
       setError(caught instanceof Error ? caught.message : "Không thể phân tích video.");
@@ -492,7 +566,7 @@ export function ViralDashboard() {
   }
   function viewStoredAnalysis(video: Dashboard["videos"][number]) {
     if (video.analysis) {
-      setAnalysisResult({ analysis: video.analysis.content });
+      setAnalysisResult({ id: video.analysis.id, analysis: video.analysis.content });
       setAnalysisVideoId(video.id);
       setModelingIdea(null);
       setContentProject(null);
@@ -501,13 +575,20 @@ export function ViralDashboard() {
       setAutomationSteps([]);
     }
   }
-  async function generateModelingIdea(): Promise<ModelingIdeaResult | null> {
+  async function generateModelingIdea(runId?: string): Promise<ModelingIdeaResult | null> {
     if (!analysisVideoId) return null;
     setIsGeneratingIdea(true);
     setError("");
     setModelingIdeaError("");
     try {
-      const response = await fetch(`/api/v1/videos/${analysisVideoId}/ideas`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ artStyle: ideaArtStyle }) });
+      const sourceVideo = dashboard?.videos.find((video) => video.id === analysisVideoId);
+      const desktopGemini = (window as Window & { desktopGemini?: DesktopGemini }).desktopGemini;
+      const response = desktopGemini && sourceVideo && analysisResult
+        ? await (async () => {
+          const ideas = await desktopGemini.generateIdea({ id: sourceVideo.id, url: sourceVideo.url, caption: sourceVideo.url, thumbnailUrl: sourceVideo.thumbnailUrl, publishedAt: sourceVideo.publishedAt }, analysisResult.analysis, { channel: dashboard?.channel }, ideaArtStyle, runId);
+          return fetch(`/api/v1/videos/${analysisVideoId}/ideas`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: "gemini-browser", ideas, analysisId: analysisResult.id ?? analysisResult.analysisId }) });
+        })()
+        : await fetch(`/api/v1/videos/${analysisVideoId}/ideas`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ artStyle: ideaArtStyle }) });
       const body = await response.json() as { data?: { ideas?: ModelingIdeaResult[] }; error?: { message?: string } };
       if (!response.ok || !body.data?.ideas?.[0]) throw new Error(body.error?.message ?? "Không thể tạo Modeling Idea.");
       const idea = body.data.ideas[0];
@@ -524,20 +605,57 @@ export function ViralDashboard() {
       setIsGeneratingIdea(false);
     }
   }
-  async function createContentProject(idea = modelingIdea): Promise<ContentProjectResult | null> {
+  function applyContentProjectTroubleshooting(value: unknown) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const troubleshooting = value as ContentProjectTroubleshooting;
+    contentProjectTroubleshootingHandled.current = true;
+    const repairStatus = troubleshooting.repair?.status;
+    const status = troubleshooting.disposition === "RESUME" || repairStatus === "REPAIRED" || repairStatus === "RECOVERED_WITH_WARNING"
+      ? "Đã tìm thấy giải pháp — đang chạy lại bước này"
+      : troubleshooting.matchDecision === "NO_MATCH"
+        ? "Lỗi mới — đã chuẩn bị báo cáo cho Codex"
+        : "Đã kiểm tra Kho lỗi — cần xem xét";
+    setContentProjectRecoveryStatus(status);
+    setContentProjectIncidentId(typeof troubleshooting.incidentId === "string" ? troubleshooting.incidentId : "");
+    return true;
+  }
+  async function createContentProject(idea = modelingIdea, useBrowserGemini = false, recoveryRunId?: string): Promise<ContentProjectResult | null> {
     if (!idea?.id) return null;
     setIsCreatingProject(true);
     setContentProjectError("");
+    setContentProjectRecoveryStatus("");
+    setContentProjectIncidentId("");
+    contentProjectTroubleshootingHandled.current = false;
+    const sourceVideo = dashboard?.videos.find((video) => video.id === analysisVideoId);
     try {
-      const approveResponse = await fetch(`/api/v1/ideas/${idea.id}/approve`, { method: "POST" });
+      const approveResponse = await fetch(`/api/v1/ideas/${idea.id}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(recoveryRunId ? { automationRunId: recoveryRunId } : {}) });
+      const approveBody = await approveResponse.json() as { error?: { message?: string; details?: { troubleshooting?: unknown } }; troubleshooting?: unknown };
+      if (approveBody.troubleshooting) applyContentProjectTroubleshooting(approveBody.troubleshooting);
       if (!approveResponse.ok) {
-        const body = await approveResponse.json() as { error?: { message?: string } };
-        throw new Error(body.error?.message ?? "Không thể duyệt Modeling Idea.");
+        if (approveBody.error?.details?.troubleshooting) applyContentProjectTroubleshooting(approveBody.error.details.troubleshooting);
+        throw new Error(approveBody.error?.message ?? "Không thể duyệt Modeling Idea.");
       }
-      const response = await fetch(`/api/v1/ideas/${idea.id}/develop`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ aspectRatio }) });
-      const body = await response.json() as { data?: ContentProjectResult; error?: { message?: string } };
+      const desktopGemini = (window as Window & { desktopGemini?: DesktopGemini }).desktopGemini;
+      const requestContext = recoveryRunId ? { automationRunId: recoveryRunId } : {};
+      const response = useBrowserGemini
+        ? await (async () => {
+          if (!desktopGemini || !sourceVideo || !analysisResult) throw new Error("CONTENT_PROJECT_BROWSER_REQUIRED: Không tìm thấy phiên Gemini trình duyệt để chạy bước 3.");
+          const project = await desktopGemini.developProject(
+            { id: sourceVideo.id, url: sourceVideo.url, caption: sourceVideo.caption, thumbnailUrl: sourceVideo.thumbnailUrl, publishedAt: sourceVideo.publishedAt },
+            analysisResult.analysis,
+            idea,
+            { channel: dashboard?.channel },
+            aspectRatio,
+            recoveryRunId,
+          );
+          return fetch(`/api/v1/ideas/${idea.id}/develop`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: "gemini-browser", project, aspectRatio, ...requestContext }) });
+        })()
+        : await fetch(`/api/v1/ideas/${idea.id}/develop`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ aspectRatio, ...requestContext }) });
+      const body = await response.json() as { data?: ContentProjectResult; error?: { message?: string; details?: { troubleshooting?: unknown } } };
+      if (body.error?.details?.troubleshooting) applyContentProjectTroubleshooting(body.error.details.troubleshooting);
       if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể tạo thiết kế và phân cảnh.");
       setContentProject(body.data);
+      setPromptFidelityStatus("NOT_EVALUATED");
       setGeneratedImages({});
       setFlowImageSlots([]);
       setFlowImageMessage("");
@@ -547,32 +665,55 @@ export function ViralDashboard() {
       setShowGeneratedVideos(false);
       return body.data;
     } catch (caught) {
-      notifyRuntimeFailure(caught, { operation: "create-content-project" });
+      if (!contentProjectTroubleshootingHandled.current) {
+        let reported = false;
+        try {
+          const reportResponse = await fetch("/api/v1/runtime-failures", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source: "renderer:content-project-creation", code: "CONTENT_PROJECT_CREATION_FAILED", message: caught instanceof Error ? caught.message : "Không tạo được Content Project và phân cảnh.", stack: caught instanceof Error ? caught.stack : undefined, stage: "PROJECT", context: { operation: "create-content-project", ideaId: idea.id, sourceVideoId: sourceVideo?.id ?? null, automationRunId: recoveryRunId ?? null, checkpoint: { stage: "PROJECT", ideaId: idea.id, sourceVideoId: sourceVideo?.id ?? null, aspectRatio } } }) });
+          const reportBody = await reportResponse.json() as { data?: { troubleshooting?: unknown } };
+          reported = Boolean(reportBody.data?.troubleshooting) && applyContentProjectTroubleshooting(reportBody.data?.troubleshooting);
+        } catch {
+          reported = false;
+        }
+        if (!reported) notifyRuntimeFailure(caught, { operation: "create-content-project", ideaId: idea.id, sourceVideoId: sourceVideo?.id, automationRunId: recoveryRunId, stage: "PROJECT" });
+      }
       setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo thiết kế và phân cảnh.");
       return null;
     } finally {
       setIsCreatingProject(false);
     }
   }
+  async function preparePromptForFlow(projectId: string, draftPrompt: string, promptType: "IMAGE" | "VIDEO", sceneNumber?: number) {
+    const response = await fetch(`/api/v1/projects/${projectId}/prompt-fidelity`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ promptType, sceneNumber, draftPrompt }) });
+    const body = await response.json() as { data?: { promptId: string; compiledPromptHash?: string; validatedPrompt: string; promptHash: string }; error?: { message?: string } };
+    if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Prompt Fidelity Gate không cho phép generation.");
+    return body.data;
+  }
   function buildFlowImageSlots(project = contentProject): ImageSlot[] {
     if (!project) return [];
+    const strictSpec = assertStrictModelingReady({ sourceVideoId: project.sourceVideoId, sourceVideoUrl: project.sourceVideoUrl, sourceDuration: project.sourceDuration, modelingPolicy: project.modelingPolicy ?? "STRICT_MODELING", sourceModelingSpec: project.sourceModelingSpec, generatedScenes: project.scenes.map((scene) => ({ sceneNumber: scene.sceneNumber, sourceSceneId: scene.sourceSceneId, targetDuration: scene.targetDuration })) });
     const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
-    const selectedChannel = channels.find((channel) => channel.id === selectedChannelId);
-    const referenceInstruction = selectedChannel?.mainCharacterImageUrl
-      ? `Use the attached fixed main-character reference image together with the approved background reference image to compose the scene. Preserve the exact identity, silhouette, face, colors, clothing, and proportions of the channel's recurring protagonist. Never reproduce the character reference-sheet layout, labels, poses, panels, or text. Treat the background reference as the approved environment and preserve its location, layout, lighting, and key visual landmarks. Compose the requested scene as one natural full-frame image.`
-      : "No fixed main-character reference is available; keep the approved project character design consistent.";
-    const backgroundPrompt = toFlowSafePrompt(`Create one single full-frame vertical background plate for this project. Use the approved background design below as the source of truth. Establish one recognizable, coherent world/location that can be reused across every scene. Preserve the requested overall space, mood, lighting, color palette, camera language, and key landmarks. Do not include any character, person, animal, prop held by a character, text, caption, logo, collage, storyboard, character sheet, contact sheet, split panel, or multiple variations. The result must be a clean empty environment that can later receive the fixed main character and scene action. Approved background design: ${JSON.stringify(project.backgroundDesign)}. Aspect ratio: 9:16. Generate exactly one final image.`);
+    const identityPack = channels.find((channel) => channel.id === selectedChannelId)?.characterIdentityPack;
+    if (!identityPack?.active || !identityPack.referenceImages.some((reference) => reference.active)) throw new Error("MAIN_CHARACTER_IDENTITY_MISSING: Hãy lưu Character Identity Pack cho Channel trước khi tạo ảnh/video.");
+    const identityDesign = identityPack.lockedTraits;
+    const identityPrompt = `PRESERVE IDENTITY: use the approved Channel Character Identity Pack ${identityPack.name}. Locked traits: ${JSON.stringify(identityDesign)}. Never invent or replace the main character. Apply only the scene appearance explicitly stated below.`;
+    const backgroundPrompt = toFlowSafePrompt(`${compileStrictModelingConstraints(strictSpec)}\nCreate one single full-frame vertical background reference image for this project. Use the approved background design below as the source of truth. Establish one recognizable, coherent world/location that can be reused across every scene. Preserve the requested overall space, mood, color palette, camera language, and key landmarks, while applying only the explicitly allowed environment/style transformations. Do not include any character, person, animal, prop held by a character, text, caption, logo, collage, storyboard, character sheet, contact sheet, split panel, or multiple variations. The result must be a clean empty environment that can later receive the fixed character and scene appearance. Approved background design: ${JSON.stringify(project.backgroundDesign)}. Use an original visual treatment. Aspect ratio: ${aspectRatio}. Generate exactly one final image.`);
     const sceneSlots = [...project.scenes].sort((left, right) => left.sceneNumber - right.sceneNumber).map((scene) => {
       const startFramePrompt = scene.startFramePrompt?.trim() || `Create one single full-frame vertical 9:16 still image showing the exact starting state of scene ${scene.sceneNumber}. Preserve the approved main character, background, composition, lighting, and initial pose. Do not show motion, a collage, a storyboard, text, or multiple variations.`;
+      const sceneAppearance = `SCENE APPEARANCE STATE (authoritative for this scene): Use only the wardrobe, accessories, temporary condition, and required props explicitly described by this scene. Do not inherit a global outfit when this scene specifies a different appearance. ${scene.visualBlock} Start-frame state: ${startFramePrompt}`;
+      const sceneTextPolicy = buildSceneTextPolicy(scene.visualBlock, startFramePrompt);
+      const strictConstraints = compileStrictModelingConstraints(strictSpec, scene.sourceSceneId ?? undefined);
       return {
         kind: "scene" as const,
         sceneNumber: scene.sceneNumber,
         label: `Ảnh bắt đầu cảnh ${scene.sceneNumber}`,
         aspectRatio: "9:16",
-        prompt: toFlowSafePrompt(`${referenceInstruction}\nThis is the separate start-frame image prompt for scene ${scene.sceneNumber}. Create exactly one frozen full-frame vertical image by combining the attached fixed main-character reference image and the attached approved background reference image. The character image and background image are inputs for this one image, not separate panels. Do not create a collage, storyboard, character sheet, contact sheet, split panel, multiple variations, captions, labels, written text, or motion blur.\nStart-frame prompt written by Gemini:\n${startFramePrompt}\nVisual setup: ${scene.visualBlock}\nKeep the approved fixed main character, approved background, lighting, key props, and art direction consistent with the project. Show the exact frozen state before the 4-second action begins; do not depict later action beats. Aspect ratio: 9:16. Generate exactly one final image.`),
+        prompt: toFlowSafePrompt(`${identityPrompt}\n${strictConstraints}\nPRESERVE IDENTITY\n${sceneAppearance}\n${sceneTextPolicy}\nSCENE ACTION / FROZEN INITIAL STATE: Show only the exact state before motion begins; do not depict later action beats.\nBACKGROUND / CAMERA / COMPOSITION: Use the approved background design as one natural full-frame environment with the identity and scene appearance above. Do not create a collage, storyboard, character sheet, contact sheet, split panel, multiple variations. Aspect ratio: ${aspectRatio}. Generate exactly one final image.`),
       };
     });
-    return [{ kind: "background", sceneNumber: 0, label: "Bối cảnh đồng nhất", aspectRatio: "9:16", prompt: backgroundPrompt }, ...sceneSlots];
+    return [
+      { kind: "background", sceneNumber: 0, label: "Bối cảnh đồng nhất", aspectRatio, prompt: backgroundPrompt },
+      ...sceneSlots,
+    ];
   }
   async function generateAllProjectImages(project = contentProject, onlySceneNumbers?: number[], existingImages = generatedImages): Promise<Record<string, string> | null> {
     if (!project) return null;
@@ -585,24 +726,32 @@ export function ViralDashboard() {
       if (!slots.length) throw new Error("Không xác định được ảnh cần tạo lại.");
       const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
       if (!selectedChannelId) throw new Error("Hãy chọn kênh trước khi tạo ảnh.");
-      setFlowImageSlots(slots);
-      setFlowImageProgress({ processed: 0, total: slots.length });
-      setFlowImageMessage("Đang tạo ảnh Gemini bằng Google Flow qua trình duyệt...");
+      setPromptFidelityStatus("NOT_EVALUATED");
+      const preparedSlots = await Promise.all(slots.map(async (slot) => { const prepared = await preparePromptForFlow(project.id, slot.prompt, "IMAGE", slot.kind === "scene" ? slot.sceneNumber : undefined); return { ...slot, prompt: prepared.validatedPrompt, promptId: prepared.promptId, validatedPrompt: prepared.validatedPrompt, validatedPromptHash: prepared.promptHash }; }));
+      setPromptFidelityStatus("PASS");
+      setFlowImageSlots(preparedSlots);
+      setFlowImageProgress({ processed: 0, total: preparedSlots.length });
+      setFlowImageMessage("Đang tạo ảnh bằng Google Flow qua trình duyệt...");
       const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
       if (!flow) throw new Error("Không tìm thấy cầu nối Google Flow trên trình duyệt. Hãy chạy app desktop.");
-      const result = await flow.runImageJob(project.id, selectedChannelId, slots, (progress) => { setFlowImageProgress({ processed: progress.processed, total: progress.total }); setFlowImageMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`); });
-      setFlowImageProgress({ processed: slots.length, total: slots.length });
+      const result = await flow.runImageJob(project.id, selectedChannelId, preparedSlots, (progress) => { setFlowImageProgress({ processed: progress.processed, total: progress.total }); setFlowImageMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`); });
+      setFlowImageProgress({ processed: preparedSlots.length, total: preparedSlots.length });
       setFlowImageMessage("Đã tạo và lưu ảnh bằng Google Flow qua trình duyệt.");
       const mergedImages = { ...existingImages, ...result.images };
       setGeneratedImages(mergedImages);
       setShowGeneratedImages(true);
       setFlowImageMessage("Đã tạo và đưa toàn bộ ảnh vào app theo đúng thứ tự.");
       return mergedImages;
-    } catch (caught) { notifyRuntimeFailure(caught, { operation: "generate-project-images" }); setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo ảnh Gemini bằng Google Flow."); return null; }
+    } catch (caught) { notifyRuntimeFailure(caught, { operation: "generate-project-images", projectId: project.id, stage: "ASSETS" }); setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo ảnh bằng Google Flow."); return null; }
     finally { setIsGeneratingImages(false); }
   }
   async function generateAllProjectVideos(project = contentProject, images = generatedImages, onlySceneNumbers?: number[], existingVideos = generatedVideos): Promise<Record<string, string> | null> {
     if (!project) return null;
+    const strictSpec = assertStrictModelingReady({ sourceVideoId: project.sourceVideoId, sourceVideoUrl: project.sourceVideoUrl, sourceDuration: project.sourceDuration, modelingPolicy: project.modelingPolicy ?? "STRICT_MODELING", sourceModelingSpec: project.sourceModelingSpec, generatedScenes: project.scenes.map((scene) => ({ sceneNumber: scene.sceneNumber, sourceSceneId: scene.sourceSceneId, targetDuration: scene.targetDuration })) });
+    const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
+    const identityPack = channels.find((channel) => channel.id === selectedChannelId)?.characterIdentityPack;
+    if (!identityPack?.active || !identityPack.referenceImages.some((reference) => reference.active)) throw new Error("MAIN_CHARACTER_IDENTITY_MISSING: Hãy lưu Character Identity Pack cho Channel trước khi tạo video.");
+    const identityPrompt = `PRESERVE IDENTITY: use the approved Character Identity Pack ${identityPack.name}. LOCKED TRAITS: ${JSON.stringify(identityPack.lockedTraits)}. PRESERVE IDENTITY: face identity, facial structure, skin tone, base hairstyle, body proportions, body build, age appearance, distinctive traits and core character design language. APPLY SCENE APPEARANCE: use only the outfit, shoes, accessories, props, emotion, pose and temporary condition explicitly required by this scene.`;
     const selected = onlySceneNumbers?.length ? new Set(onlySceneNumbers) : null;
     const sceneSlots: VideoSlot[] = project.scenes.filter((scene) => !selected || selected.has(scene.sceneNumber)).map((scene) => ({
       sceneNumber: scene.sceneNumber,
@@ -610,7 +759,7 @@ export function ViralDashboard() {
       visualBlock: scene.visualBlock,
       actionBlock: scene.actionBlock,
       audioBlock: scene.audioBlock,
-      englishPrompt: scene.englishPrompt?.trim() || `Create one 4-second video starting from the approved start image for scene ${scene.sceneNumber}. Preserve the character, background, composition, story meaning, and ending, and animate only the specified primary action with synchronized sound.`,
+      englishPrompt: `${identityPrompt}\n${compileStrictModelingConstraints(strictSpec, scene.sourceSceneId ?? undefined)}\n${scene.englishPrompt?.trim() || `Create one 4-second video starting from the approved start image for scene ${scene.sceneNumber}. Preserve the character, background, composition, story meaning, and ending, and animate only the specified primary action with synchronized sound.`}`,
       aspectRatio,
     }));
     if (!sceneSlots.length || !images["background-0"] || sceneSlots.some((scene) => !images[`scene-${scene.sceneNumber}`])) {
@@ -622,15 +771,17 @@ export function ViralDashboard() {
     setGeminiVideoProgress({ processed: 0, total: sceneSlots.length });
     setGeminiVideoMessage("Đang tạo video bằng Flow Veo 3 qua trình duyệt...");
     try {
-      const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
       if (!selectedChannelId) throw new Error("Hãy chọn kênh trước khi tạo video.");
       const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
       if (!flow) throw new Error("Không tìm thấy cầu nối Google Flow trên trình duyệt. Hãy chạy app desktop.");
-      const result = await flow.runVideoJob(project.id, selectedChannelId, sceneSlots, (progress) => {
+      setPromptFidelityStatus("NOT_EVALUATED");
+      const preparedSceneSlots = await Promise.all(sceneSlots.map(async (slot) => { const prepared = await preparePromptForFlow(project.id, slot.englishPrompt, "VIDEO", slot.sceneNumber); return { ...slot, englishPrompt: prepared.validatedPrompt, promptId: prepared.promptId, validatedPrompt: prepared.validatedPrompt, validatedPromptHash: prepared.promptHash }; }));
+      setPromptFidelityStatus("PASS");
+      const result = await flow.runVideoJob(project.id, selectedChannelId, preparedSceneSlots, (progress) => {
         setGeminiVideoProgress({ processed: progress.processed, total: progress.total });
         setGeminiVideoMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`);
       });
-      setGeminiVideoProgress({ processed: sceneSlots.length, total: sceneSlots.length });
+      setGeminiVideoProgress({ processed: preparedSceneSlots.length, total: preparedSceneSlots.length });
       setGeminiVideoMessage("Đã tạo và lưu video bằng Flow Veo 3 qua trình duyệt.");
       const mergedVideos = { ...existingVideos, ...result.videos };
       setGeneratedVideos(mergedVideos);
@@ -638,12 +789,59 @@ export function ViralDashboard() {
       setGeminiVideoMessage("Đã tạo và lưu toàn bộ video 4 giây theo đúng thứ tự phân cảnh.");
       return mergedVideos;
     } catch (caught) {
-      notifyRuntimeFailure(caught, { operation: "generate-project-videos" });
+      notifyRuntimeFailure(caught, { operation: "generate-project-videos", projectId: project.id, stage: "SCENES" });
       setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo video bằng Flow Veo 3.");
       return null;
     } finally {
       setIsGeneratingVideos(false);
     }
+  }
+
+  async function resumeManualFlowSubmission(sceneNumber: number) {
+    if (!contentProject) return;
+    const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
+    if (!flow) { setContentProjectError("Không tìm thấy cầu nối Google Flow trên trình duyệt."); return; }
+    const checkpointId = `manual-flow:${contentProject.id}:scene-${sceneNumber}`;
+    setGeminiVideoMessage(`Đang kiểm tra video Cảnh ${sceneNumber} đã submit thủ công trên Flow...`);
+    try {
+      const result = await flow.resumeAfterManualSubmission(checkpointId);
+      if (result.status === "MANUAL_SUBMISSION_NOT_COMPLETED") {
+        setGeminiVideoMessage(`MANUAL_SUBMISSION_NOT_COMPLETED — mở đúng Flow project, xác nhận start-frame, điền prompt và bấm Generate, rồi Resume lại.`);
+        return;
+      }
+      const resumedVideo = result.video;
+      if (typeof resumedVideo === "string") {
+        setGeneratedVideos((current) => ({ ...current, [`scene-${sceneNumber}`]: resumedVideo }));
+        setShowGeneratedVideos(true);
+      }
+      setGeminiVideoMessage(`MANUAL_HANDOFF_RESUME = PASS — đã tải và lưu video Cảnh ${sceneNumber}.`);
+    } catch (caught) {
+      setContentProjectError(caught instanceof Error ? caught.message : "Không thể resume video đã submit thủ công.");
+    }
+  }
+
+  async function prepareManualFlowSubmission(sceneNumber: number) {
+    if (!contentProject) return;
+    const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
+    const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
+    const scene = contentProject.scenes.find((item) => item.sceneNumber === sceneNumber);
+    if (!flow || !selectedChannelId || !scene) { setContentProjectError("Không thể chuẩn bị Flow thủ công cho phân cảnh này."); return; }
+    try {
+    const identityPack = channels.find((channel) => channel.id === selectedChannelId)?.characterIdentityPack;
+    if (!selectedChannelId || !identityPack?.active || !identityPack.referenceImages.some((reference) => reference.active)) { setContentProjectError("MAIN_CHARACTER_IDENTITY_MISSING: Hãy lưu Character Identity Pack cho Channel trước khi chuẩn bị Flow."); return; }
+    const strictSpec = assertStrictModelingReady({ sourceVideoId: contentProject.sourceVideoId, sourceVideoUrl: contentProject.sourceVideoUrl, sourceDuration: contentProject.sourceDuration, modelingPolicy: contentProject.modelingPolicy ?? "STRICT_MODELING", sourceModelingSpec: contentProject.sourceModelingSpec, generatedScenes: contentProject.scenes.map((item) => ({ sceneNumber: item.sceneNumber, sourceSceneId: item.sourceSceneId, targetDuration: item.targetDuration })) });
+    const identityDraft = `PRESERVE IDENTITY: use the approved Character Identity Pack ${identityPack.name}. LOCKED TRAITS: ${JSON.stringify(identityPack.lockedTraits)}. PRESERVE IDENTITY: face identity, facial structure, skin tone, base hairstyle, body proportions, body build, age appearance, distinctive traits and core character design language. APPLY SCENE APPEARANCE: use only the outfit, shoes, accessories, props, emotion, pose and temporary condition explicitly required by this scene.`;
+    const draftPrompt = `${identityDraft}\n${compileStrictModelingConstraints(strictSpec, scene.sourceSceneId ?? undefined)}\n${scene.englishPrompt ?? scene.actionBlock}`;
+    const promptResponse = await fetch(`/api/v1/projects/${contentProject.id}/prompt-fidelity`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sceneNumber, promptType: "VIDEO", draftPrompt }) });
+    const promptBody = await promptResponse.json() as { data?: { promptId: string; validatedPrompt: string; promptHash: string }; error?: { message?: string } };
+    if (!promptResponse.ok || !promptBody.data) throw new Error(promptBody.error?.message ?? "Prompt Fidelity Gate không cho phép chuẩn bị Flow.");
+    setPromptFidelityStatus("PASS");
+    const slot: VideoSlot = { sceneNumber, label: `Video cảnh ${sceneNumber}`, visualBlock: scene.visualBlock, actionBlock: scene.actionBlock, audioBlock: scene.audioBlock, englishPrompt: promptBody.data.validatedPrompt, validatedPrompt: promptBody.data.validatedPrompt, validatedPromptHash: promptBody.data.promptHash, promptId: promptBody.data.promptId, aspectRatio };
+      const result = await flow.prepareManualSubmission(contentProject.id, selectedChannelId, slot);
+      setGeminiVideoMessage(`WAITING_FOR_MANUAL_FLOW_SUBMISSION — Flow project đã mở. Xác nhận start-frame, điền prompt, bấm Generate, rồi Resume Flow thủ công · Cảnh ${sceneNumber}.`);
+      setContentProjectError("");
+      void result;
+    } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo checkpoint Flow thủ công."); }
   }
   function defaultVideoEditScenes(project: ContentProjectResult): VideoEditScene[] {
     return project.scenes.map((scene) => ({ sceneNumber: scene.sceneNumber, trimStart: 0, trimEnd: 0 }));
@@ -744,18 +942,31 @@ export function ViralDashboard() {
     if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể tạo phiên chạy tự động.");
     return body.data;
   }
-  async function updateAutomationRun(runId: string, steps: AutomationStep[], fields: { status?: "RUNNING" | "SUCCEEDED" | "FAILED"; ideaId?: string; projectId?: string; error?: string | null; settings?: AutomationSettings } = {}) {
-    const response = await fetch("/api/v1/automations", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: runId, steps, ...fields }) });
+  async function updateAutomationRun(runId: string, steps: AutomationStep[], fields: { status?: "RUNNING" | "SUCCEEDED" | "FAILED" | "PAUSED"; ideaId?: string | null; modelingIdeaId?: string | null; channelId?: string | null; projectId?: string | null; error?: string | null; settings?: AutomationSettings; lastCompletedStage?: number; failedStage?: number | null; resumeTarget?: string | null; failureFingerprint?: string | null; attemptCount?: number; incidentHistory?: unknown[]; checkpoint?: Record<string, unknown>; sourceModelingSpecVersion?: string | null } = {}) {
+    const execution = automaticExecutionRef.current;
+    const terminal = fields.status === "PAUSED" || fields.status === "SUCCEEDED" || fields.status === "FAILED";
+    const executionCheckpoint = execution?.runId === runId
+      ? { ...(fields.checkpoint ?? {}), executionLease: terminal ? null : { ...execution, heartbeatAt: new Date().toISOString() } }
+      : fields.checkpoint;
+    const response = await fetch("/api/v1/automations", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: runId, steps, ...fields, ...(executionCheckpoint !== undefined ? { checkpoint: executionCheckpoint } : {}) }) });
     const body = await response.json() as { data?: AutomationRunResult; error?: { message?: string } };
     if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể cập nhật lịch sử chạy.");
     return body.data;
   }
   async function runAutomaticPipeline() {
-    if (!analysisVideoId || isAutomaticRunning) return;
+    if (!analysisVideoId || isAutomaticRunning || automaticRunLockRef.current) return;
+    automaticRunLockRef.current = true;
     const settings: AutomationSettings = { artStyle: ideaArtStyle.trim() || "Hoạt hình 3D", aspectRatio };
     let currentSteps = createAutomationSteps();
     let runId = "";
     let activeStep = "";
+    let currentIdea: ModelingIdeaResult | null = null;
+    let createdProject: ContentProjectResult | null = null;
+    let runAttemptCount = 0;
+    let incidentHistory: unknown[] = [];
+    let resumedFromCheckpoint = false;
+    let heartbeatTimer: number | undefined;
+    const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
     setExecutionMode("automatic");
     setIsAutomaticRunning(true);
     setAutomationSteps(currentSteps);
@@ -763,44 +974,128 @@ export function ViralDashboard() {
     setContentProjectError("");
     setError("");
     try {
-      const run = await createAutomationRun(settings, currentSteps);
-      runId = run.id;
+      if (!selectedChannelId) throw new Error("NEEDS_REVIEW: Chưa xác định được Channel cho checkpoint.");
+      let decision = resumableDecision;
+      if (decision.status === "NONE") {
+        const response = await fetch(`/api/v1/automations?sourceVideoId=${encodeURIComponent(analysisVideoId)}&channelId=${encodeURIComponent(selectedChannelId)}`);
+        const body = await response.json() as { data?: AutomationRunResult[]; error?: { message?: string } };
+        if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể kiểm tra checkpoint tự động.");
+        decision = resolveResumableRun(body.data, { sourceVideoId: analysisVideoId, channelId: selectedChannelId, runId: resumeSelection.runId || undefined, modelingIdeaId: resumeSelection.modelingIdeaId || undefined });
+        setResumableDecision(decision);
+      }
+      if (decision.status === "NEEDS_REVIEW") throw new Error(`NEEDS_REVIEW: ${decision.reason}`);
+      if (decision.status === "ACTIVE_RUN_IN_PROGRESS") throw new Error(`ACTIVE_RUN_IN_PROGRESS: ${decision.runId}`);
+      if (decision.status === "RESUME") {
+        resumedFromCheckpoint = true;
+        runId = decision.run.id;
+        currentIdea = decision.modelingIdea as ModelingIdeaResult;
+        runAttemptCount = (decision.run.attemptCount ?? decision.checkpoint.attemptCount ?? 0) + 1;
+        incidentHistory = Array.isArray(decision.run.incidentHistory) ? decision.run.incidentHistory : Array.isArray(decision.checkpoint.incidentHistory) ? decision.checkpoint.incidentHistory : [];
+        currentSteps = prepareResumeSteps(decision.run.steps ?? []).map((step) => ({ ...step })) as AutomationStep[];
+        if (!appSessionIdRef.current) appSessionIdRef.current = crypto.randomUUID();
+        automaticExecutionRef.current = { runId, executionId: crypto.randomUUID(), appSessionId: appSessionIdRef.current, startedAt: new Date().toISOString(), activeStage: "content-project" };
+        setModelingIdea(currentIdea);
+        setAutomationSteps(currentSteps);
+        await updateAutomationRun(runId, currentSteps, {
+          status: "RUNNING",
+          ideaId: decision.modelingIdeaId,
+          modelingIdeaId: decision.modelingIdeaId,
+          channelId: selectedChannelId,
+          attemptCount: runAttemptCount,
+          lastCompletedStage: 1,
+          failedStage: 2,
+          resumeTarget: "CONTENT_PROJECT_CREATION",
+          incidentHistory,
+          failureFingerprint: decision.run.failureFingerprint ?? "content_project_scene_creation_failed_after_modeling_idea_success",
+          checkpoint: checkpointPatch(decision.checkpoint, { lastCompletedStage: 1, failedStage: 2, resumeTarget: "CONTENT_PROJECT_CREATION", attemptCount: runAttemptCount, incidentHistory }),
+        });
+        setMessage("Đang tiếp tục phiên chạy từ Content Project và phân cảnh.");
+      } else {
+        const run = await createAutomationRun(settings, currentSteps);
+        runId = run.id;
+        runAttemptCount = run.attemptCount ?? 0;
+        if (!appSessionIdRef.current) appSessionIdRef.current = crypto.randomUUID();
+        automaticExecutionRef.current = { runId, executionId: crypto.randomUUID(), appSessionId: appSessionIdRef.current, startedAt: new Date().toISOString(), activeStage: "modeling-idea" };
+      }
       setAutomationRunId(runId);
-      const changeStep = async (key: string, status: AutomationStep["status"], detail?: string, stepError?: string) => {
+      heartbeatTimer = window.setInterval(() => {
+        if (automaticExecutionRef.current?.runId === runId) void updateAutomationRun(runId, currentSteps).catch(() => {});
+      }, 10_000);
+      if (resumedFromCheckpoint && decision.status === "RESUME") assertNoWrongStageRestart(decision.checkpoint, currentIdea ? 2 : 1);
+      const changeStep = async (key: string, status: AutomationStep["status"], detail?: string, stepError?: string, fields: AutomationPersistenceFields = {}) => {
+        if (automaticExecutionRef.current?.runId === runId) automaticExecutionRef.current.activeStage = key;
         const timestamp = new Date().toISOString();
         currentSteps = currentSteps.map((step) => step.key === key
           ? { ...step, status, ...(detail ? { detail } : {}), ...(stepError ? { error: stepError } : {}), ...(status === "running" ? { startedAt: timestamp } : {}), ...(status === "completed" || status === "failed" ? { completedAt: timestamp } : {}) }
           : step);
         setAutomationSteps(currentSteps);
-        await updateAutomationRun(runId, currentSteps);
+        await updateAutomationRun(runId, currentSteps, fields);
       };
-      activeStep = "modeling-idea";
-      await changeStep(activeStep, "running", "Đang tạo một Modeling Idea từ kết quả phân tích...");
-      const idea = await generateModelingIdea();
-      if (!idea) throw new Error("Không tạo được Modeling Idea.");
-      await changeStep(activeStep, "completed", `Đã tạo: ${idea.title}`);
-      const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
-      const selectedChannel = channels.find((channel) => channel.id === selectedChannelId);
-      const publishingSettings: AutomationSettings = {
-        ...settings,
-        postText: idea.postText,
-        hashtags: selectedChannel?.hashtags?.trim() ?? "",
-        language: selectedChannel?.language ?? "",
-        targetCountry: selectedChannel?.targetCountry ?? "",
-      };
-      await updateAutomationRun(runId, currentSteps, { ideaId: idea.id, settings: publishingSettings });
+      if (!currentIdea) {
+        if (resumedFromCheckpoint) throw new Error("RESUME_STATE_INCONSISTENT");
+        activeStep = "modeling-idea";
+        await changeStep(activeStep, "running", "Đang tạo một Modeling Idea từ kết quả phân tích...");
+        currentIdea = await generateModelingIdea(runId);
+        if (!currentIdea) throw new Error("Không tạo được Modeling Idea.");
+        await changeStep(activeStep, "completed", `Đã tạo: ${currentIdea.title}`, undefined, {
+          ideaId: currentIdea.id,
+          modelingIdeaId: currentIdea.id,
+          channelId: selectedChannelId,
+          lastCompletedStage: 1,
+          failedStage: null,
+          resumeTarget: null,
+          attemptCount: runAttemptCount,
+          incidentHistory,
+          checkpoint: { version: 1, runId, lastCompletedStage: 1, failedStage: null, resumeTarget: null, modelingIdeaId: currentIdea.id, sourceVideoId: analysisVideoId, channelId: selectedChannelId, attemptCount: runAttemptCount, incidentHistory },
+        });
+        const selectedChannel = channels.find((channel) => channel.id === selectedChannelId);
+        const publishingSettings: AutomationSettings = {
+          ...settings,
+          postText: currentIdea.postText,
+          hashtags: selectedChannel?.hashtags?.trim() ?? "",
+          language: selectedChannel?.language ?? "",
+          targetCountry: selectedChannel?.targetCountry ?? "",
+        };
+        await updateAutomationRun(runId, currentSteps, {
+          ideaId: currentIdea.id,
+          modelingIdeaId: currentIdea.id,
+          channelId: selectedChannelId,
+          settings: publishingSettings,
+          lastCompletedStage: 1,
+          failedStage: null,
+          resumeTarget: null,
+          attemptCount: runAttemptCount,
+          incidentHistory,
+          checkpoint: { version: 1, runId, lastCompletedStage: 1, failedStage: null, resumeTarget: null, modelingIdeaId: currentIdea.id, sourceVideoId: analysisVideoId, channelId: selectedChannelId, attemptCount: runAttemptCount, incidentHistory, failureFingerprint: null },
+        });
+      }
 
       activeStep = "content-project";
-      await changeStep(activeStep, "running", "Đang phát triển ý tưởng thành Content Project...");
-      const project = await createContentProject(idea);
+      await changeStep(activeStep, "running", "Đang phát triển ý tưởng thành Content Project...", undefined, resumedFromCheckpoint ? {
+        ideaId: currentIdea.id,
+        modelingIdeaId: currentIdea.id,
+        channelId: selectedChannelId,
+        lastCompletedStage: 1,
+        failedStage: 2,
+        resumeTarget: "CONTENT_PROJECT_CREATION",
+        attemptCount: runAttemptCount,
+        incidentHistory,
+      } : {});
+      createdProject = await createContentProject(currentIdea, true, runId);
+      const project = createdProject;
       if (!project) throw new Error("Không tạo được Content Project và phân cảnh.");
       await changeStep(activeStep, "completed", `Đã tạo ${project.scenes.length} phân cảnh.`);
-      await updateAutomationRun(runId, currentSteps, { projectId: project.id, ideaId: idea.id });
+      await updateAutomationRun(runId, currentSteps, { projectId: project.id, ideaId: currentIdea.id, modelingIdeaId: currentIdea.id, channelId: selectedChannelId, lastCompletedStage: 2, failedStage: null, resumeTarget: null, attemptCount: runAttemptCount, incidentHistory, sourceModelingSpecVersion: project.sourceModelingSpecVersion ?? null, checkpoint: { version: 1, runId, lastCompletedStage: 2, failedStage: null, resumeTarget: null, modelingIdeaId: currentIdea.id, sourceVideoId: analysisVideoId, channelId: selectedChannelId, attemptCount: runAttemptCount, incidentHistory, contentProjectId: project.id, sourceModelingSpecVersion: project.sourceModelingSpecVersion ?? null } });
+      if (resumeSelection.stopAfterStage === 2) {
+        await updateAutomationRun(runId, currentSteps, { status: "PAUSED", projectId: project.id, ideaId: currentIdea.id, modelingIdeaId: currentIdea.id, channelId: selectedChannelId, lastCompletedStage: 2, failedStage: null, resumeTarget: null, attemptCount: runAttemptCount, incidentHistory, sourceModelingSpecVersion: project.sourceModelingSpecVersion ?? null, checkpoint: { version: 1, runId, lastCompletedStage: 2, failedStage: null, resumeTarget: null, modelingIdeaId: currentIdea.id, sourceVideoId: analysisVideoId, channelId: selectedChannelId, attemptCount: runAttemptCount, incidentHistory, contentProjectId: project.id, sourceModelingSpecVersion: project.sourceModelingSpecVersion ?? null } });
+        setMessage("Validation đã dừng sau Stage 2.");
+        return;
+      }
 
       activeStep = "images";
-      await changeStep(activeStep, "running", "Đang tạo ảnh Gemini bằng Google Flow qua trình duyệt...");
+      await changeStep(activeStep, "running", "Đang tạo ảnh bằng Google Flow qua trình duyệt...");
       const images = await generateAllProjectImages(project);
-      if (!images) throw new Error("Không tạo đủ ảnh Gemini bằng Google Flow.");
+      if (!images) throw new Error("Không tạo đủ ảnh bằng Google Flow.");
       await changeStep(activeStep, "completed", `Đã tạo ${Object.keys(images).length} ảnh và lưu vào app.`);
 
       activeStep = "videos";
@@ -814,25 +1109,42 @@ export function ViralDashboard() {
       const finalVideo = await renderFinalProjectVideo(project, videos);
       if (!finalVideo) throw new Error("Không xuất được video hoàn chỉnh.");
       await changeStep(activeStep, "completed", "Đã nhận video hoàn chỉnh và lưu vào app.");
-      await updateAutomationRun(runId, currentSteps, { status: "SUCCEEDED", ideaId: idea.id, projectId: project.id, error: null });
+      await updateAutomationRun(runId, currentSteps, { status: "SUCCEEDED", ideaId: currentIdea.id, modelingIdeaId: currentIdea.id, channelId: selectedChannelId, projectId: project.id, lastCompletedStage: 5, failedStage: null, resumeTarget: null, error: null, attemptCount: runAttemptCount, incidentHistory, checkpoint: { version: 1, runId, lastCompletedStage: 5, failedStage: null, resumeTarget: null, modelingIdeaId: currentIdea.id, sourceVideoId: analysisVideoId, channelId: selectedChannelId, attemptCount: runAttemptCount, incidentHistory, contentProjectId: project.id, sourceModelingSpecVersion: project.sourceModelingSpecVersion ?? null } });
       setMessage("Đã chạy tự động toàn bộ quy trình và tạo video hoàn chỉnh. Có thể xem lại tại Lịch sử hoạt động.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Quy trình tự động không hoàn tất.";
-      notifyRuntimeFailure(caught, { operation: "automatic-pipeline", stage: activeStep });
+      if (!contentProjectTroubleshootingHandled.current) notifyRuntimeFailure(caught, { operation: "automatic-pipeline", stage: activeStep, automationRunId: runId });
       setContentProjectError(message);
       setError(message);
+      if (resumedFromCheckpoint && !activeStep) return;
       if (runId) {
         try {
           const timestamp = new Date().toISOString();
           currentSteps = currentSteps.map((step) => step.key === activeStep && step.status !== "completed" ? { ...step, status: "failed", error: message, completedAt: timestamp } : step);
           setAutomationSteps(currentSteps);
-          await updateAutomationRun(runId, currentSteps, { status: "FAILED", error: message });
+          const failedStage = activeStep === "modeling-idea" ? 1 : activeStep === "content-project" ? 2 : activeStep === "images" ? 3 : activeStep === "videos" ? 4 : 5;
+          await updateAutomationRun(runId, currentSteps, {
+            status: "FAILED",
+            error: message,
+            modelingIdeaId: currentIdea?.id ?? null,
+            channelId: selectedChannelId,
+            lastCompletedStage: Math.max(0, failedStage - 1),
+            failedStage,
+            resumeTarget: resumeTargetForStage(failedStage),
+            attemptCount: runAttemptCount,
+            incidentHistory,
+            failureFingerprint: failedStage === 2 ? "content_project_scene_creation_failed_after_modeling_idea_success" : null,
+            checkpoint: { version: 1, runId, lastCompletedStage: Math.max(0, failedStage - 1), failedStage, resumeTarget: resumeTargetForStage(failedStage), modelingIdeaId: currentIdea?.id ?? null, sourceVideoId: analysisVideoId, channelId: selectedChannelId, attemptCount: runAttemptCount, incidentHistory, contentProjectId: createdProject?.id ?? null, sourceModelingSpecVersion: createdProject?.sourceModelingSpecVersion ?? null, failureFingerprint: failedStage === 2 ? "content_project_scene_creation_failed_after_modeling_idea_success" : null },
+          });
         } catch {
           setError(`${message} Không thể lưu đầy đủ lịch sử hoạt động.`);
         }
       }
     } finally {
+      if (heartbeatTimer) window.clearInterval(heartbeatTimer);
+      if (automaticExecutionRef.current?.runId === runId) automaticExecutionRef.current = null;
       setIsAutomaticRunning(false);
+      automaticRunLockRef.current = false;
     }
   }
   function showCodexProgress(job: CodexJobResult) {
@@ -847,6 +1159,12 @@ export function ViralDashboard() {
     const latestDiagnosis = [...(job.events ?? [])].reverse().find((event) => event.type === "ERROR_DIAGNOSED");
     const diagnosisPayload = latestDiagnosis?.payload ?? {};
     const activeStage = job.stages.find((stage) => stage.stage === (job.currentStage ?? job.nextAction.stage));
+    const finalAuditStage = job.stages.find((stage) => stage.stage === "FINAL_AUDIT");
+    const completionStatus = finalAuditStage?.validationResult === "PASS"
+      ? "VIDEO COMPLETE — Final Audit PASS"
+      : finalAuditStage?.validationResult
+        ? `VIDEO COMPLETE — Final Audit ${finalAuditStage.validationResult} (chỉ ghi nhận cải tiến)`
+        : "VIDEO COMPLETE — Final Audit đã chạy";
     const targetIds = Array.isArray(diagnosisPayload.targetIds) ? diagnosisPayload.targetIds.filter((value): value is string => typeof value === "string") : job.nextAction.targetIds ?? [];
     const recoveryDetail = [
       latestDiagnosis?.reasoningSummary ? `Chẩn đoán: ${latestDiagnosis.reasoningSummary}` : null,
@@ -855,7 +1173,7 @@ export function ViralDashboard() {
       targetIds.length ? `Mục tiêu: ${targetIds.join(", ")}` : null,
       activeStage ? `Retry: ${activeStage.retryCount}/${job.status === "RECOVERING" ? "∞" : activeStage.maxRetries ?? 3}` : null,
     ].filter(Boolean).join(" · ");
-    setCodexStatus(job.status === "RECOVERING" ? recoveryDetail : job.status === "NEEDS_ENGINEERING" ? `NEEDS_ENGINEERING: ${job.nextAction.reason ?? "Codex đang xử lý lỗi code trong workspace được bảo vệ."}` : job.status === "NEEDS_HUMAN" ? `Cần kiểm tra thủ công: ${job.nextAction.reason ?? "đã hết giới hạn recovery"}` : job.status === "COMPLETED" ? "Final Audit PASS — VIDEO COMPLETE" : job.status === "PLANNING" ? "Worker nền đang tạo Execution Plan..." : `Bước tiếp theo: ${job.nextAction.stage ?? job.nextAction.name}`);
+    setCodexStatus(job.status === "RECOVERING" ? recoveryDetail : job.status === "NEEDS_ENGINEERING" ? `NEEDS_ENGINEERING: ${job.nextAction.reason ?? "Codex đang xử lý lỗi code trong workspace được bảo vệ."}` : job.status === "NEEDS_HUMAN" ? `Cần kiểm tra thủ công: ${job.nextAction.reason ?? "đã hết giới hạn recovery"}` : job.status === "COMPLETED" ? completionStatus : job.status === "PLANNING" ? "Worker nền đang tạo Execution Plan..." : `Bước tiếp theo: ${job.nextAction.stage ?? job.nextAction.name}`);
     const latestResumeEvent = [...(job.events ?? [])].reverse().find((event) => event.type === "JOB_AUTO_RESUMED" || event.type === "RUNTIME_REPAIR_VERIFIED");
     if (latestResumeEvent?.type === "JOB_AUTO_RESUMED") {
       setCodexErrorDeliveryStatus(`Bản sửa đã được nạp · Codex đã tự tiếp tục stage ${latestResumeEvent.stage ?? job.nextAction.stage ?? "đang lỗi"}`);
@@ -904,7 +1222,8 @@ export function ViralDashboard() {
         showCodexProgress(job);
       }
       if (job.status !== "COMPLETED") throw new Error(job.nextAction.reason ?? (job.status === "NEEDS_ENGINEERING" ? "Codex phát hiện lỗi code cần sửa." : "Codex job chưa đạt Final Audit PASS."));
-      setMessage("Codex đã hoàn thành video, Final Audit PASS và lưu Post-Run Review trong Lịch sử hoạt động.");
+      const auditVerdict = job.stages.find((stage) => stage.stage === "FINAL_AUDIT")?.validationResult ?? "đã chạy";
+      setMessage(`Codex đã hoàn thành video ở bước Final Assembly. Final Audit ${auditVerdict} được lưu để cải tiến, không chặn phát hành.`);
     } catch (caught) {
       const failure = caught instanceof Error ? caught.message : "Codex job chưa hoàn tất.";
       notifyRuntimeFailure(caught, { operation: "codex-pipeline", codexJobId });
@@ -1033,6 +1352,7 @@ export function ViralDashboard() {
           </button>
         </div>
       </header>
+      {contentProject && <SourceFidelityStatus project={contentProject} promptFidelityStatus={promptFidelityStatus} />}
       {showManualEntry && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
           <form onSubmit={(event) => void saveManualEntry(event)} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl">
@@ -1084,9 +1404,7 @@ export function ViralDashboard() {
                 <label className="text-sm font-semibold text-[#0b3262]">Kích thước khung hình<select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value as AutomationSettings["aspectRatio"])} disabled={isAutomaticRunning} className="mt-1 w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-2.5 font-normal"><option value="9:16">9:16 · Dọc</option><option value="16:9">16:9 · Ngang</option><option value="1:1">1:1 · Vuông</option><option value="4:5">4:5 · Dọc mạng xã hội</option></select></label>
               </div>
               <div className="mt-4 flex flex-wrap gap-3">
-                <button type="button" onClick={() => { setExecutionMode("manual"); setMessage("Đã chọn chạy thủ công. Thực hiện từng bước bên dưới."); }} disabled={isAutomaticRunning} className={`rounded-lg px-4 py-2.5 text-sm font-bold ${executionMode === "manual" ? "bg-[#0b5799] text-white" : "border border-[#cbd9ea] bg-white text-[#0b3262]"}`}>Chạy thủ công</button>
-                <button type="button" onClick={() => void runAutomaticPipeline()} disabled={isAutomaticRunning} className="rounded-lg bg-[#7c3aed] px-4 py-2.5 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60">{isAutomaticRunning ? "Đang chạy tự động..." : "Chạy tự động đến video hoàn chỉnh"}</button>
-                <button type="button" onClick={() => void runWithCodex()} disabled={isAutomaticRunning} className={`rounded-lg px-4 py-2.5 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60 ${executionMode === "codex" ? "bg-slate-950" : "bg-[#0f766e]"}`}>{isAutomaticRunning && executionMode === "codex" ? "Codex đang điều phối..." : "Run with Codex"}</button>
+                <button type="button" onClick={() => void runAutomaticPipeline()} disabled={isAutomaticRunning || resumableDecision.status === "NEEDS_REVIEW" || resumableDecision.status === "ACTIVE_RUN_IN_PROGRESS"} className="rounded-lg bg-[#7c3aed] px-4 py-2.5 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60">{isAutomaticRunning ? "Đang chạy tự động..." : resumableDecision.status === "RESUME" ? "Tiếp tục phiên chạy" : resumableDecision.status === "ACTIVE_RUN_IN_PROGRESS" ? "Phiên chạy đang hoạt động" : resumableDecision.status === "NEEDS_REVIEW" ? "Cần xem xét checkpoint" : "Chạy tự động đến khi video hoàn chỉnh"}</button>
               </div>
               {automationSteps.length > 0 && <div className="mt-4 space-y-2 rounded-lg border border-violet-200 bg-white p-3">{automationSteps.map((step) => <div key={step.key} className="flex items-center justify-between gap-3 text-sm"><span className="font-semibold text-[#0b3262]">{step.label}</span><span className={step.status === "completed" ? "font-bold text-emerald-700" : step.status === "failed" ? "font-bold text-rose-700" : step.status === "running" ? "font-bold text-amber-700" : "text-[#7990b0]"}>{step.status === "completed" ? "Đã xong" : step.status === "failed" ? "Lỗi" : step.status === "running" ? "Đang chạy" : "Chờ chạy"}</span></div>)}</div>}
               {automationRunId && <p className="mt-2 text-xs text-[#7990b0]">Mã phiên: {automationRunId}. Có thể xem lại tại Lịch sử hoạt động.</p>}
@@ -1097,28 +1415,25 @@ export function ViralDashboard() {
               <p className="mt-1 text-sm text-[#6883aa]">Tạo đúng 1 ý tưởng mới dựa trên cơ chế thành công của video gốc.</p>
               <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end">
                 <label className="flex-1 text-sm font-semibold text-[#0b3262]">Phong cách mỹ thuật<select value={ideaArtStyle} onChange={(event) => setIdeaArtStyle(event.target.value)} className="mt-1 w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-2.5 font-normal"><option>Hoạt hình 3D</option><option>Hoạt hình 2D</option><option>Stop motion đất sét</option><option>Anime</option><option>Điện ảnh chân thực</option><option>Truyện tranh</option><option>Pixel art</option></select></label>
-                <button type="button" onClick={() => void generateModelingIdea()} disabled={isGeneratingIdea || isAutomaticRunning} className="rounded-lg bg-[#07865f] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isGeneratingIdea ? "Đang tạo ý tưởng..." : "Tạo Modeling Idea"}</button>
+                <p className="self-end rounded-lg border border-[#cbd9ea] bg-white px-4 py-2.5 text-sm font-semibold text-[#6883aa]">Tự động trong phiên chạy</p>
               </div>
               {modelingIdeaError && <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{modelingIdeaError}</p>}
-              {modelingIdea && <div className="mt-5 space-y-4 border-t border-[#d8e3f1] pt-4 text-sm leading-6 text-[#0b3262]"><AnalysisBlock label="Ý tưởng" value={`${modelingIdea.title}\n${modelingIdea.coreConcept}`} /><AnalysisBlock label="Kịch bản" value={modelingIdea.script} /><AnalysisBlock label="Xây dựng hình tượng nhân vật" value={modelingIdea.characterDesign} /><AnalysisBlock label="Bối cảnh" value={modelingIdea.setting} /><AnalysisBlock label="Phong cách mỹ thuật" value={modelingIdea.artStyle} />
-                 <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Tạo hình và phân cảnh</p><p className="mt-1 text-sm text-[#6883aa]">Giữ nhân vật và bối cảnh đồng nhất trong toàn bộ video.</p><div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end"><label className="flex-1 text-sm font-semibold text-[#0b3262]">Kích thước khung hình<select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value as AutomationSettings["aspectRatio"])} disabled={isAutomaticRunning} className="mt-1 w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-2.5 font-normal"><option value="9:16">9:16 · Dọc</option><option value="16:9">16:9 · Ngang</option><option value="1:1">1:1 · Vuông</option><option value="4:5">4:5 · Dọc mạng xã hội</option></select></label><button type="button" onClick={() => void createContentProject()} disabled={isCreatingProject || isAutomaticRunning} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isCreatingProject ? "Đang tạo..." : "Tạo hình tượng & phân cảnh"}</button></div>{contentProjectError && <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{contentProjectError}</p>}{contentProject && <div className="mt-5 space-y-4 border-t border-[#d8e3f1] pt-4"><AnalysisBlock label="Thiết kế nhân vật đồng nhất" value={JSON.stringify(contentProject.characterDesign, null, 2)} /><AnalysisBlock label="Bối cảnh đồng nhất" value={JSON.stringify(contentProject.backgroundDesign, null, 2)} /><AnalysisBlock label="Khung hình" value={String(contentProject.artDirection.aspectRatio ?? aspectRatio)} /><div><p className="font-extrabold text-[#0b3262]">Các phân cảnh</p><div className="mt-2 space-y-3">{contentProject.scenes.map((scene) => <div key={scene.sceneNumber} className="rounded-lg border border-[#d8e3f1] bg-white p-3"><p className="font-bold text-[#0b5799]">Cảnh {scene.sceneNumber}</p><p className="mt-1"><strong>Hình ảnh:</strong> {scene.visualBlock}</p><p className="mt-1"><strong>Hành động:</strong> {scene.actionBlock}</p><p className="mt-1"><strong>Âm thanh:</strong> {scene.audioBlock}</p><p className="mt-1"><strong>Prompt ảnh bắt đầu:</strong> {scene.startFramePrompt ?? "Chưa có; app sẽ dùng prompt dự phòng cho ảnh bắt đầu."}</p><p className="mt-1"><strong>Prompt video 4 giây:</strong> {scene.englishPrompt ?? "Chưa có; app sẽ dùng prompt dự phòng cho video."}</p></div>)}</div></div></div>}</div>
+              {contentProjectRecoveryStatus && <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">{contentProjectRecoveryStatus}{contentProjectIncidentId && <span className="ml-2">· Incident: {contentProjectIncidentId.slice(0, 12)}</span>}</p>}
+               {modelingIdea && <div className="mt-5 space-y-4 border-t border-[#d8e3f1] pt-4 text-sm leading-6 text-[#0b3262]"><AnalysisBlock label="Ý tưởng" value={`${modelingIdea.title}\n${modelingIdea.coreConcept}`} /><AnalysisBlock label="Kịch bản" value={modelingIdea.script} /><AnalysisBlock label="Xây dựng hình tượng nhân vật" value={modelingIdea.characterDesign} /><AnalysisBlock label="Bối cảnh" value={modelingIdea.setting} /><AnalysisBlock label="Phong cách mỹ thuật" value={modelingIdea.artStyle} />
+                  <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Tạo hình và phân cảnh</p><p className="mt-1 text-sm text-[#6883aa]">Giữ nhân vật và bối cảnh đồng nhất trong toàn bộ video.</p><div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end"><label className="flex-1 text-sm font-semibold text-[#0b3262]">Kích thước khung hình<select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value as AutomationSettings["aspectRatio"])} disabled={isAutomaticRunning} className="mt-1 w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-2.5 font-normal"><option value="9:16">9:16 · Dọc</option><option value="16:9">16:9 · Ngang</option><option value="1:1">1:1 · Vuông</option><option value="4:5">4:5 · Dọc mạng xã hội</option></select></label><span className="self-end rounded-lg border border-[#cbd9ea] bg-white px-4 py-2.5 text-sm font-semibold text-[#6883aa]">Tự động trong phiên chạy</span></div>{contentProjectError && <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{contentProjectError}</p>}{contentProject && <div className="mt-5 space-y-4 border-t border-[#d8e3f1] pt-4"><div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-[#0b3262]"><p className="font-extrabold">SOURCE VIDEO MODELING</p><p className="mt-1"><strong>Chế độ:</strong> {contentProject.modelingPolicy === "STRICT_MODELING" ? "STRICT MODELING" : contentProject.modelingPolicy ?? "STRICT MODELING"} · <strong>Mục tiêu:</strong> {Math.round((contentProject.modelingFidelityTarget ?? 0.9) * 100)}–100%</p><p className="mt-1"><strong>Source video:</strong> {contentProject.sourceVideoUrl ? <a href={contentProject.sourceVideoUrl} target="_blank" rel="noreferrer" className="underline">{contentProject.sourceVideoUrl}</a> : "STRICT_SOURCE_VIDEO_MISSING"}</p>{contentProject.sourceModelingSpecVersion ? <p className="mt-1"><strong>Spec:</strong> v{contentProject.sourceModelingSpecVersion}</p> : <p className="mt-1 font-bold text-amber-700">SOURCE_MODELING_SPEC_MISSING — chưa được phép chạy strict generation.</p>}<p className="mt-2 font-semibold">Scene mapping:</p><div className="mt-1 flex flex-wrap gap-2">{contentProject.scenes.map((scene) => <span key={`mapping-${scene.sceneNumber}`} className="rounded bg-white px-2 py-1 text-xs font-semibold">Scene {scene.sceneNumber} → {scene.sourceSceneId ?? "SOURCE_SCENE_MAPPING_MISSING"}</span>)}</div></div><AnalysisBlock label="Thiết kế nhân vật đồng nhất" value={JSON.stringify(contentProject.characterDesign, null, 2)} /><AnalysisBlock label="Bối cảnh đồng nhất" value={JSON.stringify(contentProject.backgroundDesign, null, 2)} /><AnalysisBlock label="Khung hình" value={String(contentProject.artDirection.aspectRatio ?? aspectRatio)} /><div><p className="font-extrabold text-[#0b3262]">Các phân cảnh</p><div className="mt-2 space-y-3">{contentProject.scenes.map((scene) => <div key={scene.sceneNumber} className="rounded-lg border border-[#d8e3f1] bg-white p-3"><p className="font-bold text-[#0b5799]">Cảnh {scene.sceneNumber}{scene.sourceSceneId ? ` · ${scene.sourceSceneId}` : ""}</p>{scene.cameraSpec && <p className="mt-1"><strong>Camera source:</strong> {JSON.stringify(scene.cameraSpec)}</p>}{scene.actionSequence?.length ? <p className="mt-1"><strong>Action sequence:</strong> {scene.actionSequence.map((action, index) => `${index + 1}. ${action}`).join(" · ")}</p> : null}<p className="mt-1"><strong>Hình ảnh:</strong> {scene.visualBlock}</p><p className="mt-1"><strong>Hành động:</strong> {scene.actionBlock}</p><p className="mt-1"><strong>Âm thanh:</strong> {scene.audioBlock}</p><p className="mt-1"><strong>Prompt ảnh bắt đầu:</strong> {scene.startFramePrompt ?? "Chưa có; app sẽ dùng prompt dự phòng cho ảnh bắt đầu."}</p><p className="mt-1"><strong>Prompt video 4 giây:</strong> {scene.englishPrompt ?? "Chưa có; app sẽ dùng prompt dự phòng cho video."}</p>{scene.timingStatus === "SOURCE_TIMING_DRIFT" && <p className="mt-1 font-bold text-amber-700">SOURCE_TIMING_DRIFT</p>}</div>)}</div></div></div>}</div>
               </div>}
               {contentProject && <div className="mt-4 space-y-3">
-                <button type="button" onClick={() => void generateAllProjectImages()} disabled={isGeneratingImages || isAutomaticRunning} className="rounded-lg bg-[#0b5799] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{isGeneratingImages ? `Đang tạo ảnh ${flowImageProgress.processed}/${flowImageProgress.total}...` : "Tạo toàn bộ ảnh Gemini bằng trình duyệt"}</button>
-                {flowImageSlots.length > 0 && <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Quy trình Gemini qua Google Flow</p><p className="mt-1 text-sm leading-6 text-[#6883aa]">App mở Google Flow bằng trình duyệt, tạo bối cảnh trước, sau đó lần lượt tạo từng ảnh bắt đầu cảnh bằng ảnh nhân vật chính và bối cảnh làm tham chiếu. Mỗi ảnh được tạo, tải về và lưu thành công rồi mới chuyển sang ảnh tiếp theo.</p>{flowImageMessage && <p className="mt-2 text-sm font-semibold text-[#0b5799]">{flowImageMessage}</p>}<p className="mt-2 text-xs text-[#6883aa]">Cần đăng nhập Google Flow trong cửa sổ mở ra. Không xử lý CAPTCHA tự động.</p></div>}
+                {flowImageSlots.length > 0 && <div className="rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4"><p className="font-extrabold text-[#0b3262]">Quy trình Google Flow qua trình duyệt</p><p className="mt-1 text-sm leading-6 text-[#6883aa]">App dùng Character Identity Pack đã khóa của Channel làm source-of-truth, sau đó tạo ảnh bối cảnh và ảnh bắt đầu từng phân cảnh với Scene Appearance State tương ứng.</p>{flowImageMessage && <p className="mt-2 text-sm font-semibold text-[#0b5799]">{flowImageMessage}</p>}<p className="mt-2 text-xs text-[#6883aa]">Cần đăng nhập Google Flow trong cửa sổ mở ra. Không xử lý CAPTCHA tự động.</p></div>}
                 {Object.keys(generatedImages).length > 0 && <button type="button" onClick={() => setShowGeneratedImages((visible) => !visible)} className="ml-2 rounded-lg border border-[#0b5799] px-4 py-2.5 text-sm font-bold text-[#0b5799]">{showGeneratedImages ? "Ẩn ảnh" : "Xem ảnh"}</button>}
                 {showGeneratedImages && <div className="mt-4 grid gap-4 sm:grid-cols-2">{generatedImages["character-0"] && <figure><img src={generatedImages["character-0"]} alt="Hình tượng nhân vật" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Nhân vật</figcaption></figure>}{generatedImages["background-0"] && <figure><img src={generatedImages["background-0"]} alt="Bối cảnh đồng nhất" className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Bối cảnh</figcaption></figure>}{contentProject.scenes.map((scene) => generatedImages[`scene-${scene.sceneNumber}`] && <figure key={`image-${scene.sceneNumber}`}><img src={generatedImages[`scene-${scene.sceneNumber}`]} alt={`Ảnh cảnh ${scene.sceneNumber}`} className="w-full rounded-lg border border-[#d8e3f1]" /><figcaption className="mt-1 text-sm font-semibold">Cảnh {scene.sceneNumber}</figcaption></figure>)}</div>}
               </div>}
               {contentProject && contentProject.scenes.every((scene) => generatedImages[`scene-${scene.sceneNumber}`]) && (
                 <div className="mt-5 border-t border-[#d8e3f1] pt-4">
-                   <button type="button" onClick={() => void generateAllProjectVideos()} disabled={isGeneratingVideos || isAutomaticRunning} className="rounded-lg bg-[#7c3aed] px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">
-                    {isGeneratingVideos ? `Đang tạo video ${geminiVideoProgress.processed}/${geminiVideoProgress.total}...` : "Tạo toàn bộ video theo phân cảnh"}
-                  </button>
+                  <p className="text-sm font-semibold text-[#6883aa]">Video từng phân cảnh sẽ được tạo tự động trong phiên chạy.</p>
                   {geminiVideoMessage && <p className="mt-2 text-sm font-semibold text-[#6d28d9]">{geminiVideoMessage}</p>}
                   {Object.keys(generatedVideos).length > 0 && <button type="button" onClick={() => setShowGeneratedVideos((visible) => !visible)} className="ml-2 rounded-lg border border-[#7c3aed] px-4 py-2.5 text-sm font-bold text-[#6d28d9]">{showGeneratedVideos ? "Ẩn video" : "Xem video"}</button>}
                   {contentProject.scenes.every((scene) => generatedVideos[`scene-${scene.sceneNumber}`]) && <>
-                    <button type="button" onClick={() => showVideoEditor ? setShowVideoEditor(false) : openVideoEditor()} disabled={isAutomaticRunning} className="ml-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">{showVideoEditor ? "Ẩn trình edit video" : "Ghép & Edit video"}</button>
-                    {showVideoEditor && <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/40 p-4">
+                    {false && showVideoEditor && <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/40 p-4">
                       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
                         <div><p className="font-extrabold text-[#0b3262]">Ghép & Edit video</p><p className="mt-1 text-sm leading-6 text-[#6883aa]">Kéo thả để đổi thứ tự. Âm thanh gốc từ Google Flow luôn được giữ lại; nhạc nền hoặc hiệu ứng chỉ là lớp trộn thêm.</p></div>
                         <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-emerald-700">{videoEditScenes.length} cảnh</span>

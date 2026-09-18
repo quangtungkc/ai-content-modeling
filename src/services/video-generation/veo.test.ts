@@ -19,6 +19,12 @@ describe("VeoProvider", () => {
     expect(request.prompt).toContain("preserve silhouette");
   });
 
+  it("carries strict source modeling constraints into the compiled video prompt", () => {
+    const request = compileVeoPrompt({ sceneId: "scene-1", scene: {}, characterData: {}, assetReferences: [], background: {}, camera: {}, action: {}, audio: {}, duration: 4, constraints: [], sourceModelingConstraints: "SOURCE MODELING MODE: STRICT_MODELING\nACTION SEQUENCE (authoritative): 1. look 2. type" });
+    expect(request.prompt).toContain("SOURCE MODELING MODE: STRICT_MODELING");
+    expect(request.prompt).toContain("ACTION SEQUENCE (authoritative)");
+  });
+
   it("uses the image as the primary Start frame and reads the official operation response", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ name: "operations/123" }), { status: 200 }))

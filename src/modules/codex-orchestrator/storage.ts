@@ -14,6 +14,9 @@ export function ensureCodexStorage() {
       `CREATE TABLE IF NOT EXISTS "AgentExperience" ("id" TEXT NOT NULL PRIMARY KEY, "jobId" TEXT, "stage" TEXT NOT NULL, "provider" TEXT, "errorSignature" TEXT NOT NULL, "errorMessage" TEXT, "expectedState" JSONB, "actualState" JSONB, "rootCause" TEXT, "attemptedFix" TEXT, "successfulFix" TEXT, "result" TEXT NOT NULL, "occurrenceCount" INTEGER NOT NULL DEFAULT 1, "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "lastSeenAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, CONSTRAINT "AgentExperience_jobId_fkey" FOREIGN KEY ("jobId") REFERENCES "CodexJob" ("id") ON DELETE SET NULL ON UPDATE CASCADE)`,
       `CREATE TABLE IF NOT EXISTS "AppImprovementCandidate" ("id" TEXT NOT NULL PRIMARY KEY, "jobId" TEXT, "title" TEXT NOT NULL, "category" TEXT NOT NULL, "affectedModule" TEXT NOT NULL, "evidence" JSONB NOT NULL, "relatedJobs" JSONB NOT NULL DEFAULT '[]', "occurrenceCount" INTEGER NOT NULL DEFAULT 1, "rootCause" TEXT NOT NULL, "currentBehavior" TEXT NOT NULL, "desiredBehavior" TEXT NOT NULL, "proposedFix" TEXT NOT NULL, "externalReferences" JSONB NOT NULL DEFAULT '[]', "alternativeSolutions" JSONB NOT NULL DEFAULT '[]', "riskLevel" TEXT NOT NULL, "expectedBenefit" TEXT NOT NULL, "requiredTests" JSONB NOT NULL DEFAULT '[]', "migrationImpact" TEXT NOT NULL, "status" TEXT NOT NULL DEFAULT 'PROPOSED', "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "updatedAt" DATETIME NOT NULL, CONSTRAINT "AppImprovementCandidate_jobId_fkey" FOREIGN KEY ("jobId") REFERENCES "CodexJob" ("id") ON DELETE SET NULL ON UPDATE CASCADE)`,
       `CREATE TABLE IF NOT EXISTS "RuntimeFailure" ("id" TEXT NOT NULL PRIMARY KEY, "userId" TEXT, "codexJobId" TEXT, "backgroundJobId" TEXT, "source" TEXT NOT NULL, "stage" TEXT, "failureKind" TEXT NOT NULL DEFAULT 'TECHNICAL_FAILURE', "code" TEXT NOT NULL, "message" TEXT NOT NULL, "stack" TEXT, "context" JSONB NOT NULL DEFAULT '{}', "status" TEXT NOT NULL DEFAULT 'PENDING', "attempts" INTEGER NOT NULL DEFAULT 0, "codexResponseId" TEXT, "lastAttemptAt" DATETIME, "resolvedAt" DATETIME, "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "updatedAt" DATETIME NOT NULL, CONSTRAINT "RuntimeFailure_codexJobId_fkey" FOREIGN KEY ("codexJobId") REFERENCES "CodexJob" ("id") ON DELETE SET NULL ON UPDATE CASCADE)`,
+      `ALTER TABLE "CodexJob" ADD COLUMN "generationStatus" TEXT NOT NULL DEFAULT 'RUNNING'`,
+      `ALTER TABLE "CodexJob" ADD COLUMN "qualityStatus" TEXT NOT NULL DEFAULT 'NOT_RUN'`,
+      `ALTER TABLE "CodexJob" ADD COLUMN "outputReady" BOOLEAN NOT NULL DEFAULT false`,
       `CREATE UNIQUE INDEX IF NOT EXISTS "CodexJob_idempotencyKey_key" ON "CodexJob"("idempotencyKey")`,
       `CREATE UNIQUE INDEX IF NOT EXISTS "CodexJob_sessionId_key" ON "CodexJob"("sessionId")`,
       `CREATE INDEX IF NOT EXISTS "CodexJob_userId_startedAt_idx" ON "CodexJob"("userId", "startedAt" DESC)`,
@@ -33,7 +36,11 @@ export function ensureCodexStorage() {
       `CREATE INDEX IF NOT EXISTS "RuntimeFailure_codexJobId_createdAt_idx" ON "RuntimeFailure"("codexJobId", "createdAt")`,
       `CREATE INDEX IF NOT EXISTS "RuntimeFailure_backgroundJobId_createdAt_idx" ON "RuntimeFailure"("backgroundJobId", "createdAt")`,
     ];
-    for (const statement of statements) await db.$executeRawUnsafe(statement);
+    for (const statement of statements) {
+      try { await db.$executeRawUnsafe(statement); } catch (error) {
+        if (!/duplicate column name: (generationStatus|qualityStatus|outputReady)/i.test(error instanceof Error ? error.message : "")) throw error;
+      }
+    }
   })();
   return ready;
 }

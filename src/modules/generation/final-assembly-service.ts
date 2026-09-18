@@ -49,6 +49,17 @@ async function duration(file: string) {
   return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
 }
 
+async function validateFinalOutput(file: string) {
+  const size = (await stat(file)).size;
+  if (size < 1024) throw new Error("Video cuối không hợp lệ.");
+  const metadata = await runFfmpeg(["-hide_banner", "-i", file, "-f", "null", "-"], true);
+  const seconds = await duration(file);
+  const resolution = metadata.match(/Video:.*?(\d{2,5})x(\d{2,5})/i);
+  if (!/Video:/i.test(metadata) || !resolution || seconds <= 0.1) throw new Error("FINAL_MEDIA_VALIDATION_FAILED");
+  await runFfmpeg(["-hide_banner", "-loglevel", "error", "-i", file, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"]);
+  return { finalContainerValid: true, finalVideoStreamValid: true, finalDurationSec: seconds, finalResolution: `${resolution[1]}x${resolution[2]}` };
+}
+
 export async function assembleProjectVideo(projectId: string, sceneNumbers: number[], onProgress?: (detail: string, processed: number, total: number) => Promise<void> | void) {
   const ordered = [...new Set(sceneNumbers)].sort((a, b) => a - b);
   if (!ordered.length) throw new AppError("SCENES_REQUIRED", "Không có video phân cảnh để ghép.", 409);
@@ -88,9 +99,9 @@ export async function assembleProjectVideo(projectId: string, sceneNumbers: numb
       }
       await runFfmpeg(["-y", "-hide_banner", ...normalized.flatMap((file) => ["-i", file]), "-filter_complex", filters.join(";"), "-map", `[${videoLabel}]`, "-map", `[${audioLabel}]`, "-c:v", "h264_mf", "-b:v", "4500k", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", finalPath]);
     }
-    if ((await stat(finalPath)).size < 1024) throw new Error("Video cuối không hợp lệ.");
+    const validation = await validateFinalOutput(finalPath);
     await onProgress?.("Đã xuất video hoàn chỉnh.", sources.length, sources.length);
-    return { finalPath, finalVideoUrl: `/api/v1/projects/${projectId}/videos?final=1&v=${Date.now()}`, sceneOrder: ordered, aspectRatio: "9:16", hasAudio: true };
+    return { finalPath, finalVideoUrl: `/api/v1/projects/${projectId}/videos?final=1&v=${Date.now()}`, sceneOrder: ordered, aspectRatio: "9:16", hasAudio: true, ...validation };
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

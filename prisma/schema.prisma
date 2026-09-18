@@ -151,7 +151,40 @@ model Channel {
   reports               DailyReport[]
   projects              ContentProject[]
   usageEvents           UsageEvent[]
+  characterIdentityPack CharacterIdentityPack?
   @@index([userId, status])
+}
+
+model CharacterIdentityPack {
+  id                String   @id @default(cuid())
+  channelId         String   @unique
+  name              String
+  styleType         String   @default("other")
+  lockedTraits      Json     @default("{}")
+  allowedVariations Json     @default("[]")
+  negativeRules     Json     @default("[]")
+  active            Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  channel           Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  referenceImages   CharacterIdentityReference[]
+  @@index([channelId, active])
+}
+
+model CharacterIdentityReference {
+  id          String   @id @default(cuid())
+  packId      String
+  assetId     String   @unique
+  storageKey  String
+  referenceId String?
+  viewRole    String
+  active      Boolean  @default(true)
+  name        String?
+  mimeType    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  pack        CharacterIdentityPack @relation(fields: [packId], references: [id], onDelete: Cascade)
+  @@index([packId, active, viewRole])
 }
 
 model Competitor {
@@ -184,7 +217,7 @@ model CompetitorVideo {
   caption       String?
   thumbnailUrl  String?
   publishedAt   DateTime?
-  duration      Int?
+  duration      Float?
   firstSeenAt   DateTime         @default(now())
   lastSeenAt    DateTime         @default(now())
   competitor    Competitor       @relation(fields: [competitorId], references: [id])
@@ -297,6 +330,16 @@ model ContentProject {
   channelId      String
   ideaId         String             @unique
   status         String
+  sourceVideoId  String?
+  sourceVideoUrl String?
+  sourceVideoMetadata Json?
+  sourceDuration Float?
+  sourcePlatform String?
+  modelingPolicy String             @default("STRICT_MODELING")
+  modelingFidelityTarget Float       @default(0.9)
+  sourceModelingSpecVersion String?
+  sourceModelingSpec Json?
+  sourceSpecCreatedAt DateTime?
   deconstruction Json?
   artDirection   Json?
   characterDesign Json?
@@ -313,6 +356,30 @@ model ContentProject {
   assets         Asset[]
   reviews        ProjectReview[]
   usageEvents    UsageEvent[]
+}
+
+model PromptFidelityTrace {
+  id                       String   @id
+  projectId                String
+  sceneId                  String?
+  sourceSceneId            String?
+  promptType               String
+  sourceSpecVersion        String
+  expectedStateVersion     String
+  characterIdentityPackVersion String
+  geminiDraftPrompt       String
+  validatedPrompt         String
+  validationResults       Json
+  validationEvidence      Json
+  promptHash              String
+  actualSentPromptHash    String?
+  validatedAt             DateTime
+  sentAt                  DateTime?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@index([projectId, sceneId, promptType, createdAt])
+  @@index([projectId, promptHash])
 }
 
 model UsageEvent {
@@ -357,6 +424,20 @@ model StoryboardScene {
   id             String           @id @default(cuid())
   projectId      String
   sceneNumber    Int
+  sourceSceneId  String?
+  sourceSceneOrder Int?
+  sourceSceneStartTime Float?
+  sourceSceneEndTime Float?
+  sourceDuration Float?
+  targetDuration Float?
+  durationDelta Float?
+  durationRatio Float?
+  timingStatus String?
+  cameraSpec Json?
+  actionSequence Json?
+  spatialSpec Json?
+  mustPreserve Json?
+  allowedTransformations Json?
   visualBlock    String
   actionBlock    String
   audioBlock     String
@@ -507,12 +588,22 @@ model AutomationRun {
   id            String   @id @default(cuid())
   userId        String
   sourceVideoId String
+  channelId     String?
   ideaId        String?
+  modelingIdeaId String?
   projectId     String?
   status        String   @default("RUNNING")
   settings      Json
   steps         Json
   error         String?
+  lastCompletedStage Int   @default(0)
+  failedStage       Int?
+  resumeTarget      String?
+  failureFingerprint String?
+  attemptCount      Int   @default(0)
+  incidentHistory   Json  @default("[]")
+  checkpoint        Json  @default("{}")
+  sourceModelingSpecVersion String?
   startedAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   completedAt   DateTime?
@@ -538,6 +629,9 @@ model CodexJob {
   finalVideoId       String?
   finalVideoPath     String?
   finalVideoUrl      String?
+  generationStatus   String   @default("RUNNING")
+  qualityStatus      String   @default("NOT_RUN")
+  outputReady        Boolean  @default(false)
   failureReason      String?
   startedAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
@@ -667,4 +761,127 @@ model AppImprovementCandidate {
 
   @@index([status, createdAt(sort: Desc)])
   @@index([affectedModule, category])
+}
+
+// A versioned, evidence-backed catalog of verified troubleshooting guidance.
+// It deliberately has no relation to the runtime executor yet: this task only
+// establishes persistence and a safe read/write boundary for a future matcher.
+model TroubleshootingKnowledgeBase {
+  key         String                 @id
+  version     String
+  description String
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+  rules       TroubleshootingRule[]
+}
+
+model TroubleshootingRule {
+  issueId              String                      @id
+  knowledgeBaseKey     String
+  title                String
+  stage                String
+  firstDivergence      String?
+  repairScope          String
+  autoRepairAllowed    Boolean                     @default(false)
+  severity             String
+  version              String
+  verificationStatus   String
+  automationClass      String
+  tags                 Json                        @default("[]")
+  document             Json
+  createdAt            DateTime                    @default(now())
+  updatedAt            DateTime                    @updatedAt
+  knowledgeBase        TroubleshootingKnowledgeBase @relation(fields: [knowledgeBaseKey], references: [key], onDelete: Cascade)
+
+  @@index([knowledgeBaseKey, verificationStatus])
+  @@index([stage, repairScope])
+}
+
+model TroubleshootingIncident {
+  id           String                       @id
+  fingerprint  String
+  projectId    String?
+  sceneNumber  Int?
+  stage        String
+  component    String
+  status       String
+  document     Json
+  checkpoint   Json                         @default("{}")
+  attemptCount Int                          @default(0)
+  createdAt    DateTime                     @default(now())
+  updatedAt    DateTime                     @updatedAt
+  audits       TroubleshootingIncidentAudit[]
+
+  @@index([fingerprint, updatedAt])
+  @@index([projectId, stage, updatedAt])
+}
+
+model TroubleshootingIncidentAudit {
+  id         String                    @id @default(cuid())
+  incidentId String
+  type       String
+  payload    Json
+  createdAt  DateTime                  @default(now())
+  incident   TroubleshootingIncident   @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  @@index([incidentId, createdAt])
+}
+
+model PostAssemblyQaRun {
+  id                   String   @id
+  projectId            String
+  finalVideoPath       String
+  finalVideoHash       String
+  finalVideoVersion    String
+  validatorVersion     String
+  status               String
+  qualityStatusBefore  String
+  qualityStatusAfter   String?
+  validatorsRun        Json
+  findings             Json
+  incidentsCreated     Json
+  repairsTriggered     Json
+  error                String?
+  startedAt            DateTime @default(now())
+  finishedAt           DateTime?
+  updatedAt            DateTime @updatedAt
+
+  @@unique([projectId, finalVideoHash, validatorVersion])
+  @@index([projectId, updatedAt])
+}
+
+model PostAssemblyOutputVersion {
+  id                      String   @id
+  projectId               String
+  versionNumber           Int
+  status                  String
+  filePath                String
+  fileHash                String
+  createdAt               DateTime @default(now())
+  createdFromVersionId    String?
+  createdByRepairIncidentId String?
+  repairRuleId            String?
+  validationStatus        String
+  promotedAt              DateTime?
+  rejectedAt              DateTime?
+  rollbackReason          String?
+
+  @@unique([projectId, versionNumber])
+  @@index([projectId, status])
+  @@index([projectId, fileHash])
+}
+
+model PostAssemblyOutputVersionAudit {
+  id                       String   @id
+  projectId                String
+  outputVersionId          String?
+  event                    String
+  previousCurrentVersionId String?
+  newCurrentVersionId     String?
+  reason                   String?
+  metadata                 Json     @default("{}")
+  createdAt                DateTime @default(now())
+
+  @@index([projectId, createdAt])
+  @@index([outputVersionId, createdAt])
 }

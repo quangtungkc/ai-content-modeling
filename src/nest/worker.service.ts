@@ -22,19 +22,45 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
 
   private async run() {
     this.logger.log("NestJS background worker started");
-    const staleJobs = await this.queue.findStale(new Date(Date.now() - 5 * 60_000));
-    for (const staleJob of staleJobs) {
-      try { await reportBackgroundJobFailure(staleJob, new Error("Job bị gián đoạn quá 5 phút; worker sẽ resume từ checkpoint.")); } catch (error) { this.logger.error(`Không ghi được lỗi job stale về Codex: ${error instanceof Error ? error.message : String(error)}`); }
+    try {
+      // On local desktop startup no previous worker is still alive, so every
+      // non-Flow running job is an interrupted job and can resume immediately.
+      const interruptedBefore = new Date();
+      await this.queue.requeueStale(interruptedBefore);
+      await requeueStaleRuntimeFailures(new Date(Date.now() - 5 * 60_000));
+    } catch (error) {
+      this.logger.error(`Không thể khôi phục hàng đợi lúc khởi động; worker sẽ thử lại ở vòng sau: ${error instanceof Error ? error.message : String(error)}`);
     }
-    await this.queue.requeueStale(new Date(Date.now() - 5 * 60_000));
-    await requeueStaleRuntimeFailures(new Date(Date.now() - 5 * 60_000));
     let lastRuntimeSweep = 0;
+    let lastStaleSweep = 0;
     while (!this.stopped) {
       if (Date.now() - lastRuntimeSweep >= 60_000) { lastRuntimeSweep = Date.now(); try { await pumpPendingRuntimeFailures(); } catch (error) { this.logger.error(`Không quét được hàng đợi lỗi runtime: ${error instanceof Error ? error.message : String(error)}`); } }
-      const job = await this.queue.claim();
+      if (Date.now() - lastStaleSweep >= 60_000) {
+        lastStaleSweep = Date.now();
+        try {
+          const staleBefore = new Date(Date.now() - 5 * 60_000);
+          const staleJobs = await this.queue.findStale(staleBefore);
+          for (const staleJob of staleJobs) {
+            try { await reportBackgroundJobFailure(staleJob, new Error("Job bị gián đoạn quá 5 phút; worker sẽ resume từ checkpoint.")); } catch (error) { this.logger.error(`Không ghi được lỗi job stale về Codex: ${error instanceof Error ? error.message : String(error)}`); }
+          }
+          await this.queue.requeueStale(staleBefore);
+          await requeueStaleRuntimeFailures(staleBefore);
+        } catch (error) {
+          this.logger.error(`Không thể phục hồi job stale định kỳ: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      let job: Awaited<ReturnType<LocalJobQueue["claim"]>> = null;
+      try { job = await this.queue.claim(); }
+      catch (error) {
+        this.logger.error(`Không đọc được hàng đợi; worker sẽ retry với backoff: ${error instanceof Error ? error.message : String(error)}`);
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        continue;
+      }
       if (!job) { await new Promise((resolve) => setTimeout(resolve, 500)); continue; }
       setActiveWorkerJob(job);
-      const heartbeat = setInterval(() => void this.queue.touch(job.jobId), 30_000);
+      const heartbeat = setInterval(() => {
+        void this.queue.touch(job.jobId).catch((error) => this.logger.error(`Không cập nhật được heartbeat worker: ${error instanceof Error ? error.message : String(error)}`));
+      }, 30_000);
       const stallWatchdog = job.name === "codex.runtime.failure" ? undefined : setTimeout(() => {
         void reportStalledBackgroundJob(job).catch((error) => this.logger.error(`Không ghi được cảnh báo job treo về Codex: ${error instanceof Error ? error.message : String(error)}`));
       }, 5 * 60_000);

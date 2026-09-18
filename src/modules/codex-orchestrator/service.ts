@@ -3,11 +3,18 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { getEnv } from "@/lib/env";
 import { AppError } from "@/lib/errors";
+import { assertStrictModelingReady, buildStrictSceneExpectedState, sourceModelingSpecSchema } from "@/modules/modeling/strict-source-modeling";
+import { getCharacterIdentityPack } from "@/modules/channels/identity-pack";
+import type { FinalVideoObservation, SourceValidationContext } from "@/modules/source-validation/multi-stage";
 import { CodexReasoner } from "./reasoner";
 import { ensureCodexStorage } from "./storage";
 import { buildSceneExpectedState, canAutoResumeAfterFlowRuntimeRepair, chooseRecoveryStrategy, classifyFailure, createErrorSignature, extractRecoveryTargetIds, findIncompleteFinalAuditPrerequisite, nextContinuousRecoveryStrategy, nextPendingAction, recoveryActionFor, recoveryStrategies, redactSecrets, retryCountForSignature, shouldKeepRunningUntilFinal, validateExpectedActual } from "./policy";
 import { CODEX_STAGES, type CodexAction, type CodexEventType, type CodexStage, type CodexStageSnapshot, type ExpectedState, type ReportCodexEventInput, type ValidationOutput } from "./types";
 import { validateQuality } from "./quality-validator";
+import { access } from "node:fs/promises";
+import { hashFinalVideo, POST_ASSEMBLY_QA_VALIDATOR_VERSION, prismaQaRunPersistence } from "@/modules/post-assembly-qa/repository";
+import { PostAssemblyQaOrchestrator } from "@/modules/post-assembly-qa/orchestrator";
+import { registerOriginalOutput } from "@/modules/output-versioning/service";
 import { LocalJobQueue } from "@/lib/jobs/queue";
 
 const labels: Record<CodexStage, string> = {
@@ -35,6 +42,43 @@ type CreateJobInput = {
 type StoredStage = { stage: string; status: string; retryCount: number; maxRetries: number; expectedState: unknown; actualState: unknown; validationResult: string | null; lastStrategy: string | null };
 
 const json = (value: unknown) => redactSecrets(value) as Prisma.InputJsonValue;
+
+// Event history is operational telemetry, not a second copy of the full
+// provider response. Keep it bounded so one repeated provider failure cannot
+// make SQLite grow without limit and block the worker that must report it.
+const MAX_EVENT_STRING_LENGTH = 4_000;
+const MAX_EVENT_ARRAY_ITEMS = 20;
+const MAX_EVENT_OBJECT_KEYS = 40;
+const MAX_EVENT_PAYLOAD_LENGTH = 16_000;
+const MIN_PROGRESS_EVENT_INTERVAL_MS = 30_000;
+
+function compactEventValue(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") return redactSecrets(value).slice(0, MAX_EVENT_STRING_LENGTH);
+  if (typeof value !== "object" || value === null) return value;
+  if (depth >= 5) return "[TRUNCATED_DEPTH]";
+  if (Array.isArray(value)) {
+    const items = value.length <= MAX_EVENT_ARRAY_ITEMS
+      ? value
+      : [...value.slice(0, 10), `[${value.length - 20} items omitted]`, ...value.slice(-10)];
+    return items.map((item) => compactEventValue(item, depth + 1));
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  const selected = entries.length <= MAX_EVENT_OBJECT_KEYS
+    ? entries
+    : [...entries.slice(0, MAX_EVENT_OBJECT_KEYS - 1), ["_omittedKeys", entries.length - (MAX_EVENT_OBJECT_KEYS - 1)]];
+  return Object.fromEntries(selected.map(([key, item]) => [key, compactEventValue(item, depth + 1)]));
+}
+
+function eventJson(value: unknown) {
+  const compacted = compactEventValue(value);
+  const serialized = JSON.stringify(compacted);
+  if (serialized.length <= MAX_EVENT_PAYLOAD_LENGTH) return compacted as Prisma.InputJsonValue;
+  return {
+    _truncated: true,
+    _preview: serialized.slice(0, MAX_EVENT_PAYLOAD_LENGTH - 64),
+  } as Prisma.InputJsonValue;
+}
+
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const stringArray = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 const stageSnapshot = (stage: StoredStage): CodexStageSnapshot => ({
@@ -52,7 +96,7 @@ export async function appendCodexEvent(jobId: string, type: CodexEventType, stag
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const aggregate = await db.codexEvent.aggregate({ where: { jobId }, _max: { sequence: true } });
     try {
-      return await db.codexEvent.create({ data: { jobId, sequence: (aggregate._max.sequence ?? 0) + 1, type, stage, payload: json(payload), reasoningSummary: reasoningSummary ? redactSecrets(reasoningSummary) : undefined } });
+      return await db.codexEvent.create({ data: { jobId, sequence: (aggregate._max.sequence ?? 0) + 1, type, stage, payload: eventJson(payload), reasoningSummary: reasoningSummary ? redactSecrets(reasoningSummary).slice(0, MAX_EVENT_STRING_LENGTH) : undefined } });
     } catch (error) {
       if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002" || attempt === 3) throw error;
     }
@@ -65,12 +109,15 @@ export async function confirmDesktopFlowRuntime(userId: string, runtimeRevision:
   if (!["flow-ipc-event-v2", "flow-recovery-v3"].includes(runtimeRevision)) return { confirmed: false, resumedJobIds: [] as string[] };
   const candidates = await db.codexJob.findMany({
     where: { userId, status: { in: ["NEEDS_HUMAN", "NEEDS_ENGINEERING"] }, currentStage: { in: ["ASSETS", "SCENES"] } },
-    select: { id: true, status: true, currentStage: true, failureReason: true, automationRunId: true },
+    select: { id: true, status: true, currentStage: true, failureReason: true, automationRunId: true, retryCount: true },
     orderBy: { updatedAt: "asc" },
     take: 10,
   });
   const resumedJobIds: string[] = [];
   for (const candidate of candidates) {
+    if (candidate.retryCount >= getEnv().CODEX_MAX_RECOVERY_PER_JOB) continue;
+    const priorVerified = await db.codexEvent.findFirst({ where: { jobId: candidate.id, type: "RUNTIME_REPAIR_VERIFIED", stage: candidate.currentStage }, orderBy: { createdAt: "desc" }, select: { payload: true } });
+    if (record(priorVerified?.payload).runtimeRevision === runtimeRevision) continue;
     if (!canAutoResumeAfterFlowRuntimeRepair({ status: candidate.status, stage: candidate.currentStage, failureReason: candidate.failureReason, runtimeRevision })) continue;
     const stage = candidate.currentStage as "ASSETS" | "SCENES";
     const validatorRetry = /quality validator|semantic_audit_required|gemini[_\s]quality|quality[_\s]provider|rate.?limit|quota|429/i.test(candidate.failureReason ?? "");
@@ -85,7 +132,7 @@ export async function confirmDesktopFlowRuntime(userId: string, runtimeRevision:
       await db.$transaction([
         db.codexStageState.update({
           where: { jobId_stage: { jobId: candidate.id, stage } },
-          data: { status: "RETRYING", retryCount: 0, lastStrategy: repairStrategy, validationResult: null, validationIssues: Prisma.JsonNull, completedAt: null },
+          data: { status: "RETRYING", lastStrategy: repairStrategy, validationResult: null, validationIssues: Prisma.JsonNull, completedAt: null },
         }),
         ...(candidate.automationRunId ? [db.automationRun.update({ where: { id: candidate.automationRunId }, data: { status: "RUNNING", error: null, completedAt: null } })] : []),
         db.runtimeFailure.updateMany({ where: { codexJobId: candidate.id, status: { not: "SENT_TO_CODEX" } }, data: { status: "RECOVERY_REQUESTED", resolvedAt: new Date() } }),
@@ -105,6 +152,11 @@ export async function confirmDesktopFlowRuntime(userId: string, runtimeRevision:
 
 function basicValidation(stage: CodexStage, actual: Record<string, unknown> | undefined): ValidationOutput | null {
   const required: Partial<Record<CodexStage, string>> = { ANALYSIS: "analysisId", MODELING: "ideaId", PROJECT: "projectId" };
+  if (stage === "FINAL_ASSEMBLY") {
+    return actual?.finalVideoAvailable === true && actual.finalContainerValid === true && actual.finalVideoStreamValid === true && typeof actual.finalDurationSec === "number" && actual.finalDurationSec > 0.1 && typeof actual.finalResolution === "string"
+      ? { verdict: "PASS", issues: [] }
+      : { verdict: "FAIL", failureKind: "TECHNICAL_FAILURE", issues: [{ code: "FINAL_MEDIA_INVALID", message: "final.mp4 chưa đạt kiểm tra container/video stream/duration/resolution." }] };
+  }
   const key = required[stage];
   if (!key) return null;
   return typeof actual?.[key] === "string" && actual[key]
@@ -118,23 +170,50 @@ async function buildExpectedStates(projectId: string, userId: string) {
     include: { scenes: { orderBy: { sceneNumber: "asc" } }, idea: true },
   });
   if (!project) throw new AppError("PROJECT_NOT_FOUND", "Không tìm thấy Content Project của Codex job.", 404);
+  const strictSpec = assertStrictModelingReady({ sourceVideoId: project.sourceVideoId, sourceVideoUrl: project.sourceVideoUrl, sourceDuration: project.sourceDuration, modelingPolicy: project.modelingPolicy, sourceModelingSpec: project.sourceModelingSpec, generatedScenes: project.scenes.map((scene) => ({ sceneNumber: scene.sceneNumber, sourceSceneId: scene.sourceSceneId, targetDuration: scene.targetDuration })) });
   const idea = record(project.idea.content);
   const sourceIntent = String(idea.sourceMechanism ?? idea.coreConcept ?? project.idea.title);
-  const scenes = project.scenes.map((scene) => buildSceneExpectedState({
+  const scenes = project.scenes.map((scene) => {
+    const strictScene = scene.sourceSceneId ? buildStrictSceneExpectedState(strictSpec, scene.sourceSceneId) : undefined;
+    return buildSceneExpectedState({
     ...scene,
     sceneId: scene.id,
     characterDesign: project.characterDesign,
     backgroundDesign: project.backgroundDesign,
     sourceModelingIntent: sourceIntent,
-  }));
+    actionSequence: strictScene?.actionSequence ?? scene.actionSequence,
+    cameraSpec: strictScene?.camera ?? scene.cameraSpec,
+    spatialSpec: strictScene?.spatial ?? scene.spatialSpec,
+    mustPreserve: strictScene?.mustPreserve ?? scene.mustPreserve,
+    allowedTransformations: strictScene?.allowedTransformations ?? scene.allowedTransformations,
+  });
+  });
   const sceneNumbers = scenes.map((scene) => scene.sceneNumber);
   const aspectRatio = String(record(project.artDirection).aspectRatio ?? "9:16");
+  const sourceValidationBase = { projectId, sourceVideoId: project.sourceVideoId!, sourceVideoPath: project.sourceVideoUrl, sourceVideoUrl: project.sourceVideoUrl, sourceModelingSpecVersion: project.sourceModelingSpecVersion ?? strictSpec.specVersion, sourceSpec: strictSpec, sourceEvidence: strictSpec.sourceEvidence, mustPreserve: [...new Set(strictSpec.scenes.flatMap((scene) => scene.mustPreserve))], allowedTransformations: [...new Set(strictSpec.scenes.flatMap((scene) => scene.allowedTransformations))] };
   return {
-    ASSETS: { stage: "ASSETS", projectId, requiredAssetKeys: ["background-0", ...sceneNumbers.map((number) => `scene-${number}`)], scenes } satisfies ExpectedState,
-    SCENES: { stage: "SCENES", projectId, expectedSceneNumbers: sceneNumbers, expectedDurationPerScene: 4, scenes } satisfies ExpectedState,
+    ASSETS: { stage: "ASSETS", projectId, requiredAssetKeys: ["background-0", ...sceneNumbers.map((number) => `scene-${number}`)], scenes, sourceValidation: { ...sourceValidationBase, validationStage: "START_FRAME" } } satisfies ExpectedState,
+    SCENES: { stage: "SCENES", projectId, expectedSceneNumbers: sceneNumbers, expectedDurationPerScene: 4, scenes, sourceValidation: { ...sourceValidationBase, validationStage: "SCENE_VIDEO" } } satisfies ExpectedState,
     FINAL_ASSEMBLY: { stage: "FINAL_ASSEMBLY", projectId, expectedSceneOrder: sceneNumbers, expectedAspectRatio: aspectRatio, requireAudio: true, requireFinalVideo: true } satisfies ExpectedState,
-    FINAL_AUDIT: { stage: "FINAL_AUDIT", projectId, expectedSceneNumbers: sceneNumbers, expectedSceneOrder: sceneNumbers, expectedAspectRatio: aspectRatio, expectedDurationPerScene: 4, requireAudio: true, requireFinalVideo: true, scenes } satisfies ExpectedState,
+    FINAL_AUDIT: { stage: "FINAL_AUDIT", projectId, expectedSceneNumbers: sceneNumbers, expectedSceneOrder: sceneNumbers, expectedAspectRatio: aspectRatio, expectedDurationPerScene: 4, requireAudio: true, requireFinalVideo: true, scenes, sourceValidation: { ...sourceValidationBase, validationStage: "FINAL_VIDEO" } } satisfies ExpectedState,
   };
+}
+
+async function buildFinalSourceValidationContext(projectId: string, userId: string, finalVideoPath: string, actual: Record<string, unknown>): Promise<SourceValidationContext | undefined> {
+  const project = await db.contentProject.findFirst({ where: { id: projectId, channel: { userId } }, include: { scenes: { orderBy: { sceneNumber: "asc" } } } });
+  if (!project?.sourceModelingSpec || !project.sourceVideoId || !project.sourceVideoUrl || !project.sourceModelingSpecVersion) return undefined;
+  const spec = sourceModelingSpecSchema.parse(project.sourceModelingSpec);
+  const identityPack = await getCharacterIdentityPack(project.channelId, userId).catch(() => null);
+  const sourceScenes = [...spec.scenes].sort((left, right) => left.order - right.order);
+  const scenePlans = project.scenes.map((scene) => {
+    const source = sourceScenes.find((item) => item.sourceSceneId === scene.sourceSceneId);
+    return { sceneNumber: scene.sceneNumber, generatedSceneId: scene.id, sourceSceneId: scene.sourceSceneId, storyBeat: source?.storyBeat, actionSequence: Array.isArray(scene.actionSequence) ? scene.actionSequence.filter((item): item is string => typeof item === "string") : undefined, camera: scene.cameraSpec && typeof scene.cameraSpec === "object" && !Array.isArray(scene.cameraSpec) ? scene.cameraSpec as Record<string, unknown> : undefined, targetDuration: scene.targetDuration, startState: source?.startState, endState: source?.endState };
+  });
+  const sceneOrder = Array.isArray(actual.sceneOrder) ? actual.sceneOrder.filter((item): item is number => typeof item === "number" && Number.isInteger(item)) : undefined;
+  const expectedOrder = sourceScenes.map((scene) => scene.order);
+  const sceneOrderMatches = sceneOrder ? sceneOrder.length === expectedOrder.length && sceneOrder.every((number, index) => number === expectedOrder[index]) : undefined;
+  const sourceObservation = actual.sourceObservation && typeof actual.sourceObservation === "object" && !Array.isArray(actual.sourceObservation) ? actual.sourceObservation as Partial<FinalVideoObservation> : {};
+  return { projectId, sourceVideoId: project.sourceVideoId, sourceVideoPath: project.sourceVideoUrl, sourceVideoUrl: project.sourceVideoUrl, sourceModelingSpecVersion: project.sourceModelingSpecVersion, sourceSpec: spec, sourceEvidence: spec.sourceEvidence, mustPreserve: [...new Set(sourceScenes.flatMap((scene) => scene.mustPreserve))], allowedTransformations: [...new Set(sourceScenes.flatMap((scene) => scene.allowedTransformations))], characterIdentityPack: identityPack, generatedAssetPath: finalVideoPath, generatedAssetType: "FINAL_VIDEO", validationStage: "FINAL_VIDEO", generatedScenePlans: scenePlans, finalObservation: { ...sourceObservation, sceneOrder, generatedDuration: typeof actual.finalDurationSec === "number" ? actual.finalDurationSec : undefined, structureMatch: sourceObservation.structureMatch ?? sceneOrderMatches, technicalStatus: sourceObservation.technicalStatus ?? (actual.finalContainerValid === true && actual.finalVideoStreamValid === true) } };
 }
 
 async function syncAutomation(jobId: string) {
@@ -149,20 +228,46 @@ async function syncAutomation(jobId: string) {
   await db.automationRun.update({ where: { id: job.automationRunId }, data: { status, steps: json(steps), projectId: job.contentProjectId, error: job.failureReason, ...(status !== "RUNNING" ? { completedAt: new Date() } : {}) } });
 }
 
+export async function restoreQualityStatusForJob(job: { id: string; projectId?: string | null; contentProjectId?: string | null; finalVideoPath?: string | null; qualityStatus: string; generationStatus: string; outputReady: boolean }, dependencies: { findQaRun?: (projectId: string, hash: string, version: string) => Promise<{ qualityStatusAfter: string } | null>; hash?: (path: string) => Promise<string>; fileExists?: (path: string) => Promise<void> } = {}) {
+  const findQaRun = dependencies.findQaRun ?? prismaQaRunPersistence().find;
+  const hash = dependencies.hash ?? hashFinalVideo;
+  const fileExists = dependencies.fileExists ?? access;
+  // CodexJob calls the Content Project identity `contentProjectId`; keep the
+  // optional `projectId` fallback for callers/tests that already provide it.
+  const projectId = job.projectId ?? job.contentProjectId;
+  let restored = "NOT_RUN";
+  if (projectId && job.finalVideoPath) {
+    try {
+      await fileExists(job.finalVideoPath);
+      const run = await findQaRun(projectId, await hash(job.finalVideoPath), POST_ASSEMBLY_QA_VALIDATOR_VERSION);
+      if (run && ["APPROVED", "NEEDS_REVIEW", "REPAIR_FAILED"].includes(run.qualityStatusAfter)) restored = run.qualityStatusAfter;
+    } catch { restored = "NOT_RUN"; }
+  }
+  return { qualityStatus: restored, generationStatus: job.generationStatus, outputReady: job.outputReady };
+}
+
 async function presentJob(jobId: string, userId: string) {
-  const job = await db.codexJob.findFirst({ where: { id: jobId, userId }, include: { stages: { orderBy: { id: "asc" } }, events: { orderBy: { sequence: "asc" }, take: 250 }, runtimeFailures: { orderBy: { createdAt: "desc" }, take: 20, select: { id: true, source: true, stage: true, failureKind: true, code: true, message: true, status: true, attempts: true, codexResponseId: true, lastAttemptAt: true, resolvedAt: true, createdAt: true } } } });
+  const job = await db.codexJob.findFirst({ where: { id: jobId, userId } });
   if (!job) throw new AppError("CODEX_JOB_NOT_FOUND", "Không tìm thấy Codex job.", 404);
-  const snapshots = CODEX_STAGES.map((name) => job.stages.find((stage) => stage.stage === name)).filter((stage): stage is NonNullable<typeof stage> => Boolean(stage)).map(stageSnapshot);
+  const restored = await restoreQualityStatusForJob(job);
+  if (restored.qualityStatus !== job.qualityStatus) await db.codexJob.update({ where: { id: jobId }, data: { qualityStatus: restored.qualityStatus } });
+  const [stages, events, runtimeFailures] = await Promise.all([
+    db.codexStageState.findMany({ where: { jobId }, orderBy: { id: "asc" } }),
+    db.codexEvent.findMany({ where: { jobId }, orderBy: { sequence: "desc" }, take: 50, select: { id: true, jobId: true, sequence: true, type: true, stage: true, level: true, payload: true, reasoningSummary: true, createdAt: true } }),
+    db.runtimeFailure.findMany({ where: { codexJobId: jobId }, orderBy: { createdAt: "desc" }, take: 20, select: { id: true, source: true, stage: true, failureKind: true, code: true, message: true, status: true, attempts: true, codexResponseId: true, lastAttemptAt: true, resolvedAt: true, createdAt: true } }),
+  ]);
+  const jobWithRelations = { ...job, qualityStatus: restored.qualityStatus, generationStatus: restored.generationStatus, outputReady: restored.outputReady, stages, events: [...events].reverse(), runtimeFailures };
+  const snapshots = CODEX_STAGES.map((name) => jobWithRelations.stages.find((stage) => stage.stage === name)).filter((stage): stage is NonNullable<typeof stage> => Boolean(stage)).map(stageSnapshot);
   const activeStage = snapshots.find((stage) => stage.stage === job.currentStage);
   const persistedAction = job.currentAction && executableActions.has(job.currentAction as CodexAction["name"])
     ? { name: job.currentAction as CodexAction["name"], stage: job.currentStage as CodexStage, strategy: activeStage?.lastStrategy, targetIds: stringArray(activeStage?.actualState?.recoveryTargetIds) }
     : null;
-  return { ...job, stages: snapshots, nextAction: job.status === "COMPLETED" ? { name: "jobComplete" } : job.status === "NEEDS_HUMAN" || job.status === "NEEDS_ENGINEERING" || job.status === "FAILED" ? { name: "waitForHuman", reason: job.failureReason } : persistedAction ?? nextPendingAction(snapshots) };
+  return { ...jobWithRelations, stages: snapshots, nextAction: job.status === "COMPLETED" ? { name: "jobComplete" } : job.status === "NEEDS_HUMAN" || job.status === "NEEDS_ENGINEERING" || job.status === "FAILED" ? { name: "waitForHuman", reason: job.failureReason } : persistedAction ?? nextPendingAction(snapshots) };
 }
 
 async function diagnoseAndRecover(jobId: string, userId: string, stage: CodexStage, message: string, actual: Record<string, unknown>, provider?: string, validation?: ValidationOutput): Promise<CodexAction> {
   const env = getEnv();
-  const job = await db.codexJob.findFirst({ where: { id: jobId, userId }, include: { stages: true, events: { where: { type: "RECOVERY_STARTED", stage }, orderBy: { sequence: "asc" } } } });
+  const job = await db.codexJob.findFirst({ where: { id: jobId, userId }, include: { stages: true, events: { where: { type: "RECOVERY_STARTED", stage }, orderBy: { sequence: "desc" }, take: 200 } } });
   if (!job) throw new AppError("CODEX_JOB_NOT_FOUND", "Không tìm thấy Codex job.", 404);
   const stageState = job.stages.find((item) => item.stage === stage);
   if (!stageState) throw new AppError("CODEX_STAGE_NOT_FOUND", "Không tìm thấy stage cần recovery.", 404);
@@ -186,7 +291,7 @@ async function diagnoseAndRecover(jobId: string, userId: string, stage: CodexSta
     try {
       const allowedTools = kind === "ENGINEERING_FAILURE" ? ["repairProductionCode"] : stage === "ASSETS" ? ["validateAssets", "regenerateAsset", "runAssetStage", "waitForHuman"] : stage === "SCENES" ? ["validateScenes", "regenerateScene", "runSceneGenerationStage", "waitForHuman"] : ["runAnalysisStage", "runModelingStage", "runProjectDevelopmentStage", "runFinalAssembly", "runFinalAudit", "waitForHuman"];
       const result = await new CodexReasoner().decide(userId, { purpose: "RECOVERY", stage, state: { failureKind: kind, validationVerdict: validation?.verdict, errorSignature: signature, message, expectedState: stageState.expectedState, actualState: actual, previousAttempts: attempted, experienceMatch: experience, candidateStrategies: candidates, derivedTargetIds: targetIds }, allowedTools }, job.previousResponseId);
-      if (result.decision.strategy && (!attempted.includes(result.decision.strategy) || keepRunning)) strategy = result.decision.strategy;
+      if (result.decision.strategy && !attempted.includes(result.decision.strategy)) strategy = result.decision.strategy;
       selectedTool = allowedTools.includes(result.decision.selectedTool) && result.decision.selectedTool !== "waitForHuman"
         ? result.decision.selectedTool
         : recoveryActionFor(stage, strategy);
@@ -199,7 +304,14 @@ async function diagnoseAndRecover(jobId: string, userId: string, stage: CodexSta
       reason = `${reason} Codex API tạm thời không khả dụng; policy an toàn dùng chiến lược xác định sẵn.`;
     }
   }
-  if (keepRunning && (!strategy || /request-human/i.test(strategy))) strategy = nextContinuousRecoveryStrategy(candidates, signatureRetryCount);
+  if (keepRunning && (!strategy || /request-human/i.test(strategy))) {
+    strategy = nextContinuousRecoveryStrategy(candidates, signatureRetryCount);
+    selectedTool = recoveryActionFor(stage, strategy);
+  }
+  // Provider validation outages must never regenerate already downloaded media.
+  if (strategy && /quality-validation|provider-backoff/.test(strategy) && (stage === "ASSETS" || stage === "SCENES")) {
+    selectedTool = recoveryActionFor(stage, strategy);
+  }
   await appendCodexEvent(jobId, "ERROR_DIAGNOSED", stage, { failureKind: kind, validationVerdict: validation?.verdict, errorSignature: signature, evidence: redactSecrets(message), candidateStrategies: candidates, previousAttempts: attempted, selectedStrategy: strategy, selectedTool, targetIds, reasonerMode, reasonerError }, reason);
   if (kind === "ENGINEERING_FAILURE") {
     await db.codexStageState.update({ where: { jobId_stage: { jobId, stage } }, data: { status: "FAILED", lastErrorSignature: signature, actualState: json(actual) } });
@@ -208,7 +320,16 @@ async function diagnoseAndRecover(jobId: string, userId: string, stage: CodexSta
     await syncAutomation(jobId);
     return { name: "waitForHuman", stage, strategy: "codex-guarded-code-repair", reason: message };
   }
-  const exhausted = !keepRunning && (signatureRetryCount >= stageState.maxRetries || !strategy || /request-human/.test(strategy) || !env.CODEX_AUTO_RECOVERY_ENABLED);
+  // Every recovery path has a real per-signature limit. Without this guard a
+  // persistent provider error (for example quota/429) loops forever, grows
+  // CodexEvent indefinitely, and eventually prevents the worker from writing
+  // the very failure it is supposed to report.
+  const exhausted = signatureRetryCount >= env.CODEX_MAX_RECOVERY_PER_ERROR
+    || stageState.retryCount >= env.CODEX_MAX_RECOVERY_PER_STAGE
+    || job.retryCount >= env.CODEX_MAX_RECOVERY_PER_JOB
+    || !strategy
+    || /request-human/.test(strategy)
+    || !env.CODEX_AUTO_RECOVERY_ENABLED;
   if (exhausted) {
     await db.codexStageState.update({ where: { jobId_stage: { jobId, stage } }, data: { status: "FAILED", validationResult: validation?.verdict, lastErrorSignature: signature } });
     await db.codexJob.update({ where: { id: jobId }, data: { status: "NEEDS_HUMAN", currentStage: stage, currentAction: "waitForHuman", failureReason: redactSecrets(message) } });
@@ -222,13 +343,15 @@ async function diagnoseAndRecover(jobId: string, userId: string, stage: CodexSta
   }
   const selectedStrategy = strategy as string;
   const nextRetry = signatureRetryCount + 1;
-  const recoveryActual = { ...actual, recoveryTargetIds: targetIds };
+  const recoveryAttemptId = randomUUID();
+  const inputFingerprint = `${signature}:${stage}:${selectedStrategy}:${targetIds.join(",")}`;
+  const recoveryActual = { ...actual, recoveryTargetIds: targetIds, recoveryAttemptId, recoveryStrategyId: selectedStrategy, inputFingerprint };
   await db.codexStageState.update({ where: { jobId_stage: { jobId, stage } }, data: { status: "RETRYING", retryCount: nextRetry, lastErrorSignature: signature, lastStrategy: selectedStrategy, actualState: json(recoveryActual), validationResult: validation?.verdict } });
   await db.codexJob.update({ where: { id: jobId }, data: { status: "RECOVERING", currentStage: stage, currentAction: selectedTool, retryCount: { increment: 1 }, failureReason: null } });
   const priorAttempt = await db.agentExperience.findFirst({ where: { stage, provider: provider ?? null, errorSignature: signature, attemptedFix: selectedStrategy, result: "ATTEMPTED" }, orderBy: { lastSeenAt: "desc" } });
   if (priorAttempt) await db.agentExperience.update({ where: { id: priorAttempt.id }, data: { jobId, occurrenceCount: { increment: 1 }, lastSeenAt: new Date(), errorMessage: redactSecrets(message), expectedState: stageState.expectedState ?? undefined, actualState: json(recoveryActual), rootCause: reason } });
   else await db.agentExperience.create({ data: { jobId, stage, provider, errorSignature: signature, errorMessage: redactSecrets(message), expectedState: stageState.expectedState ?? undefined, actualState: json(recoveryActual), attemptedFix: selectedStrategy, rootCause: reason, result: "ATTEMPTED" } });
-  await appendCodexEvent(jobId, "RECOVERY_STARTED", stage, { strategy: selectedStrategy, tool: selectedTool, targetIds, retry: nextRetry, errorSignature: signature }, reason);
+  await appendCodexEvent(jobId, "RECOVERY_STARTED", stage, { recoveryAttemptId, recoveryStrategyId: selectedStrategy, inputFingerprint, strategy: selectedStrategy, tool: selectedTool, targetIds, retry: nextRetry, errorSignature: signature }, reason);
   const issueTargets = targetIds;
   if (stage === "FINAL_AUDIT") {
     if (issueTargets.length) {
@@ -298,6 +421,8 @@ export async function recordCodexProgress(jobId: string, userId: string, stage: 
   const owned = await db.codexJob.findFirst({ where: { id: jobId, userId }, select: { id: true } });
   if (!owned) throw new AppError("CODEX_JOB_NOT_FOUND", "Không tìm thấy Codex job.", 404);
   await db.codexJob.update({ where: { id: jobId }, data: { currentStage: stage } });
+  const latest = await db.codexEvent.findFirst({ where: { jobId, type: "STAGE_PROGRESS", stage }, orderBy: { sequence: "desc" }, select: { createdAt: true, reasoningSummary: true } });
+  if (latest && Date.now() - latest.createdAt.getTime() < MIN_PROGRESS_EVENT_INTERVAL_MS && latest.reasoningSummary === detail) return;
   await appendCodexEvent(jobId, "STAGE_PROGRESS", stage, payload, detail);
 }
 
@@ -308,7 +433,14 @@ export async function getCodexJob(userId: string, jobId: string) {
 
 export async function listCodexJobs(userId: string) {
   await ensureCodexStorage();
-  return db.codexJob.findMany({ where: { userId }, orderBy: { startedAt: "desc" }, take: 50, include: { stages: true, events: { orderBy: { sequence: "desc" }, take: 20 } } });
+  const jobs = await db.codexJob.findMany({ where: { userId }, orderBy: { startedAt: "desc" }, take: 50 });
+  return Promise.all(jobs.map(async (job) => {
+    const [stages, events] = await Promise.all([
+      db.codexStageState.findMany({ where: { jobId: job.id }, orderBy: { id: "asc" } }),
+      db.codexEvent.findMany({ where: { jobId: job.id }, orderBy: { sequence: "desc" }, take: 20 }),
+    ]);
+    return { ...job, stages, events: [...events].reverse() };
+  }));
 }
 
 export async function validateCodexStage(userId: string, jobId: string, stage: CodexStage) {
@@ -376,9 +508,18 @@ export async function reportCodexEvent(userId: string, jobId: string, input: Rep
     }
   }
   if (validation.verdict !== "PASS") {
+    if (input.stage === "FINAL_AUDIT") {
+      const completedAt = new Date();
+      await db.codexStageState.update({ where: { jobId_stage: { jobId, stage: input.stage } }, data: { status: "COMPLETED", actualState: json(actual), validationResult: validation.verdict, validationIssues: json(validation.issues), completedAt } });
+      await db.codexJob.update({ where: { id: jobId }, data: { checkpoint: json({ ...record(job.checkpoint), ...actual, lastCompletedStage: input.stage, finalAuditVerdict: validation.verdict }), status: "COMPLETED", currentStage: "FINAL_AUDIT", currentAction: "jobComplete", finalVideoId: typeof actual.finalVideoId === "string" ? actual.finalVideoId : undefined, finalVideoPath: typeof actual.finalVideoPath === "string" ? actual.finalVideoPath : undefined, finalVideoUrl: typeof actual.finalVideoUrl === "string" ? actual.finalVideoUrl : undefined, completedAt, failureReason: null } });
+      await appendEvent(jobId, "STAGE_COMPLETED", input.stage, { validation: "DIAGNOSTIC_ONLY", verdict: validation.verdict, issues: validation.issues, actualState: actual });
+      await appendEvent(jobId, "FINAL_AUDIT_RECORDED", input.stage, { verdict: validation.verdict, issues: validation.issues, completionGate: "FINAL_ASSEMBLY" }, "Final Audit chỉ ghi nhận vấn đề cải tiến; không chặn video đã xuất thành công.");
+      await appendEvent(jobId, "JOB_COMPLETED", input.stage, { finalAudit: validation.verdict, completionGate: "FINAL_ASSEMBLY" });
+      await syncAutomation(jobId);
+      return presentJob(jobId, userId);
+    }
     await db.codexStageState.update({ where: { jobId_stage: { jobId, stage: input.stage } }, data: { actualState: json(actual), validationResult: validation.verdict, validationIssues: json(validation.issues) } });
     await appendEvent(jobId, "VALIDATION_FAILED", input.stage, { verdict: validation.verdict, issues: validation.issues });
-    if (input.stage === "FINAL_AUDIT") await appendEvent(jobId, "FINAL_AUDIT_FAILED", input.stage, { issues: validation.issues });
     const message = validation.issues.map((issue) => issue.message).join(" ") || "Validation failed.";
     return { ...(await presentJob(jobId, userId)), nextAction: await diagnoseAndRecover(jobId, userId, input.stage, message, { ...actual, issues: validation.issues }, input.provider, validation) };
   }
@@ -386,7 +527,34 @@ export async function reportCodexEvent(userId: string, jobId: string, input: Rep
   await db.codexStageState.update({ where: { jobId_stage: { jobId, stage: input.stage } }, data: { status: "COMPLETED", actualState: json(actual), validationResult: "PASS", validationIssues: json([]), completedAt: new Date() } });
   await db.codexJob.update({ where: { id: jobId }, data: { checkpoint: json({ ...record(job.checkpoint), ...actual, lastCompletedStage: input.stage }) } });
   await appendEvent(jobId, "STAGE_COMPLETED", input.stage, { validation: "PASS", actualState: actual });
-  if (input.stage === "FINAL_ASSEMBLY") await appendEvent(jobId, "FINAL_ASSEMBLY_COMPLETED", input.stage, { finalVideoUrl: actual.finalVideoUrl });
+  if (input.stage === "FINAL_ASSEMBLY") {
+    const completedAt = new Date();
+    await db.codexJob.update({ where: { id: jobId }, data: { checkpoint: json({ ...record(job.checkpoint), ...actual, lastCompletedStage: input.stage, generationSuccess: true }), status: "COMPLETED", currentStage: "FINAL_ASSEMBLY", currentAction: "jobComplete", generationStatus: "SUCCESS", qualityStatus: "NOT_RUN", outputReady: true, finalVideoPath: typeof actual.finalPath === "string" ? actual.finalPath : undefined, finalVideoUrl: typeof actual.finalVideoUrl === "string" ? actual.finalVideoUrl : undefined, completedAt, failureReason: null } });
+    if (typeof actual.finalPath === "string") {
+      try {
+        await registerOriginalOutput({ projectId: String(actual.projectId ?? job.contentProjectId ?? ""), filePath: actual.finalPath, validationStatus: "PASS" });
+      } catch (error) {
+        await appendCodexEvent(jobId, "FINAL_AUDIT_RECORDED", "FINAL_AUDIT", { status: "OUTPUT_VERSION_REGISTRATION_WARNING", error: error instanceof Error ? error.message : String(error), generationStatus: "SUCCESS", outputReady: true }, "Không đăng ký được output version, nhưng final output thành công vẫn được giữ nguyên.");
+      }
+    }
+    await appendEvent(jobId, "FINAL_ASSEMBLY_COMPLETED", input.stage, { finalVideoUrl: actual.finalVideoUrl, finalDurationSec: actual.finalDurationSec, finalResolution: actual.finalResolution });
+    await appendEvent(jobId, "GENERATION_SUCCESS", input.stage, { outputReady: true, qualityStatus: "NOT_RUN" }, "Final Assembly hợp lệ: generation thành công, Content QA chưa chạy.");
+    await appendEvent(jobId, "JOB_COMPLETED", input.stage, { completionGate: "FINAL_ASSEMBLY", generationStatus: "SUCCESS" });
+    const finalProjectId = String(actual.projectId ?? job.contentProjectId ?? "");
+    const finalVideoPath = String(actual.finalPath ?? "");
+    let sourceValidation: SourceValidationContext | undefined;
+    try { sourceValidation = await buildFinalSourceValidationContext(finalProjectId, userId, finalVideoPath, actual); }
+    catch (error) { await appendEvent(jobId, "FINAL_AUDIT_RECORDED", "FINAL_AUDIT", { status: "SOURCE_VALIDATION_CONTEXT_ERROR", error: error instanceof Error ? error.message : String(error), generationStatus: "SUCCESS", outputReady: true }, "Không tạo được Source Validation Context; output generation vẫn khả dụng."); }
+    void new PostAssemblyQaOrchestrator().run({ projectId: finalProjectId, finalVideoPath, finalVideoVersion: String(actual.finalVideoUrl ?? actual.finalPath ?? ""), approvedManifest: null, expectedSceneStates: {}, approvedSources: [], sourceValidation, checkpoint: { ...record(job.checkpoint), ...actual, finalMediaValidation: true } }).then(async qaRun => {
+      await db.codexJob.update({ where: { id: jobId }, data: { qualityStatus: qaRun.qualityStatusAfter } });
+      await appendEvent(jobId, "FINAL_AUDIT_RECORDED", "FINAL_AUDIT", { qaRunId: qaRun.qaRunId, status: qaRun.status, qualityStatus: qaRun.qualityStatusAfter, findings: qaRun.findings, incidentsCreated: qaRun.incidentsCreated, repairsTriggered: qaRun.repairsTriggered, generationStatus: "SUCCESS", outputReady: true }, "Post-Assembly QA chạy nền; không thay đổi generation success.");
+    }).catch(async error => {
+      await db.codexJob.update({ where: { id: jobId }, data: { qualityStatus: "NEEDS_REVIEW" } });
+      await appendEvent(jobId, "FINAL_AUDIT_RECORDED", "FINAL_AUDIT", { status: "ERROR", error: error instanceof Error ? error.message : "unknown", generationStatus: "SUCCESS" }, "Post-Assembly QA lỗi; output generation vẫn khả dụng.");
+    });
+    await syncAutomation(jobId);
+    return presentJob(jobId, userId);
+  }
   if (hadRecovery) {
     await appendEvent(jobId, "RECOVERY_SUCCEEDED", input.stage, { strategy: stageState.lastStrategy });
     if (stageState.lastErrorSignature && stageState.lastStrategy) {
@@ -396,10 +564,10 @@ export async function reportCodexEvent(userId: string, jobId: string, input: Rep
     }
   }
   if (input.stage === "FINAL_AUDIT") {
+    await db.codexJob.update({ where: { id: jobId }, data: { checkpoint: json({ ...record(job.checkpoint), ...actual, lastCompletedStage: input.stage, finalAuditVerdict: "PASS" }), status: "COMPLETED", currentStage: "FINAL_AUDIT", currentAction: "jobComplete", finalVideoId: typeof actual.finalVideoId === "string" ? actual.finalVideoId : undefined, finalVideoPath: typeof actual.finalVideoPath === "string" ? actual.finalVideoPath : undefined, finalVideoUrl: typeof actual.finalVideoUrl === "string" ? actual.finalVideoUrl : undefined, completedAt: new Date(), failureReason: null } });
     await appendEvent(jobId, "FINAL_AUDIT_PASSED", input.stage, { finalVideoUrl: actual.finalVideoUrl });
-    // Final Audit PASS only unlocks the post-run review. The job is not
-    // complete until the review has been persisted successfully.
-    await db.codexJob.update({ where: { id: jobId }, data: { status: "RUNNING", currentStage: "POST_RUN_REVIEW", currentAction: "runPostRunReview", finalVideoId: typeof actual.finalVideoId === "string" ? actual.finalVideoId : undefined, finalVideoPath: typeof actual.finalVideoPath === "string" ? actual.finalVideoPath : undefined, finalVideoUrl: typeof actual.finalVideoUrl === "string" ? actual.finalVideoUrl : undefined, completedAt: null, failureReason: null } });
+    await appendEvent(jobId, "FINAL_AUDIT_RECORDED", input.stage, { verdict: "PASS", issues: [], completionGate: "FINAL_ASSEMBLY" }, "Final Audit đã ghi nhận; video được hoàn tất sau khi Final Assembly thành công.");
+    await appendEvent(jobId, "JOB_COMPLETED", input.stage, { finalAudit: "PASS", completionGate: "FINAL_ASSEMBLY" });
     await syncAutomation(jobId);
   } else {
     const refreshed = await db.codexStageState.findMany({ where: { jobId } });

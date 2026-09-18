@@ -8,21 +8,33 @@ import { UsageMetric } from "@prisma/client";
 import { recordUsage } from "@/modules/usage/service";
 import { requireProviderApiKey } from "@/modules/ai-connections/credentials";
 import { writeProjectVideo } from "@/modules/assets/image-generation-service";
+import { assertStrictModelingReady } from "@/modules/modeling/strict-source-modeling";
+import { preparePromptForGeneration, markPromptSent, verifyPersistedPromptForScene } from "@/modules/prompt-fidelity/service";
 
 async function getOwnedScene(sceneId: string, userId: string) {
-  const scene = await db.storyboardScene.findFirst({ where: { id: sceneId, project: { channel: { userId } } }, select: { id: true } });
+  const scene = await db.storyboardScene.findFirst({ where: { id: sceneId, project: { channel: { userId } } }, select: { id: true, projectId: true, sceneNumber: true, project: { select: { sourceVideoId: true, sourceVideoUrl: true, sourceDuration: true, modelingPolicy: true, sourceModelingSpec: true, scenes: { select: { sceneNumber: true, sourceSceneId: true, targetDuration: true } } } } } });
   if (!scene) throw new AppError("SCENE_NOT_FOUND", "Không tìm thấy scene.", 404);
+  assertStrictModelingReady({ sourceVideoId: scene.project.sourceVideoId, sourceVideoUrl: scene.project.sourceVideoUrl, sourceDuration: scene.project.sourceDuration, modelingPolicy: scene.project.modelingPolicy, sourceModelingSpec: scene.project.sourceModelingSpec, generatedScenes: scene.project.scenes });
+  return scene;
 }
 
 export async function createGenerationJob(sceneId: string, userId: string, request: VeoRequest, options: { enqueue?: boolean } = {}) {
-  await getOwnedScene(sceneId, userId);
+  const ownedScene = await getOwnedScene(sceneId, userId);
   const parsed = veoRequestSchema.parse({ ...request, sceneId });
+  let effectiveRequest: typeof parsed;
+  if (parsed.promptFidelity) {
+    await verifyPersistedPromptForScene({ promptId: parsed.promptFidelity.promptId, projectId: ownedScene.projectId, sceneId, promptType: "VIDEO", prompt: parsed.prompt, promptHash: parsed.promptFidelity.promptHash });
+    effectiveRequest = parsed;
+  } else {
+    const prepared = await preparePromptForGeneration({ projectId: ownedScene.projectId, userId, sceneNumber: ownedScene.sceneNumber, promptType: "VIDEO", draftPrompt: parsed.prompt });
+    effectiveRequest = { ...parsed, prompt: prepared.validatedPrompt, promptFidelity: { promptId: prepared.promptId, promptHash: prepared.promptHash } };
+  }
   const latest = await db.sceneGenerationVersion.findFirst({ where: { sceneId }, orderBy: { version: "desc" }, select: { version: true } });
-  const job = await db.videoGenerationJob.create({ data: { sceneId, provider: "veo", prompt: parsed.prompt } });
-  await db.sceneGenerationVersion.create({ data: { sceneId, version: (latest?.version ?? 0) + 1, generationJobId: job.id, prompt: parsed.prompt, provider: "veo" } });
+  const job = await db.videoGenerationJob.create({ data: { sceneId, provider: "veo", prompt: effectiveRequest.prompt } });
+  await db.sceneGenerationVersion.create({ data: { sceneId, version: (latest?.version ?? 0) + 1, generationJobId: job.id, prompt: effectiveRequest.prompt, provider: "veo" } });
   if (options.enqueue !== false) {
     const queue = new LocalJobQueue();
-    await queue.enqueue("video.generate", { jobId: job.id, request: parsed }, `video-generate:${job.id}`);
+    await queue.enqueue("video.generate", { jobId: job.id, request: effectiveRequest }, `video-generate:${job.id}`);
   }
   return job;
 }
@@ -40,7 +52,11 @@ export async function runGenerationJob(jobId: string, request: VeoRequest, onPro
   const provider = new VeoProvider(apiKey);
   await db.videoGenerationJob.update({ where: { id: jobId }, data: { status: "RUNNING", startedAt: new Date(), error: null } });
   try {
-    const operation = await provider.generateScene(request);
+    const storedPrompt = await db.sceneGenerationVersion.findFirst({ where: { generationJobId: jobId }, select: { prompt: true } });
+    const effectiveRequest = { ...request, prompt: storedPrompt?.prompt ?? request.prompt };
+    if (!effectiveRequest.promptFidelity) throw new AppError("PROMPT_FIDELITY_GATE_REQUIRED", "Generation job thiếu validated prompt fidelity trace.", 409);
+    await markPromptSent(effectiveRequest.promptFidelity.promptId, effectiveRequest.prompt);
+    const operation = await provider.generateScene(effectiveRequest);
     void recordUsage({ userId: ownership.scene.project.channel.userId, channelId: ownership.scene.project.channelId, projectId: ownership.scene.project.id, metric: UsageMetric.VEO_GENERATION, idempotencyKey: `veo:generation:${jobId}` });
     await db.videoGenerationJob.update({ where: { id: jobId }, data: { externalOperationId: operation.operationId } });
     const current = await pollGenerationOperation(provider, operation.operationId, 5_000, undefined, 15 * 60_000, onProgress);

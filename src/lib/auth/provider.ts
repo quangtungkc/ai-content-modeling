@@ -16,11 +16,15 @@ export class DatabaseAuthProvider implements AuthProvider {
 }
 
 // Local development opens the seeded workspace without requiring browser login.
-// Production always uses persisted database sessions.
+// The desktop app is different: Electron already obtains a persisted database
+// session, so its dev-mode server must authorize against that real session
+// instead of the demo user (otherwise runtime videos/channels look missing).
+export function shouldUseDatabaseAuth(nodeEnv = process.env.NODE_ENV, desktopMode = process.env.DESKTOP_MODE) {
+  return nodeEnv !== "development" || desktopMode === "1";
+}
+
 export const authProvider: AuthProvider =
-  process.env.NODE_ENV === "development"
-    ? new UnconfiguredAuthProvider()
-    : new DatabaseAuthProvider();
+  shouldUseDatabaseAuth() ? new DatabaseAuthProvider() : new UnconfiguredAuthProvider();
 
 export async function getRequiredSession(): Promise<AuthSession> {
   const session = await authProvider.getSession();

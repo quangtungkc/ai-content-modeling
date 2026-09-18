@@ -1,0 +1,12 @@
+import { describe, expect, it } from "vitest";
+import { PostAssemblyQaOrchestrator } from "./orchestrator";
+import type { QaContext, QaValidator } from "./types";
+const context: QaContext = { projectId: "p", finalVideoPath: "final.mp4", finalVideoVersion: "hash-1", approvedManifest: { scenes: [{ sceneNumber: 1, source: "s1.mp4", durationSec: 4 }, { sceneNumber: 2, source: "s2.mp4", durationSec: 5 }] }, expectedSceneStates: {}, approvedSources: ["s1.mp4", "s2.mp4"], checkpoint: { finalMediaValidation: true } };
+describe("PostAssemblyQaOrchestrator", () => {
+  it("approves PASS/NOT_EVALUATED validators and maps exact scene boundaries", async () => { const run = await new PostAssemblyQaOrchestrator().run(context); expect(run.qualityStatusAfter).toBe("APPROVED"); expect(run.findings.find(f => f.sceneNumber === 2)?.globalTimestamp).toBe(4); });
+  it("detects wrong approved source without substitution", async () => { const run = await new PostAssemblyQaOrchestrator().run({ ...context, approvedSources: ["s1.mp4"] }); expect(run.qualityStatusAfter).toBe("NEEDS_REVIEW"); expect(run.findings.some(f => f.symptom === "STALE_OR_WRONG_APPROVED_SOURCE")).toBe(true); });
+  it("does not duplicate an approved run for same output version", async () => { const qa = new PostAssemblyQaOrchestrator(); const first = await qa.run(context); expect(await qa.run(context, first)).toBe(first); });
+  it("allows a new QA run when output version changes", async () => { const qa = new PostAssemblyQaOrchestrator(); const first = await qa.run(context); expect((await qa.run({ ...context, finalVideoPath: "final-v2.mp4", finalVideoVersion: "hash-2" }, first)).qaRunId).not.toBe(first.qaRunId); });
+  it("keeps unsupported visual validation NOT_EVALUATED", async () => { const run = await new PostAssemblyQaOrchestrator().run(context); expect(run.findings.find(f => f.validatorId === "visual-artifacts")?.status).toBe("NOT_EVALUATED"); });
+  it("routes known no-handler QA finding to review", async () => { const validator: QaValidator = { id: "pupil", validate: async () => [{ validatorId: "pupil", status: "FAIL", sceneNumber: 5, globalTimestamp: 12, sceneLocalTimestamp: 3, expected: "one pupil", actual: "double pupil", evidence: ["fixture"], confidence: 1, severity: "HIGH", suggestedFirstDivergence: "OLD_PUPIL_ERASURE_ALIGNMENT", affectedRegion: "eyes", affectedFile: "final.mp4", symptom: "DOUBLE_PUPIL" }] }; const run = await new PostAssemblyQaOrchestrator([validator]).run(context); expect(run.qualityStatusAfter).toBe("NEEDS_REVIEW"); });
+});

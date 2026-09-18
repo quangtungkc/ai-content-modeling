@@ -24,7 +24,7 @@ const pathOf = (input: RequestInfo | URL) => {
 };
 
 function errorPayload(error: unknown, source: string, context: Record<string, unknown> = {}): RuntimeFailurePayload {
-  if (error instanceof Error) return { source, message: error.message || "Unknown client error.", stack: error.stack, context };
+  if (error instanceof Error) return { source, code: typeof (error as Error & { code?: unknown }).code === "string" ? (error as Error & { code: string }).code : undefined, message: error.message || "Unknown client error.", stack: error.stack, context };
   return { source, message: typeof error === "string" ? error : "Unknown client error.", context };
 }
 

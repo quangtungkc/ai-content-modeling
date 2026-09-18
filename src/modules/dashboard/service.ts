@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { hasProjectFinalVideo } from "@/modules/assets/image-generation-service";
 import { calculateBaselineViews, calculateViralScore } from "@/modules/viral-score";
+import { selectBestAnalysis } from "@/modules/videos/analysis-service";
 
 export async function getViralDashboard(userId: string, channelId?: string, periodHours = 24) {
   const periodEnd = new Date();
@@ -10,7 +11,7 @@ export async function getViralDashboard(userId: string, channelId?: string, peri
   const selectedChannel = channels[0];
   if (!selectedChannel) return { periodStart, periodEnd, channel: null, stats: { competitors: 0, newVideos: 0, viralVideos: 0 }, videos: [] };
   const competitors = await db.competitor.findMany({ where: { channelId: selectedChannel.id, status: "ACTIVE" }, select: { id: true, displayName: true, handle: true, platform: true } });
-  const videos = await db.competitorVideo.findMany({ where: { competitorId: { in: competitors.map(({ id }) => id) }, publishedAt: { gte: periodStart, lte: periodEnd } }, include: { competitor: { select: { displayName: true, handle: true, platform: true } }, snapshots: { orderBy: { capturedAt: "desc" }, take: 1 }, analyses: { orderBy: { version: "desc" }, take: 1, select: { createdAt: true, content: true } } }, orderBy: { publishedAt: "desc" } });
+  const videos = await db.competitorVideo.findMany({ where: { competitorId: { in: competitors.map(({ id }) => id) }, publishedAt: { gte: periodStart, lte: periodEnd } }, include: { competitor: { select: { displayName: true, handle: true, platform: true } }, snapshots: { orderBy: { capturedAt: "desc" }, take: 1 }, analyses: { orderBy: { version: "desc" }, take: 10, select: { id: true, version: true, createdAt: true, content: true } } }, orderBy: { publishedAt: "desc" } });
   const modelingProjects = videos.length
     ? await db.contentProject.findMany({ where: { channelId: selectedChannel.id, idea: { sourceVideoId: { in: videos.map(({ id }) => id) } } }, select: { id: true, updatedAt: true, idea: { select: { sourceVideoId: true } } }, orderBy: { updatedAt: "desc" } })
     : [];
@@ -26,7 +27,8 @@ export async function getViralDashboard(userId: string, channelId?: string, peri
     if (!latest || !video.publishedAt) return null;
     const score = calculateViralScore({ currentViews: latest.views, baselineViews, publishedAt: video.publishedAt, likes: latest.likes, comments: latest.comments, shares: latest.shares, now: periodEnd, snapshots: video.snapshots });
     const modelingProjectId = completedModelingVideos.get(video.id);
-    return { id: video.id, url: video.url, modelingVideoUrl: modelingProjectId ? `/api/v1/projects/${modelingProjectId}/videos?final=1` : null, thumbnailUrl: video.thumbnailUrl, publishedAt: video.publishedAt, competitor: video.competitor, analysis: video.analyses[0] ? { createdAt: video.analyses[0].createdAt, content: video.analyses[0].content } : null, metrics: { views: latest.views, likes: latest.likes, comments: latest.comments, shares: latest.shares }, ...score };
+    const selectedAnalysis = selectBestAnalysis(video.analyses);
+    return { id: video.id, url: video.url, modelingVideoUrl: modelingProjectId ? `/api/v1/projects/${modelingProjectId}/videos?final=1` : null, thumbnailUrl: video.thumbnailUrl, publishedAt: video.publishedAt, competitor: video.competitor, analysis: selectedAnalysis ? { id: selectedAnalysis.id, createdAt: selectedAnalysis.createdAt, content: selectedAnalysis.content } : null, metrics: { views: latest.views, likes: latest.likes, comments: latest.comments, shares: latest.shares }, ...score };
   }));
   const validCards = cards.filter((card): card is NonNullable<typeof card> => card !== null).sort((a, b) => b.score - a.score);
   return { periodStart, periodEnd, channel: selectedChannel, stats: { competitors: competitors.length, newVideos: videos.length, viralVideos: validCards.filter((video) => video.score >= 80).length }, videos: validCards };

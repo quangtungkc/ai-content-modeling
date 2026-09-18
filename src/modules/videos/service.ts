@@ -25,10 +25,12 @@ export async function saveManualCompetitorVideo(competitorId: string, userId: st
 
   const data = manualCompetitorVideoSchema.parse(input);
   const externalId = `manual:${createHash("sha256").update(data.url).digest("hex")}`;
+  const existingVideo = await db.competitorVideo.findUnique({ where: { competitorId_externalId: { competitorId, externalId } }, select: { duration: true } });
+  const duration = data.durationSec ?? existingVideo?.duration ?? null;
   const video = await db.competitorVideo.upsert({
     where: { competitorId_externalId: { competitorId, externalId } },
-    create: { competitorId, externalId, url: data.url, caption: data.caption || null, publishedAt: data.publishedAt },
-    update: { url: data.url, caption: data.caption || null, publishedAt: data.publishedAt, lastSeenAt: new Date() },
+    create: { competitorId, externalId, url: data.url, caption: data.caption || null, publishedAt: data.publishedAt, duration },
+    update: { url: data.url, caption: data.caption || null, publishedAt: data.publishedAt, duration, lastSeenAt: new Date() },
   });
   return db.videoMetricSnapshot.create({
     data: { videoId: video.id, capturedAt: new Date(), views: data.views, likes: data.likes, comments: data.comments, shares: data.shares, rawMetrics: { source: "manual" } },

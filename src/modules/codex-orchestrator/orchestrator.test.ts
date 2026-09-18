@@ -27,9 +27,9 @@ describe("Codex orchestrator policy", () => {
     const stages = [stage("ANALYSIS", "COMPLETED"), stage("MODELING", "COMPLETED"), stage("PROJECT", "COMPLETED"), stage("ASSETS", "RETRYING"), stage("SCENES", "COMPLETED"), stage("FINAL_ASSEMBLY", "COMPLETED")];
     expect(findIncompleteFinalAuditPrerequisite(stages)?.stage).toBe("ASSETS");
   });
-  it("17. Final Audit PASS vẫn phải chạy Post-Run Review trước khi hoàn tất", () => {
+  it("17. Final Audit chỉ ghi nhận kết quả và đóng pipeline sau Final Assembly", () => {
     const stages = [stage("ANALYSIS", "COMPLETED"), stage("MODELING", "COMPLETED"), stage("PROJECT", "COMPLETED"), stage("ASSETS", "COMPLETED"), stage("SCENES", "COMPLETED"), stage("FINAL_ASSEMBLY", "COMPLETED"), stage("FINAL_AUDIT", "COMPLETED"), stage("POST_RUN_REVIEW", "PENDING")];
-    expect(nextPendingAction(stages)).toMatchObject({ name: "runPostRunReview", stage: "POST_RUN_REVIEW" });
+    expect(nextPendingAction(stages)).toMatchObject({ name: "jobComplete" });
   });
   it("18. Restart/resume bảo toàn Expected State", () => { const expected: ExpectedState = { stage: "SCENES", projectId: "p1", scenes: [scene] }; expect(JSON.parse(JSON.stringify(expected)).scenes[0].sceneId).toBe("scene-1"); });
   it("19. Idempotency tạo cùng error signature cho cùng lỗi biến thiên ID", () => expect(createErrorSignature("SCENES", "timeout job abcdef1234567890")).toBe(createErrorSignature("SCENES", "timeout job fedcba0987654321")));
@@ -38,6 +38,10 @@ describe("Codex orchestrator policy", () => {
   it("22. Event logging có đủ lifecycle bắt buộc", () => expect(CODEX_EVENT_TYPES).toEqual(expect.arrayContaining(["CODEX_JOB_STARTED", "VALIDATION_FAILED", "RECOVERY_SUCCEEDED", "FINAL_AUDIT_PASSED", "JOB_COMPLETED"])));
   it("23. Improvement candidate chỉ tạo cho lỗi lặp hoặc root cause rõ", () => { expect(shouldCreateImprovementCandidate(1)).toBe(false); expect(shouldCreateImprovementCandidate(2)).toBe(true); expect(shouldCreateImprovementCandidate(1, true)).toBe(true); });
   it("24. External research disabled không ảnh hưởng recovery policy", () => expect(recoveryStrategies("ASSETS", "TECHNICAL_FAILURE", "network").length).toBeGreaterThan(0));
+  it("24b. Flow project failure dùng strategy browser khác nhau", () => {
+    expect(recoveryStrategies("ASSETS", "TECHNICAL_FAILURE", "Google Flow không mở được project mới.")).toEqual(["flow-refresh-redetect", "flow-home-recreate", "flow-window-recreate", "flow-session-recreate"]);
+    expect(recoveryActionFor("ASSETS", "flow-window-recreate")).toBe("runAssetStage");
+  });
   it("25. Lỗi JavaScript thiếu sender được phân loại là lỗi code", () => expect(classifyFailure("Cannot read properties of undefined (reading 'send')")).toBe("ENGINEERING_FAILURE"));
   it("26. Runtime Flow mới tự resume đúng stage lỗi code", () => expect(canAutoResumeAfterFlowRuntimeRepair({ status: "NEEDS_HUMAN", stage: "ASSETS", failureReason: "Cannot read properties of undefined (reading 'send')", runtimeRevision: "flow-ipc-event-v2" })).toBe(true));
   it("27. Không tự resume lỗi cần đăng nhập", () => expect(canAutoResumeAfterFlowRuntimeRepair({ status: "NEEDS_HUMAN", stage: "ASSETS", failureReason: "Hãy đăng nhập Google Flow", runtimeRevision: "flow-ipc-event-v2" })).toBe(false));
@@ -73,7 +77,7 @@ describe("Codex orchestrator policy", () => {
   });
   it("35. Lỗi provider không chuyển NEEDS_HUMAN sau khi hết 3 retry", () => {
     expect(shouldKeepRunningUntilFinal("TECHNICAL_FAILURE", "GEMINI_QUALITY_VALIDATION_429")).toBe(true);
-    expect(nextContinuousRecoveryStrategy(["retry-quality-validation", "provider-backoff", "retry-quality-validation-after-backoff"], 3)).toBe("retry-quality-validation");
+    expect(nextContinuousRecoveryStrategy(["retry-quality-validation", "provider-backoff", "retry-quality-validation-after-backoff"], 3)).toBeNull();
   });
   it("36. Chỉ blocker quyền/đăng nhập mới yêu cầu người dùng", () => {
     expect(requiresUserAction("Hãy đăng nhập Google Flow")).toBe(true);
@@ -81,6 +85,6 @@ describe("Codex orchestrator policy", () => {
   });
   it("37. Semantic failure tiếp tục recovery, không chọn request-human khi còn cách tự xử lý", () => {
     expect(shouldKeepRunningUntilFinal("SEMANTIC_FAILURE", "Sai nhân vật trong cảnh 2")).toBe(true);
-    expect(nextContinuousRecoveryStrategy(["strengthen-scene-expected-state", "regenerate-failed-scenes-only", "request-human-scene-review"], 2)).toBe("strengthen-scene-expected-state");
+    expect(nextContinuousRecoveryStrategy(["strengthen-scene-expected-state", "regenerate-failed-scenes-only", "request-human-scene-review"], 2)).toBeNull();
   });
 });

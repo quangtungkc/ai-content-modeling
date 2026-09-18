@@ -4,11 +4,15 @@ import { getEnv } from "@/lib/env";
 import { db } from "@/lib/db";
 import { LocalJobQueue } from "@/lib/jobs/queue";
 import { readChannelMainCharacterImage } from "@/modules/channels/service";
+import { buildCharacterIdentityInstruction, getCharacterIdentityPack, readChannelCharacterIdentityReferences } from "@/modules/channels/identity-pack";
+import { assertCharacterIdentityPackReady } from "@/modules/assets/character-identity";
+import { assertStrictModelingReady, compileStrictModelingConstraints } from "@/modules/modeling/strict-source-modeling";
 import { requireProviderApiKey } from "@/modules/ai-connections/credentials";
 import { readProjectImage, writeProjectImage } from "@/modules/assets/image-generation-service";
 import { GeminiProvider } from "@/services/ai/gemini";
 import { createGenerationJob, runGenerationJob } from "./job-service";
 import type { VeoRequest } from "@/services/video-generation/types";
+import { markPromptSent, preparePromptForGeneration } from "@/modules/prompt-fidelity/service";
 
 type ImageSlot = { kind: "background" | "scene"; sceneNumber?: number; label?: string; prompt: string; aspectRatio?: string };
 export type VideoSlot = { sceneNumber: number; label?: string; visualBlock: string; actionBlock: string; audioBlock: string; englishPrompt: string; aspectRatio?: string };
@@ -33,9 +37,12 @@ export async function generateProjectImagesWithGoogleApi(projectId: string, user
 
   const project = await db.contentProject.findFirst({
     where: { id: projectId, channelId, channel: { userId } },
-    include: { channel: true },
+    include: { channel: true, scenes: { select: { sceneNumber: true, sourceSceneId: true, targetDuration: true } } },
   });
   if (!project) throw new AppError("PROJECT_NOT_FOUND", "Không tìm thấy content project.", 404);
+  const strictSpec = assertStrictModelingReady({ sourceVideoId: project.sourceVideoId, sourceVideoUrl: project.sourceVideoUrl, sourceDuration: project.sourceDuration, modelingPolicy: project.modelingPolicy, sourceModelingSpec: project.sourceModelingSpec, generatedScenes: project.scenes });
+  const identityPack = assertCharacterIdentityPackReady(await getCharacterIdentityPack(channelId, userId));
+  const identityReferences = await readChannelCharacterIdentityReferences(channelId, userId);
   let apiKey: string;
   try { apiKey = await requireProviderApiKey(userId, ["GEMINI"], "AI", "Gemini"); }
   catch { throw providerUnavailable("Chưa kết nối Gemini API; có thể dùng Flow fallback."); }
@@ -51,9 +58,13 @@ export async function generateProjectImagesWithGoogleApi(projectId: string, user
     if (slot.kind === "scene") {
       if (!character) throw new AppError("CHANNEL_CHARACTER_IMAGE_MISSING", "Kênh chưa có ảnh nhân vật chính.", 409);
       const background = await readProjectImage(projectId, userId, "background", 0);
-      references.push({ mimeType: character.mimeType, data: character.data }, { mimeType: background.mimeType, data: background.data.toString("base64") });
+      references.push(...identityReferences.slice(0, 2).map(reference => ({ mimeType: reference.image.mimeType, data: reference.image.data })), { mimeType: background.mimeType, data: background.data.toString("base64") });
     }
-    const result = await provider.generateImage(slot.prompt, slot.aspectRatio ?? "9:16", references);
+    const sourceSceneId = slot.kind === "scene" ? project.scenes.find((scene) => scene.sceneNumber === sceneNumber)?.sourceSceneId ?? undefined : undefined;
+    const draftPrompt = `${buildCharacterIdentityInstruction(identityPack)}\n${compileStrictModelingConstraints(strictSpec, sourceSceneId)}\n${slot.prompt}`;
+    const preparedPrompt = await preparePromptForGeneration({ projectId, userId, sceneNumber: slot.kind === "scene" ? sceneNumber : undefined, promptType: "IMAGE", draftPrompt });
+    await markPromptSent(preparedPrompt.promptId, preparedPrompt.validatedPrompt);
+    const result = await provider.generateImage(preparedPrompt.validatedPrompt, slot.aspectRatio ?? "9:16", references);
     await writeProjectImage(projectId, slot.kind, sceneNumber ?? 0, Buffer.from(result.data, "base64"), result.mimeType);
     images[`${slot.kind}-${sceneNumber ?? 0}`] = imageUrl(projectId, slot.kind, sceneNumber ?? 0);
     await onProgress?.(`Đã tạo và lưu ${slot.kind === "background" ? "ảnh bối cảnh" : `ảnh bắt đầu cảnh ${sceneNumber}`}.`, index + 1, slots.length);
@@ -67,8 +78,11 @@ export async function generateProjectVideosWithVeoApi(projectId: string, userId:
   if (!slots.length) throw new AppError("VALIDATION_ERROR", "Không có video cảnh cần tạo.", 400);
   const project = await db.contentProject.findFirst({ where: { id: projectId, channelId, channel: { userId } }, include: { scenes: true } });
   if (!project) throw new AppError("PROJECT_NOT_FOUND", "Không tìm thấy content project.", 404);
+  const strictSpec = assertStrictModelingReady({ sourceVideoId: project.sourceVideoId, sourceVideoUrl: project.sourceVideoUrl, sourceDuration: project.sourceDuration, modelingPolicy: project.modelingPolicy, sourceModelingSpec: project.sourceModelingSpec, generatedScenes: project.scenes });
   try { await requireProviderApiKey(userId, ["VEO", "GEMINI"], "VIDEO_GENERATION", "Veo/Google Video"); }
   catch { throw providerUnavailable("Chưa kết nối Veo/Google Video API; có thể dùng Flow fallback."); }
+  const identityPack = assertCharacterIdentityPackReady(await getCharacterIdentityPack(channelId, userId));
+  const identityReferences = await readChannelCharacterIdentityReferences(channelId, userId);
   const videos: Record<string, string> = {};
 
   // Mỗi operation được hoàn tất và tải về local trước khi khởi tạo cảnh kế tiếp.
@@ -77,9 +91,9 @@ export async function generateProjectVideosWithVeoApi(projectId: string, userId:
     if (!scene) throw new AppError("SCENE_NOT_FOUND", `Không tìm thấy cảnh ${slot.sceneNumber}.`, 404);
     const image = await readProjectImage(projectId, userId, "scene", slot.sceneNumber);
     const firstFrame = { uri: `data:${image.mimeType};base64,${image.data.toString("base64")}`, mimeType: image.mimeType };
-    const request: VeoRequest = {
-      sceneId: scene.id,
-      prompt: [
+    const draftPrompt = [
+        buildCharacterIdentityInstruction(identityPack),
+        compileStrictModelingConstraints(strictSpec, scene.sourceSceneId ?? undefined),
         `Create one 4-second ${slot.aspectRatio === "16:9" ? "16:9" : "vertical 9:16"} video from the attached start-frame image.`,
         `Use that image as the exact Start frame for scene ${slot.sceneNumber}.`,
         "Do not add an End frame, unrelated characters, props, actions, or story beats.",
@@ -88,11 +102,18 @@ export async function generateProjectVideosWithVeoApi(projectId: string, userId:
         `Camera and visual direction reference: ${slot.visualBlock}`,
         `Audio and sound direction reference: ${slot.audioBlock}`,
         "Generate one final video with synchronized audio.",
-      ].join("\n"),
+      ].join("\n");
+    const preparedPrompt = await preparePromptForGeneration({ projectId, userId, sceneNumber: slot.sceneNumber, promptType: "VIDEO", draftPrompt });
+    await markPromptSent(preparedPrompt.promptId, preparedPrompt.validatedPrompt);
+    const request: VeoRequest = {
+      sceneId: scene.id,
+      prompt: preparedPrompt.validatedPrompt,
+      promptFidelity: { promptId: preparedPrompt.promptId, promptHash: preparedPrompt.promptHash },
       aspectRatio: slot.aspectRatio === "16:9" ? "16:9" : "9:16",
       resolution: "720p",
       duration: 4,
       firstFrame,
+      referenceImages: identityReferences.slice(0, 2).map(reference => ({ uri: `data:${reference.image.mimeType};base64,${reference.image.data}`, mimeType: reference.image.mimeType, role: "character" as const })),
       audioEnabled: true,
     };
     const job = await createGenerationJob(scene.id, userId, request, { enqueue: false });

@@ -12,7 +12,15 @@ export class LocalJobQueue implements JobQueue {
   }
 
   async claim(): Promise<QueuedJob | null> {
-    const job = await db.backgroundJob.findFirst({ where: { status: "queued", NOT: { name: { startsWith: "desktop.flow." } } }, orderBy: { createdAt: "asc" } });
+    // Do not let old diagnostic notifications starve a user-started pipeline.
+    // Diagnostics remain FIFO and are processed after executable Codex jobs.
+    const job = await db.backgroundJob.findFirst({
+      where: { status: "queued", name: "codex.job.execute" },
+      orderBy: { createdAt: "desc" },
+    }) ?? await db.backgroundJob.findFirst({
+      where: { status: "queued", NOT: { name: { startsWith: "desktop.flow." } } },
+      orderBy: { createdAt: "asc" },
+    });
     if (!job) return null;
     const claimed = await db.backgroundJob.updateMany({ where: { id: job.id, status: "queued" }, data: { status: "running", startedAt: new Date() } });
     if (!claimed.count) return this.claim();
@@ -33,13 +41,13 @@ export class LocalJobQueue implements JobQueue {
   }
 
   async findStale(staleBefore: Date): Promise<QueuedJob[]> {
-    const jobs = await db.backgroundJob.findMany({ where: { status: "running", startedAt: { lt: staleBefore } }, orderBy: { startedAt: "asc" } });
+    const jobs = await db.backgroundJob.findMany({ where: { status: "running", startedAt: { lt: staleBefore }, NOT: { name: { startsWith: "desktop.flow." } } }, orderBy: { startedAt: "asc" } });
     return jobs.map((job) => ({ jobId: job.id, name: job.name, payload: job.payload as JobPayload, idempotencyKey: job.idempotencyKey, attempts: job.attempts, maxAttempts: job.maxAttempts }));
   }
 
   async requeueStale(staleBefore: Date) {
     return db.backgroundJob.updateMany({
-      where: { status: "running", startedAt: { lt: staleBefore } },
+      where: { status: "running", startedAt: { lt: staleBefore }, NOT: { name: { startsWith: "desktop.flow." } } },
       data: { status: "queued", startedAt: null, error: "Worker bị gián đoạn; job được resume từ checkpoint." },
     });
   }

@@ -1,6 +1,6 @@
 {
   "name": "ai-content-modeling",
-  "version": "0.2.85",
+  "version": "1.0.2",
   "private": true,
   "main": "electron/main.cjs",
   "scripts": {
@@ -15,6 +15,7 @@
     "worker": "tsx src/workers/worker.ts",
     "scheduler": "tsx src/workers/scheduler.ts",
     "report-scheduler": "tsx src/workers/report-scheduler.ts",
+    "production:validate:resume": "node scripts/production-validation/cdp-resume-validation.mjs",
     "nest:dev": "tsx src/nest/main.ts",
     "electron:dev": "concurrently -k \"npm run dev\" \"npm run nest:dev\" \"wait-on http://localhost:3000 && electron electron/main.cjs\"",
     "electron:prepare": "npm run build && node electron/prepare-desktop.mjs",
@@ -28,6 +29,7 @@
     "@nestjs/platform-express": "^12.0.1",
     "@prisma/client": "^6.15.0",
     "electron-updater": "^6.8.9",
+    "ffmpeg-static": "5.3.0",
     "next": "^15.5.0",
     "next-auth": "^5.0.0-beta.29",
     "react": "^19.1.1",
@@ -60,11 +62,17 @@
     "productName": "Modeling AI",
     "artifactName": "Modeling.AI.Setup.${version}.${ext}",
     "directories": {
-      "output": "release2"
+      "output": "release/1.0.2-production"
     },
     "files": [
-      "electron/main.cjs",
-      "electron/preload.cjs",
+    "electron/main.cjs",
+    "electron/sqlite-release-schema.cjs",
+    "electron/edge-gemini-cdp.cjs",
+    "electron/gemini-edge-file-chooser.cjs",
+    "electron/gemini-browser-lifecycle.cjs",
+    "electron/gemini-conversation-lifecycle.cjs",
+    "electron/gemini-remote-script.cjs",
+    "electron/preload.cjs",
       "electron/dist/**/*",
       "package.json"
     ],

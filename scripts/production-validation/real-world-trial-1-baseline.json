@@ -1,0 +1,88 @@
+{
+  "baseline": "REAL_WORLD_TRIAL_1",
+  "recordedAt": "2026-09-17T18:39:49.5412622Z",
+  "appVersion": "0.2.90",
+  "runId": "cmu2bmm9s0000k598177tlqzk",
+  "contentProjectId": "cmu4q3u7t0001k5kc24hvnu1l",
+  "runStatus": "SUCCEEDED",
+  "lastCompletedStage": 5,
+  "generationStatus": "SUCCESS",
+  "outputReady": true,
+  "qualityStatus": "PASS",
+  "postAssemblyQa": "PASS",
+  "qaFindings": [],
+  "stageResults": {
+    "stage1": "PASS",
+    "stage2": "PASS",
+    "stage3": "PASS",
+    "stage4": "PASS",
+    "stage5": "PASS",
+    "postAssemblyQa": "PASS"
+  },
+  "assets": {
+    "imagesReady": "4/4",
+    "sceneVideosReady": "4/4",
+    "images": [
+      { "sceneNumber": 1, "path": "C:/Users/Admin/AppData/Roaming/ai-content-modeling/generated-images/cmu4q3u7t0001k5kc24hvnu1l/scene-1.png", "sha256": "21AE248249864034A4E4C5754966565DF80D03FA1D76B67804425B651D3CD732" },
+      { "sceneNumber": 2, "path": "C:/Users/Admin/AppData/Roaming/ai-content-modeling/generated-images/cmu4q3u7t0001k5kc24hvnu1l/scene-2.png", "sha256": "180C9F5A76678BE9BB6EF9DB9787AD4D53280A06703EA431C40096890212DA4B" },
+      { "sceneNumber": 3, "path": "C:/Users/Admin/AppData/Roaming/ai-content-modeling/generated-images/cmu4q3u7t0001k5kc24hvnu1l/scene-3.png", "sha256": "C8558623B7DE247582A03CF0E76FF21EEA777756341CEE268F5A73975A8B7AF8" },
+      { "sceneNumber": 4, "path": "C:/Users/Admin/AppData/Roaming/ai-content-modeling/generated-images/cmu4q3u7t0001k5kc24hvnu1l/scene-4.png", "sha256": "EB2E8F45D5E83EB1B7EF8CA7669A580A8808E53F5B1FED0C473EE37D79079375" }
+    ],
+    "sceneVideos": [
+      { "sceneNumber": 1, "path": "C:/Users/Admin/AppData/Roaming/ai-content-modeling/generated-videos/cmu4q3u7t0001k5kc24hvnu1l/scene-1.mp4", "sha256": "93903D922C899C1F131696A039B5CE44EE96FD8FA1FF4EA323E09493F1E64F33", "width": 720, "height": 1280, "durationSec": 4, "sourceValidation": "PASS" },
+      { "sceneNumber": 2, "path": "C:/Users/Admin/AppData/Roaming/ai-content-modeling/generated-videos/cmu4q3u7t0001k5kc24hvnu1l/scene-2.mp4", "sha256": "DA8B2AE24C579228F3BF49927FC1784122BD347C9529E3249A18B08F3A8320F9", "width": 720, "height": 1280, "durationSec": 4, "sourceValidation": "PASS" },
+      { "sceneNumber": 3, "path": "C:/Users/Admin/AppData/Roaming/ai-content-modeling/generated-videos/cmu4q3u7t0001k5kc24hvnu1l/scene-3.mp4", "sha256": "41B83A6C5235CF717D0540E96FABD0E3D001C0A81311F8079612F449519869C3", "width": 720, "height": 1280, "durationSec": 4, "sourceValidation": "PASS" },
+      { "sceneNumber": 4, "path": "C:/Users/Admin/AppData/Roaming/ai-content-modeling/generated-videos/cmu4q3u7t0001k5kc24hvnu1l/scene-4.mp4", "sha256": "9584B606662295902EB895063CACB81E0F5473A468AB1217F0F4FFCDF49FEC11", "width": 720, "height": 1280, "durationSec": 4, "sourceValidation": "PASS" }
+    ],
+    "final": {
+      "path": "C:/Users/Admin/AppData/Roaming/ai-content-modeling/generated-videos/cmu4q3u7t0001k5kc24hvnu1l/final.mp4",
+      "sha256": "6C03DC6BD8163B087B78074B02D3EF60976F8D82F7BF3B86507719B082A77DEB",
+      "width": 720,
+      "height": 1280,
+      "fps": 30,
+      "durationSec": 15.14,
+      "videoCodec": "h264",
+      "audioCodec": "aac",
+      "container": "mp4"
+    }
+  },
+  "productionArchitecture": {
+    "imageGenerationTransport": "Microsoft Edge managed profile + CDP + Gemini UI",
+    "videoGenerationTransport": "Microsoft Edge managed profile + CDP + Google Flow UI",
+    "flowBrowserWindowUsed": false,
+    "directModelApiUsed": false,
+    "flowApiUsed": false,
+    "veoApiUsed": false,
+    "geminiApiUsed": false,
+    "strictSourceModeling": "ACTIVE",
+    "strictImagePromptFidelityGate": "ACTIVE",
+    "strictVideoPromptFidelityGate": "ACTIVE",
+    "characterIdentityLock": "ACTIVE"
+  },
+  "recoverySafeguards": {
+    "oneRunOneGeminiConversation": "ACTIVE",
+    "geminiUiScreenshotRejectedAsAsset": "ACTIVE",
+    "blobCanvasExtractionFallback": "ACTIVE",
+    "flowCdpMediaResponseCapture": "ACTIVE",
+    "fieldAwareImageVerdictAdapter": "ACTIVE",
+    "fieldAwareVideoVerdictAdapter": "ACTIVE",
+    "candidatePromoteRollback": "ACTIVE",
+    "finalSuccessBeforePostQa": "ACTIVE",
+    "unknownQaDoesNotRevokeOutput": "ACTIVE"
+  },
+  "verifiedIncidents": [
+    { "incidentId": "2A", "firstDivergence": "PROMPT_FIDELITY_GATE", "rootCause": "Exact authoritative source.cameraMovement was classified as an unauthorized creative addition.", "fix": "Authorize exact source cameraMovement only, preserving other creative-addition guards.", "productionVerified": true },
+    { "incidentId": "2B", "firstDivergence": "IMAGE_SOURCE_VALIDATION_CONTRACT_ADAPTER", "rootCause": "Provider PASS/FAIL verdict strings were not adapted to boolean fields.", "fix": "Add a field-aware image verdict adapter while preserving raw provider evidence and string contracts.", "productionVerified": true },
+    { "incidentId": "2C", "firstDivergence": "GEMINI_CONVERSATION_URL_REOPEN", "rootCause": "Conversation reopen depended on URL string equality instead of canonical identity.", "fix": "Verify canonical Gemini conversation ID, origin and owner binding after bounded stabilization.", "productionVerified": true },
+    { "incidentId": "2E", "firstDivergence": "EDGE_GEMINI_REFERENCE_UPLOAD", "rootCause": "Flow creates the file input dynamically only after the Tệp action.", "fix": "Prearm Page.fileChooserOpened and use the current chooser backendNodeId with DOM.setFileInputFiles.", "productionVerified": true },
+    { "incidentId": "3A", "firstDivergence": "VIDEO_PROMPT_FIDELITY_GATE", "rootCause": "Stage 4 used scene.englishPrompt without strict authoritative video blocks.", "fix": "Compile strict video prompts from source mapping, Expected State and Character Identity before the gate.", "productionVerified": true },
+    { "incidentId": "3B", "firstDivergence": "FLOW_BROWSER_TRANSPORT", "rootCause": "Flow transport depended on Electron BrowserWindow.", "fix": "Migrate Flow lifecycle and UI operations to managed Microsoft Edge + CDP.", "productionVerified": true },
+    { "incidentId": "STAGE4_FLOW_MEDIA_CAPTURE", "firstDivergence": "FLOW_VIDEO_OUTPUT_CAPTURE", "rootCause": "Flow media was served as range responses and page fetch was blocked.", "fix": "Capture the actual media response body through Edge CDP Fetch, then validate and persist it.", "productionVerified": true }
+  ],
+  "validation": {
+    "fullTestSuite": { "passed": 763, "total": 763, "status": "PASS" },
+    "typecheck": "PASS",
+    "productionBuild": "PASS",
+    "zeroRuntimeBehaviorChange": "PASS"
+  }
+}
