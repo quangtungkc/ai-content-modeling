@@ -62,6 +62,30 @@ describe("SQLite release schema reconciliation", () => {
     }
   });
 
+  it("repairs a stale snapshot foreign key left by the duration rebuild without losing rows", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "sqlite-release-schema-"));
+    const client = clientFor(path.join(root, "stale-fk.db"));
+    try {
+      await createOldDb(client);
+      await ensureSqliteReleaseSchema(client);
+      await client.$executeRawUnsafe(`CREATE TABLE "CompetitorVideo__release_old" ("id" TEXT NOT NULL PRIMARY KEY)`);
+      await client.$executeRawUnsafe(`INSERT INTO "CompetitorVideo__release_old" ("id") VALUES ('video-1')`);
+      await client.$executeRawUnsafe(`CREATE TABLE "VideoMetricSnapshot" ("id" TEXT NOT NULL PRIMARY KEY, "videoId" TEXT NOT NULL, "capturedAt" DATETIME NOT NULL, "views" INTEGER NOT NULL DEFAULT 0, "likes" INTEGER NOT NULL DEFAULT 0, "comments" INTEGER NOT NULL DEFAULT 0, "shares" INTEGER NOT NULL DEFAULT 0, "rawMetrics" JSONB, CONSTRAINT "VideoMetricSnapshot_videoId_fkey" FOREIGN KEY ("videoId") REFERENCES "CompetitorVideo__release_old" ("id") ON DELETE RESTRICT ON UPDATE CASCADE)`);
+      await client.$executeRawUnsafe(`INSERT INTO "VideoMetricSnapshot" ("id", "videoId", "capturedAt", "views") VALUES ('snapshot-1', 'video-1', CURRENT_TIMESTAMP, 27000)`);
+
+      const result = await ensureSqliteReleaseSchema(client);
+      expect(result.repairedForeignKeys).toContain("VideoMetricSnapshot");
+      const foreignKeys = await client.$queryRawUnsafe<Array<{ table: string }>>(`PRAGMA foreign_key_list("VideoMetricSnapshot")`);
+      expect(foreignKeys.map((foreignKey) => foreignKey.table)).toContain("CompetitorVideo");
+      expect((await client.$queryRawUnsafe<Array<{ views: number }>>(`SELECT "views" FROM "VideoMetricSnapshot" WHERE "id" = 'snapshot-1'`))[0].views).toBe(27000);
+      await client.$executeRawUnsafe(`INSERT INTO "VideoMetricSnapshot" ("id", "videoId", "capturedAt", "views") VALUES ('snapshot-2', 'video-1', datetime('now', '+1 second'), 28000)`);
+      expect((await client.$queryRawUnsafe<Array<{ count: bigint }>>(`SELECT COUNT(*) AS count FROM "VideoMetricSnapshot"`))[0].count).toBe(2n);
+    } finally {
+      await client.$disconnect();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("reconciles the bundled template without importing user data", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "sqlite-release-template-"));
     const file = path.join(root, "template.db");

@@ -1677,14 +1677,36 @@ async function scanFacebookPages(entries, onProgress) {
             return { needsLogin: true, items: [] };
           }
           const compactNumber = (value) => {
-            if (!value) return null;
-            const match = value.match(/([0-9][0-9.,\\s]*)([KMB])?/i);
+            if (value === null || value === undefined) return null;
+            const normalized = String(value).replace(/\\u00a0/g, " ").trim().toLowerCase();
+            const match = normalized.match(/([0-9][0-9.,\\s]*)(k|m|b|triệu|tr|million|billion)?/i);
             if (!match) return null;
             const raw = match[1].replace(/\\s/g, "");
-            const number = match[2] ? Number.parseFloat(raw.replace(",", ".")) : Number(raw.replace(/[.,]/g, ""));
+            const unit = match[2] || "";
+            let number;
+            if (unit) {
+              const comma = raw.lastIndexOf(",");
+              const dot = raw.lastIndexOf(".");
+              const decimal = comma > dot ? raw.replace(/\\./g, "").replace(",", ".") : raw.replace(/,/g, "");
+              number = Number.parseFloat(decimal);
+            } else {
+              number = Number(raw.replace(/[.,]/g, ""));
+            }
             if (!Number.isFinite(number)) return null;
-            const multiplier = match[2] === "K" ? 1_000 : match[2] === "M" ? 1_000_000 : match[2] === "B" ? 1_000_000_000 : 1;
+            const multiplier = /^(k|tr)$/i.test(unit) ? 1_000 : /^(m|triệu|million)$/i.test(unit) ? 1_000_000 : /^(b|billion)$/i.test(unit) ? 1_000_000_000 : 1;
             return Math.round(number * multiplier);
+          };
+          const metricFromText = (text, labels, container, allowUnitFallback = false) => {
+            const source = String(text || "");
+            const labelled = source.match(new RegExp("([0-9][0-9.,\\\\s]*\\\\s*(?:K|M|B|triệu|tr|million|billion)?)\\\\s*(?:" + labels + ")", "i"));
+            if (labelled) return compactNumber(labelled[1]);
+            const labelledAttribute = [...(container?.querySelectorAll?.("[aria-label],[title]") || [])]
+              .map((node) => node.getAttribute("aria-label") || node.getAttribute("title") || "")
+              .find((value) => new RegExp(labels, "i").test(value));
+            if (labelledAttribute) return compactNumber(labelledAttribute);
+            if (!allowUnitFallback) return null;
+            const unitOnly = source.match(/(?:^|[\\n\\r\\s])([0-9][0-9.,\\s]*\\s*(?:K|M|B|triệu|tr|million|billion))(?=$|[\\n\\r\\s])/i);
+            return compactNumber(unitOnly?.[1] || null);
           };
           const durationSeconds = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
           const mediaRect = (media) => { const rect = media?.getBoundingClientRect?.(); return rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null; };
@@ -1762,6 +1784,10 @@ async function scanFacebookPages(entries, onProgress) {
           };
           const found = new Map();
           for (const anchor of document.querySelectorAll("a[href]")) {
+            // Facebook renders many duplicate links per card. The /videos
+            // page is ordered newest-first, so stop after the first ten
+            // unique candidates instead of waiting on every historical reel.
+            if (found.size >= 10) break;
             const href = anchor.href;
             if (!/\\/(reel|videos|posts)\\//.test(href) && !/watch\\/?\\?v=/.test(href) && !/\\/share\\/r\\//.test(href)) continue;
             if (found.has(href)) continue;
@@ -1775,10 +1801,10 @@ async function scanFacebookPages(entries, onProgress) {
             }
             const text = (container?.innerText || anchor.innerText || "").trim();
             if (!text) continue;
-            const views = compactNumber(text.match(/([0-9][0-9.,\\s]*[KMB]?)\\s*(?:views|lượt xem)/i)?.[1]);
-            const likes = compactNumber(text.match(/([0-9][0-9.,\\s]*[KMB]?)\\s*(?:reactions|likes|lượt thích)/i)?.[1]);
-            const comments = compactNumber(text.match(/([0-9][0-9.,\\s]*[KMB]?)\\s*(?:comments|bình luận)/i)?.[1]);
-            const shares = compactNumber(text.match(/([0-9][0-9.,\\s]*[KMB]?)\\s*(?:shares|lượt chia sẻ)/i)?.[1]);
+            const views = metricFromText(text, "views|lượt xem|view|đã xem", container, true);
+            const likes = metricFromText(text, "reactions|likes|lượt thích|thích", container);
+            const comments = metricFromText(text, "comments|bình luận", container);
+            const shares = metricFromText(text, "shares|lượt chia sẻ|chia sẻ", container);
             const discovery = await waitForBoundMediaDiscovery(href);
             const mediaBinding = discovery.bindingResolved && discovery.durationSec === null ? await waitForBoundDuration(href, discovery) : discovery;
             found.set(href, { url: href, caption: text.slice(0, 1000), publishedAt: relativeDate(text), views, likes, comments, shares, durationSec: mediaBinding.durationSec, mediaBinding });

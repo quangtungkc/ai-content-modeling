@@ -312,6 +312,9 @@ async function rebuildRealColumn(client, table, spec) {
   const columns = spec.columns.filter(([name]) => existingNames.has(name));
   const names = columns.map(([name]) => `"${name}"`);
   const definitions = [...columns.map(([name, definition]) => `"${name}" ${definition}`), ...(spec.constraints || [])];
+  // SQLite rewrites dependent foreign keys when a table is renamed. Keep the
+  // original target names while this compatibility rebuild is in progress.
+  await client.$executeRawUnsafe("PRAGMA legacy_alter_table = ON");
   await client.$executeRawUnsafe("PRAGMA foreign_keys = OFF");
   try {
     await client.$executeRawUnsafe(`DROP TABLE IF EXISTS "${newTable}"`);
@@ -321,16 +324,97 @@ async function rebuildRealColumn(client, table, spec) {
     await client.$executeRawUnsafe(`DROP TABLE "${oldTable}"`);
     await client.$executeRawUnsafe(`ALTER TABLE "${newTable}" RENAME TO "${table}"`);
     for (const index of spec.indexes) await client.$executeRawUnsafe(index);
+    await client.$executeRawUnsafe("PRAGMA legacy_alter_table = OFF");
     await client.$executeRawUnsafe("PRAGMA foreign_keys = ON");
     return true;
   } catch (error) {
     try {
       if (await tableExists(client, newTable)) await client.$executeRawUnsafe(`DROP TABLE "${newTable}"`);
       if (!(await tableExists(client, table)) && await tableExists(client, oldTable)) await client.$executeRawUnsafe(`ALTER TABLE "${oldTable}" RENAME TO "${table}"`);
+      await client.$executeRawUnsafe("PRAGMA legacy_alter_table = OFF");
       await client.$executeRawUnsafe("PRAGMA foreign_keys = ON");
     } catch { /* Preserve the original migration error. */ }
     throw error;
   }
+}
+
+const STALE_FOREIGN_KEY_REPAIRS = {
+  VideoMetricSnapshot: { "CompetitorVideo__release_old": "CompetitorVideo" },
+  SourceAnalysis: { "CompetitorVideo__release_old": "CompetitorVideo" },
+  ReportItem: { "CompetitorVideo__release_old": "CompetitorVideo" },
+};
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function sqliteTableSql(client, table) {
+  const rows = await client.$queryRawUnsafe("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", table);
+  return rows[0]?.sql || null;
+}
+
+async function sqliteIndexSql(client, table) {
+  return client.$queryRawUnsafe("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL ORDER BY name", table);
+}
+
+async function repairTableForeignKeys(client, table, replacements) {
+  if (!(await tableExists(client, table))) return false;
+  const foreignKeys = await client.$queryRawUnsafe(`PRAGMA foreign_key_list("${table}")`);
+  const stale = foreignKeys.filter((foreignKey) => replacements[foreignKey.table]);
+  if (!stale.length) return false;
+
+  const originalSql = await sqliteTableSql(client, table);
+  if (!originalSql) throw new Error(`Không tìm thấy schema SQLite của bảng ${table}.`);
+  const oldTable = `${table}__release_fk_old`;
+  const newTable = `${table}__release_fk_new`;
+  if (await tableExists(client, oldTable) || await tableExists(client, newTable)) {
+    throw new Error(`Phát hiện bảng tạm còn sót lại khi sửa foreign key của ${table}; dừng để bảo toàn dữ liệu.`);
+  }
+
+  const currentColumns = await tableInfo(client, table);
+  const names = currentColumns.map((column) => `"${column.name}"`);
+  const indexes = await sqliteIndexSql(client, table);
+  let createSql = originalSql.replace(
+    new RegExp(`^(CREATE\\s+TABLE\\s+)(?:IF\\s+NOT\\s+EXISTS\\s+)?(?:"${escapeRegExp(table)}"|${escapeRegExp(table)})`, "i"),
+    `$1"${newTable}"`,
+  );
+  for (const foreignKey of stale) {
+    const from = escapeRegExp(foreignKey.table);
+    const target = replacements[foreignKey.table];
+    createSql = createSql.replace(new RegExp(`"${from}"`, "g"), `"${target}"`);
+  }
+
+  // Do not drop any pre-existing table. The temporary-name guard above makes
+  // an interrupted repair fail closed instead of risking a data overwrite.
+  await client.$executeRawUnsafe("PRAGMA legacy_alter_table = ON");
+  await client.$executeRawUnsafe("PRAGMA foreign_keys = OFF");
+  try {
+    await client.$executeRawUnsafe(`ALTER TABLE "${table}" RENAME TO "${oldTable}"`);
+    await client.$executeRawUnsafe(createSql);
+    await client.$executeRawUnsafe(`INSERT INTO "${newTable}" (${names.join(", ")}) SELECT ${names.join(", ")} FROM "${oldTable}"`);
+    await client.$executeRawUnsafe(`DROP TABLE "${oldTable}"`);
+    await client.$executeRawUnsafe(`ALTER TABLE "${newTable}" RENAME TO "${table}"`);
+    for (const index of indexes) await client.$executeRawUnsafe(index.sql);
+    await client.$executeRawUnsafe("PRAGMA legacy_alter_table = OFF");
+    await client.$executeRawUnsafe("PRAGMA foreign_keys = ON");
+    return true;
+  } catch (error) {
+    try {
+      if (await tableExists(client, newTable)) await client.$executeRawUnsafe(`DROP TABLE "${newTable}"`);
+      if (!(await tableExists(client, table)) && await tableExists(client, oldTable)) await client.$executeRawUnsafe(`ALTER TABLE "${oldTable}" RENAME TO "${table}"`);
+      await client.$executeRawUnsafe("PRAGMA legacy_alter_table = OFF");
+      await client.$executeRawUnsafe("PRAGMA foreign_keys = ON");
+    } catch { /* Preserve the original migration error. */ }
+    throw error;
+  }
+}
+
+async function repairStaleForeignKeys(client) {
+  const repaired = [];
+  for (const [table, replacements] of Object.entries(STALE_FOREIGN_KEY_REPAIRS)) {
+    if (await repairTableForeignKeys(client, table, replacements)) repaired.push(table);
+  }
+  return repaired;
 }
 
 async function ensureBaseTables(client) {
@@ -357,9 +441,10 @@ async function ensureSqliteReleaseSchema(client) {
   await ensureBaseColumns(client);
   await rebuildRealColumn(client, "CompetitorVideo", REAL_COLUMN_TABLES.CompetitorVideo);
   await rebuildRealColumn(client, "ContentProject", REAL_COLUMN_TABLES.ContentProject);
+  const repairedForeignKeys = await repairStaleForeignKeys(client);
   await ensureIndexes(client);
   const automationColumns = await tableInfo(client, "AutomationRun");
-  return { automationRunComplete: AUTOMATION_RUN_COLUMNS.every(([column]) => automationColumns.some((item) => item.name === column)), durationTypes: { competitorVideo: (await tableInfo(client, "CompetitorVideo")).find((item) => item.name === "duration")?.type, contentProject: (await tableInfo(client, "ContentProject")).find((item) => item.name === "sourceDuration")?.type } };
+  return { automationRunComplete: AUTOMATION_RUN_COLUMNS.every(([column]) => automationColumns.some((item) => item.name === column)), repairedForeignKeys, durationTypes: { competitorVideo: (await tableInfo(client, "CompetitorVideo")).find((item) => item.name === "duration")?.type, contentProject: (await tableInfo(client, "ContentProject")).find((item) => item.name === "sourceDuration")?.type } };
 }
 
-module.exports = { ensureSqliteReleaseSchema, tableInfo, tableExists, AUTOMATION_RUN_COLUMNS, CONTENT_PROJECT_COLUMNS, STORYBOARD_SCENE_COLUMNS, REQUIRED_TABLES, INDEXES };
+module.exports = { ensureSqliteReleaseSchema, repairStaleForeignKeys, tableInfo, tableExists, AUTOMATION_RUN_COLUMNS, CONTENT_PROJECT_COLUMNS, STORYBOARD_SCENE_COLUMNS, REQUIRED_TABLES, INDEXES };
