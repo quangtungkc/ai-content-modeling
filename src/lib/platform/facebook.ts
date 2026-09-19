@@ -3,7 +3,22 @@ import type { CompetitorChannel, CompetitorPlatformProvider, RecentVideo, VideoM
 
 const HOSTS = new Set(["facebook.com", "www.facebook.com", "m.facebook.com"]);
 
-type GraphResponse = { id?: string; name?: string; username?: string; link?: string; data?: Array<Record<string, unknown>>; views?: unknown; likes?: unknown; comments?: unknown; shares?: unknown };
+type GraphInsight = { name?: unknown; value?: unknown; values?: Array<{ value?: unknown }> };
+type GraphResponse = {
+  id?: string;
+  name?: string;
+  username?: string;
+  link?: string;
+  data?: Array<Record<string, unknown>>;
+  paging?: { next?: string };
+  views?: unknown;
+  likes?: unknown;
+  comments?: unknown;
+  shares?: unknown;
+  video_insights?: { data?: GraphInsight[] };
+};
+
+const MAX_RECENT_VIDEOS = 10;
 
 export class FacebookProvider implements CompetitorPlatformProvider {
   readonly platform = "facebook" as const;
@@ -23,11 +38,11 @@ export class FacebookProvider implements CompetitorPlatformProvider {
   }
 
   async getRecentVideos(channel: CompetitorChannel): Promise<RecentVideo[]> {
-    const body = await this.graph(`/${encodeURIComponent(channel.externalId)}/videos`, { fields: "id,permalink_url,description,created_time,picture", limit: "25" });
+    const body = await this.graph(`/${encodeURIComponent(channel.externalId)}/videos`, { fields: "id,permalink_url,description,created_time,picture", limit: String(MAX_RECENT_VIDEOS) });
     return (body.data ?? []).flatMap((item) => {
       if (typeof item.id !== "string" || typeof item.permalink_url !== "string" || typeof item.created_time !== "string") return [];
       return [{ platform: this.platform, externalId: item.id, url: item.permalink_url, caption: typeof item.description === "string" ? item.description : undefined, thumbnail: typeof item.picture === "string" ? item.picture : undefined, publishedAt: new Date(item.created_time) }];
-    });
+    }).sort((left, right) => right.publishedAt.getTime() - left.publishedAt.getTime()).slice(0, MAX_RECENT_VIDEOS);
   }
 
   async getVideoMetrics(video: RecentVideo): Promise<VideoMetrics> {
@@ -35,7 +50,17 @@ export class FacebookProvider implements CompetitorPlatformProvider {
     const likes = this.summaryCount(body.likes);
     const comments = this.summaryCount(body.comments);
     const shares = this.summaryCount(body.shares);
-    return { views: typeof body.views === "number" ? body.views : 0, likes, comments, shares, capturedAt: new Date() };
+    let views = this.toCount(body.views);
+    let rawMetrics: unknown = { source: "facebook.video", views: body.views };
+    if (views === null) {
+      const insights = await this.graph(`/${encodeURIComponent(video.externalId)}/video_insights`, { metric: "total_video_views", period: "lifetime" });
+      views = this.extractInsightCount(insights.data, "total_video_views");
+      rawMetrics = { source: "facebook.video_insights", data: insights.data ?? [] };
+    }
+    if (views === null) {
+      throw new PlatformProviderError("Facebook không trả về số view thực tế cho video.", { videoId: video.externalId });
+    }
+    return { views, likes, comments, shares, capturedAt: new Date(), rawMetrics };
   }
 
   private parseUrl(value: string) {
@@ -56,11 +81,28 @@ export class FacebookProvider implements CompetitorPlatformProvider {
   }
 
   private summaryCount(value: unknown) {
-    if (typeof value === "number") return value;
+    const direct = this.toCount(value);
+    if (direct !== null) return direct;
     if (value && typeof value === "object" && "summary" in value) {
       const total = (value as { summary?: { total_count?: unknown } }).summary?.total_count;
-      return typeof total === "number" ? total : 0;
+      return this.toCount(total) ?? 0;
+    }
+    if (value && typeof value === "object" && "count" in value) {
+      return this.toCount((value as { count?: unknown }).count) ?? 0;
     }
     return 0;
+  }
+
+  private extractInsightCount(value: unknown, metricName: string) {
+    if (!Array.isArray(value)) return null;
+    const insight = value.find((item): item is GraphInsight => Boolean(item && typeof item === "object" && (item as GraphInsight).name === metricName));
+    if (!insight) return null;
+    const latestValue = Array.isArray(insight.values) ? insight.values.at(-1)?.value : insight.value;
+    return this.toCount(latestValue);
+  }
+
+  private toCount(value: unknown) {
+    const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+    return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : null;
   }
 }

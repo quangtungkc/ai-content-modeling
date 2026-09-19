@@ -25,6 +25,7 @@ export type VideoMetrics = {
   comments: number;
   shares?: number;
   capturedAt: Date;
+  rawMetrics?: unknown;
 };
 
 export interface CompetitorPlatformProvider {

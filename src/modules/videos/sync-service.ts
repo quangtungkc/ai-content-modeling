@@ -2,11 +2,13 @@ import { db } from "@/lib/db";
 import { logger } from "@/lib/logger";
 import { getCompetitorProvider } from "@/lib/platform";
 import { LocalRateLimiter } from "@/lib/jobs/rate-limit";
-import { UsageMetric } from "@prisma/client";
+import { Prisma, UsageMetric } from "@prisma/client";
 import { recordUsage } from "@/modules/usage/service";
 import { decryptSecret } from "@/lib/secrets";
 import { markCompetitorProcessed } from "./sync-progress";
 import { reportRuntimeFailure } from "@/modules/codex-orchestrator/runtime-failure";
+
+export const MAX_RECENT_VIDEOS_PER_COMPETITOR = 10;
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>) {
   const results = new Array<R>(items.length);
@@ -38,15 +40,26 @@ export async function syncChannelVideos(channelId: string, syncId?: string) {
       void recordUsage({ userId: competitor.channel.userId, channelId, metric: UsageMetric.COMPETITOR_REQUEST, idempotencyKey: `competitor:resolve:${competitor.id}:${Date.now()}` });
       const videos = await provider.getRecentVideos(channel);
       void recordUsage({ userId: competitor.channel.userId, channelId, metric: UsageMetric.COMPETITOR_REQUEST, quantity: 1, idempotencyKey: `competitor:recent:${competitor.id}:${Date.now()}` });
-      const uniqueVideos = [...new Map(videos.map((video) => [video.externalId, video])).values()];
+      const uniqueVideos = [...new Map(videos.map((video) => [video.externalId, video])).values()]
+        .sort((left, right) => right.publishedAt.getTime() - left.publishedAt.getTime())
+        .slice(0, MAX_RECENT_VIDEOS_PER_COMPETITOR);
+      const videoErrors: string[] = [];
       await mapWithConcurrency(uniqueVideos, 3, async (video) => {
-        const storedVideo = await db.competitorVideo.upsert({ where: { competitorId_externalId: { competitorId: competitor.id, externalId: video.externalId } }, create: { competitorId: competitor.id, externalId: video.externalId, url: video.url, caption: video.caption, thumbnailUrl: video.thumbnail, publishedAt: video.publishedAt, duration: video.durationSec }, update: { url: video.url, caption: video.caption, thumbnailUrl: video.thumbnail, publishedAt: video.publishedAt, duration: video.durationSec } });
-        const metrics = await provider.getVideoMetrics(video);
-        void recordUsage({ userId: competitor.channel.userId, channelId, metric: UsageMetric.COMPETITOR_REQUEST, idempotencyKey: `competitor:metrics:${competitor.id}:${video.externalId}:${Date.now()}` });
-        await db.videoMetricSnapshot.upsert({ where: { videoId_capturedAt: { videoId: storedVideo.id, capturedAt: metrics.capturedAt } }, create: { videoId: storedVideo.id, views: metrics.views, likes: metrics.likes, comments: metrics.comments, shares: metrics.shares ?? 0, capturedAt: metrics.capturedAt }, update: { views: metrics.views, likes: metrics.likes, comments: metrics.comments, shares: metrics.shares ?? 0 } });
-        syncedVideos += 1;
+        try {
+          const storedVideo = await db.competitorVideo.upsert({ where: { competitorId_externalId: { competitorId: competitor.id, externalId: video.externalId } }, create: { competitorId: competitor.id, externalId: video.externalId, url: video.url, caption: video.caption, thumbnailUrl: video.thumbnail, publishedAt: video.publishedAt, duration: video.durationSec }, update: { url: video.url, caption: video.caption, thumbnailUrl: video.thumbnail, publishedAt: video.publishedAt, duration: video.durationSec, lastSeenAt: new Date() } });
+          const metrics = await provider.getVideoMetrics(video);
+          void recordUsage({ userId: competitor.channel.userId, channelId, metric: UsageMetric.COMPETITOR_REQUEST, idempotencyKey: `competitor:metrics:${competitor.id}:${video.externalId}:${Date.now()}` });
+          await db.videoMetricSnapshot.upsert({ where: { videoId_capturedAt: { videoId: storedVideo.id, capturedAt: metrics.capturedAt } }, create: { videoId: storedVideo.id, views: metrics.views, likes: metrics.likes, comments: metrics.comments, shares: metrics.shares ?? 0, rawMetrics: metrics.rawMetrics as Prisma.InputJsonValue, capturedAt: metrics.capturedAt }, update: { views: metrics.views, likes: metrics.likes, comments: metrics.comments, shares: metrics.shares ?? 0, rawMetrics: metrics.rawMetrics as Prisma.InputJsonValue } });
+          syncedVideos += 1;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Không đọc được metrics video.";
+          videoErrors.push(`${video.externalId}: ${message}`);
+          logger.warn("Competitor video metrics failed", { channelId, competitorId: competitor.id, videoId: video.externalId, message });
+        }
       });
-      await db.competitor.update({ where: { id: competitor.id }, data: { lastSyncedAt: new Date(), syncError: null } });
+      const syncError = videoErrors.length ? `Đã quét ${uniqueVideos.length} video, đọc metrics thành công ${syncedVideos}; lỗi: ${videoErrors.slice(0, 3).join(" | ")}` : null;
+      await db.competitor.update({ where: { id: competitor.id }, data: { lastSyncedAt: new Date(), syncError } });
+      if (uniqueVideos.length > 0 && syncedVideos === 0) failed = true;
     } catch (error) {
       failed = true;
       const message = error instanceof Error ? error.message : "Unknown competitor sync failure";
