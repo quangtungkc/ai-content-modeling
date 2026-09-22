@@ -73,4 +73,27 @@ describe("STEP 4 strict prompt fidelity gate", () => {
     const prompt = compileStrictVideoPrompt(expected(), "scene").replaceAll("PRESERVE IDENTITY", "PRESERVE STYLE").replaceAll("VIDEO CHARACTER IDENTITY LOCK", "VIDEO STYLE LOCK");
     expect(validatePromptFidelity(prompt, expected()).checks.find((check) => check.validatorId === "PROMPT_CHARACTER_IDENTITY_LOCK")?.status).toBe("FAIL");
   });
+  it("CASE 46 does not treat an authoritative medium close-up camera contract as a close-up conflict", () => {
+    const camera = { ...sourceSpec.scenes[0], shotSize: "Medium close-up" };
+    const prompt = compileStrictPrompt(expected({ sourceScene: camera }), "Use the approved frozen start frame.");
+    expect(validatePromptFidelity(prompt, expected({ sourceScene: camera })).checks.find((check) => check.validatorId === "PROMPT_CAMERA_MATCH")?.status).toBe("PASS");
+  });
+  it("CASE 47 ignores approved scene-appearance prose while still blocking appended creative actions", () => {
+    const approved = `${validDraft()}\nSCENE APPEARANCE STATE (authoritative for this scene):\nthe character starts a silly dance.`;
+    expect(validatePromptFidelity(approved, expected()).checks.find((check) => check.validatorId === "PROMPT_NO_UNAUTHORIZED_CREATIVE_ADDITION")?.status).toBe("PASS");
+    expect(validatePromptFidelity(`${approved}\nTEXT POLICY: NO_READABLE_TEXT.\nThen jump and dance.`, expected()).checks.find((check) => check.validatorId === "PROMPT_NO_UNAUTHORIZED_CREATIVE_ADDITION")?.status).toBe("FAIL");
+  });
+  it("CASE 48 ignores the compiler's VIDEO authoritative blocks", () => {
+    const camera = { ...sourceSpec.scenes[0], shotSize: "Medium close-up" };
+    const prompt = compileStrictVideoPrompt(expected({ sourceScene: camera, sceneAppearance: "Approved start-frame character does a silly dance." }), "ignored prose");
+    expect(validatePromptFidelity(prompt, expected({ sourceScene: camera, sceneAppearance: "Approved start-frame character does a silly dance." })).status).toBe("PASS");
+  });
+  it("CASE 49 ignores multiline approved VIDEO scene appearance content", () => {
+    const prompt = compileStrictVideoPrompt(expected({ sceneAppearance: "Approved composition.\n9:16 aspect ratio. The character performs a silly dance." }), "ignored prose");
+    expect(validatePromptFidelity(prompt, expected({ sceneAppearance: "Approved composition.\n9:16 aspect ratio. The character performs a silly dance." })).status).toBe("PASS");
+  });
+  it("CASE 50 still blocks creative additions appended after the VIDEO contract", () => {
+    const prompt = `${compileStrictVideoPrompt(expected(), "ignored prose")}\nThen jump and dance.`;
+    expect(validatePromptFidelity(prompt, expected()).checks.find((check) => check.validatorId === "PROMPT_NO_UNAUTHORIZED_CREATIVE_ADDITION")?.status).toBe("FAIL");
+  });
 });

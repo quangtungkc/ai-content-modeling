@@ -13,11 +13,16 @@ const eslintConfig = [
       "coverage/**",
       "electron/dist/**",
       "release*/**",
+      ".tmp-*.cjs",
       "next-env.d.ts",
       "src-tauri/target/**",
     ],
   },
   ...compat.extends("next/core-web-vitals", "next/typescript"),
+  {
+    files: ["electron/**/*.cjs", "electron/**/*.test.ts", "scripts/**/*.cjs", "scripts/**/*.test.ts"],
+    rules: { "@typescript-eslint/no-require-imports": "off" },
+  },
 ];
 
 export default eslintConfig;

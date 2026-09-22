@@ -16,9 +16,34 @@ function conversationIdFromUrl(value) {
   return extractGeminiConversationId(value);
 }
 
+function conversationNavigationDisposition(requestedUrl, observedUrl) {
+  const expectedId = conversationIdFromUrl(requestedUrl);
+  if (!expectedId) return "NOT_CONVERSATION";
+  const observedId = conversationIdFromUrl(observedUrl);
+  if (observedId === expectedId) return "MATCH";
+  try {
+    const observed = new URL(String(observedUrl || ""));
+    if (observed.origin.toLowerCase() === "https://accounts.google.com") return "AUTH_REQUIRED";
+    if (observed.origin.toLowerCase() === "https://gemini.google.com" && /^\/app\/?$/i.test(observed.pathname)) return "RETRY";
+  } catch {
+    // The identity check below remains fail-closed for malformed URLs.
+  }
+  return "MISMATCH";
+}
+
 function conversationUrl(value) {
   if (typeof value !== "string") return null;
   return extractGeminiConversationId(value) ? value : null;
+}
+
+function isBareGeminiAppUrl(value) {
+  if (typeof value !== "string") return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.origin.toLowerCase() === "https://gemini.google.com" && /^\/app\/?$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
 }
 
 function normalizeConversationBinding(value, runId) {
@@ -65,6 +90,18 @@ function markConversationStep(existing, runId, stage, commandId, at = new Date()
   return { ...current, geminiConversationOwnerRunId: runId, lastGeminiStage: stage || current.lastGeminiStage, lastGeminiCommandId: commandId || current.lastGeminiCommandId, updatedAt: at };
 }
 
+function markConversationStale(existing, runId, stage, at = new Date().toISOString()) {
+  const current = normalizeConversationBinding(existing, runId);
+  if (!current.geminiConversationId || !current.geminiConversationUrl) throw new Error("GEMINI_CONVERSATION_STALE_BINDING_MISSING");
+  return {
+    ...current,
+    geminiConversationOwnerRunId: runId,
+    geminiConversationState: "DELETED",
+    geminiConversationDeletedAt: at,
+    lastGeminiStage: stage || current.lastGeminiStage,
+  };
+}
+
 function assertConversationReady(binding, runId, currentUrl) {
   const normalized = normalizeConversationBinding(binding, runId);
   if (normalized.geminiConversationState !== "ACTIVE" || !normalized.geminiConversationId || !normalized.geminiConversationUrl) throw new Error("GEMINI_CONVERSATION_NOT_ACTIVE");
@@ -73,4 +110,4 @@ function assertConversationReady(binding, runId, currentUrl) {
   return normalized;
 }
 
-module.exports = { CONVERSATION_STATES, extractGeminiConversationId, conversationIdFromUrl, conversationUrl, normalizeConversationBinding, bindConversationFromUrl, markConversationStep, assertConversationReady };
+module.exports = { CONVERSATION_STATES, extractGeminiConversationId, conversationIdFromUrl, conversationNavigationDisposition, conversationUrl, isBareGeminiAppUrl, normalizeConversationBinding, bindConversationFromUrl, markConversationStep, markConversationStale, assertConversationReady };

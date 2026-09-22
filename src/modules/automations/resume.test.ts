@@ -27,6 +27,7 @@ const baseRun = (overrides: Partial<ResumableRunInput> = {}): ResumableRunInput 
 });
 
 const stage1CompletedSteps = baseRun().steps!.map((step) => step.key === "modeling-idea" ? { ...step, status: "completed" } : { ...step, status: "pending" });
+const stage2CompletedSteps = baseRun().steps!.map((step) => step.key === "modeling-idea" || step.key === "content-project" ? { ...step, status: "completed" } : { ...step, status: "pending" });
 
 describe("automatic run checkpoint resume", () => {
   it("creates a new run decision when no resumable run exists", () => {
@@ -51,6 +52,22 @@ describe("automatic run checkpoint resume", () => {
   it("prepares Stage 1 as completed and Stage 2 as the only running target", () => {
     const steps = prepareResumeSteps(baseRun().steps!);
     expect(steps.map((step) => step.status)).toEqual(["completed", "running", "pending", "pending", "pending"]);
+  });
+
+  it("resumes a paused Stage 2 checkpoint at Stage 3 without recreating the project", () => {
+    const run = baseRun({
+      status: "PAUSED",
+      lastCompletedStage: 2,
+      failedStage: null,
+      resumeTarget: null,
+      projectId: "project-1",
+      failureFingerprint: null,
+      checkpoint: { version: 1, runId: "run-1", lastCompletedStage: 2, failedStage: null, resumeTarget: null, modelingIdeaId: "idea-1", sourceVideoId: "video-1", channelId: "channel-1", contentProjectId: "project-1", failureFingerprint: null },
+      steps: stage2CompletedSteps,
+    });
+    const decision = resolveResumableRun([run], { sourceVideoId: "video-1", channelId: "channel-1" });
+    expect(decision).toMatchObject({ status: "RESUME", failedStage: 3, checkpoint: { lastCompletedStage: 2, resumeTarget: "IMAGES", contentProjectId: "project-1" } });
+    expect(prepareResumeSteps(run.steps!).map((step) => step.status)).toEqual(["completed", "completed", "running", "pending", "pending"]);
   });
 
   it("guards multiple failed candidates as NEEDS_REVIEW", () => {

@@ -231,6 +231,7 @@ class EdgeWebContents extends EventEmitter {
     this.loading = true;
     await this.debugger.sendCommand("Page.navigate", { url });
     await this.waitForLoad(60_000);
+    return this.currentUrl;
   }
   async reload() { this.loading = true; await this.debugger.sendCommand("Page.reload", { ignoreCache: false }); await this.waitForLoad(60_000); }
   async waitForLoad(timeoutMs) {
@@ -259,11 +260,19 @@ class EdgeWebContents extends EventEmitter {
 class EdgeGeminiWindow {
   constructor(runtime, connection, target) {
     this.runtime = runtime;
+    this.closed = false;
+    this.replaceConnection(connection, target, false);
+  }
+  replaceConnection(connection, target, closePrevious = true) {
+    const previous = this.connection;
     this.connection = connection;
     this.target = target;
     this.webContents = new EdgeWebContents(connection, target);
     this.closed = false;
-    connection.on("detach", () => { this.closed = true; });
+    connection.on("detach", () => {
+      if (this.connection === connection) this.closed = true;
+    });
+    if (closePrevious && previous && previous !== connection) previous.detach();
   }
   isDestroyed() { return this.closed || this.webContents.isDestroyed(); }
   isVisible() { return !this.isDestroyed(); }
@@ -358,6 +367,18 @@ class EdgeGeminiRuntime {
   }
 
   async waitForGeminiTarget(port, timeoutMs) { return this.waitForTarget(port, isGeminiUrl, timeoutMs); }
+
+  async reacquireManagedPage(window, matcher = isGeminiUrl, timeoutMs = 10_000) {
+    if (!window || window.isDestroyed()) throw new Error("EDGE_GEMINI_WINDOW_UNAVAILABLE");
+    const target = await this.waitForTarget(this.port, matcher, timeoutMs);
+    if (!target?.webSocketDebuggerUrl) throw new Error("GEMINI_TARGET_NOT_FOUND_IN_EDGE");
+    const connection = new EdgeCdpConnection(target.webSocketDebuggerUrl, target);
+    await connection.ready();
+    await connection.sendCommand("Page.enable");
+    await connection.sendCommand("Runtime.enable");
+    window.replaceConnection(connection, target);
+    return window;
+  }
 
   async closeManagedProcess() {
     const pid = this.process?.pid || readRuntimeMarker(this.profileDirectory)?.pid;

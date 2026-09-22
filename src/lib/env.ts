@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { applicationDataDirectory } from "./app-data";
+import { getAppPaths } from "./paths";
 import { z } from "zod";
 
 type DesktopRuntimeConfig = { credentialEncryptionKey?: string; authSecret?: string };
@@ -35,6 +36,9 @@ const envSchema = z.object({
   CREDENTIAL_ENCRYPTION_KEY: z.string().regex(/^[a-fA-F0-9]{64}$/, "CREDENTIAL_ENCRYPTION_KEY phải là 64 ký tự hex."),
   AI_PROVIDER: z.string().default("unconfigured"),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  DESKTOP_MODE: z.enum(["0", "1"]).default("0"),
+  DESKTOP_APP_URL: z.string().url().optional(),
+  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
   META_APP_ID: z.string().optional(),
   META_APP_SECRET: z.string().optional(),
   META_GRAPH_VERSION: z.string().default("v24.0"),
@@ -64,6 +68,9 @@ export function getEnv() {
     CREDENTIAL_ENCRYPTION_KEY: resolveDesktopCredentialEncryptionKey(),
     AI_PROVIDER: process.env.AI_PROVIDER,
     NODE_ENV: process.env.NODE_ENV,
+    DESKTOP_MODE: process.env.DESKTOP_MODE,
+    DESKTOP_APP_URL: process.env.DESKTOP_APP_URL,
+    LOG_LEVEL: process.env.LOG_LEVEL,
     META_APP_ID: process.env.META_APP_ID,
     META_APP_SECRET: process.env.META_APP_SECRET,
     META_GRAPH_VERSION: process.env.META_GRAPH_VERSION,
@@ -85,4 +92,33 @@ export function getEnv() {
     GOOGLE_IMAGE_API_ENABLED: process.env.GOOGLE_IMAGE_API_ENABLED,
     VEO_API_ENABLED: process.env.VEO_API_ENABLED,
   });
+}
+
+export type RuntimeMode = "web" | "desktop";
+
+export function getRuntimeMode(environment = process.env): RuntimeMode {
+  return environment.DESKTOP_MODE === "1" ? "desktop" : "web";
+}
+
+export function getRuntimeConfig() {
+  const config = getEnv();
+  return {
+    ...config,
+    runtimeMode: getRuntimeMode(),
+    featureFlags: {
+      codexOrchestrator: config.CODEX_ORCHESTRATOR_ENABLED,
+      autoRecovery: config.CODEX_AUTO_RECOVERY_ENABLED,
+      postRunReview: config.CODEX_POST_RUN_REVIEW_ENABLED,
+      externalResearch: config.CODEX_EXTERNAL_RESEARCH_ENABLED,
+      googleApiFirst: config.GOOGLE_API_FIRST_ENABLED,
+      googleBrowserFallback: config.GOOGLE_BROWSER_FALLBACK_ENABLED,
+      geminiApi: config.GEMINI_API_ENABLED,
+      googleImageApi: config.GOOGLE_IMAGE_API_ENABLED,
+      veoApi: config.VEO_API_ENABLED,
+    },
+  } as const;
+}
+
+export function resolveDesktopDatabasePath() {
+  return getAppPaths(applicationDataDirectory(process.env.APPDATA || "")).database;
 }

@@ -196,10 +196,11 @@ function stageCandidate(run: ResumableRunInput, fields: AutomationPersistenceFie
   const canonicalRequested: CanonicalStageState = { status: "OK", lastCompletedStage: requested.lastCompletedStage ?? 0, failedStage: requested.failedStage && requested.failedStage > 0 ? requested.failedStage : null, resumeTarget: requested.resumeTarget, runningStage: null };
   if (derived.status === "NEEDS_REVIEW") return explicitStage || Array.isArray(run.steps) ? derived : canonicalRequested;
   if (!explicitStage) {
-    if (derived.runningStage === 2 && canonicalRequested.lastCompletedStage === 1 && canonicalRequested.failedStage === 2 && canonicalRequested.resumeTarget === "CONTENT_PROJECT_CREATION") return { ...canonicalRequested, runningStage: 2 };
+    if (derived.runningStage !== null && canonicalRequested.lastCompletedStage === derived.runningStage - 1 && canonicalRequested.failedStage === derived.runningStage && canonicalRequested.resumeTarget === resumeTargetForStage(derived.runningStage)) return { ...canonicalRequested, runningStage: derived.runningStage };
+    if (derived.runningStage === 2 && canonicalRequested.lastCompletedStage === 1 && canonicalRequested.failedStage === null && canonicalRequested.resumeTarget === null) return { ...canonicalRequested, runningStage: 2 };
     return derived;
   }
-  const resumeInProgress = derived.runningStage === 2 && canonicalRequested.lastCompletedStage === 1 && canonicalRequested.failedStage === 2 && canonicalRequested.resumeTarget === "CONTENT_PROJECT_CREATION";
+  const resumeInProgress = derived.runningStage !== null && canonicalRequested.lastCompletedStage === derived.runningStage - 1 && canonicalRequested.failedStage === derived.runningStage && canonicalRequested.resumeTarget === resumeTargetForStage(derived.runningStage);
   const matchesDerived = canonicalRequested.lastCompletedStage === derived.lastCompletedStage && canonicalRequested.failedStage === derived.failedStage && canonicalRequested.resumeTarget === derived.resumeTarget;
   if (!matchesDerived && !resumeInProgress) return { status: "NEEDS_REVIEW" as const, reason: "RESUME_STATE_INCONSISTENT" };
   return { ...canonicalRequested, runningStage: derived.runningStage };
@@ -307,29 +308,33 @@ export function buildAuthoritativePersistencePatch(input: { existing: ResumableR
 function checkpointForRun(run: ResumableRunInput, expected: { channelId: string; modelingIdeaId?: string }): AutomationCheckpoint | null {
   const raw = asRecord(run.checkpoint);
   const derived = deriveStageStateFromSteps(run.steps);
-  if (derived.status !== "OK" || derived.lastCompletedStage !== 1 || derived.failedStage !== 2) return null;
+  if (derived.status !== "OK") return null;
+  const resumeStage = derived.failedStage ?? (derived.lastCompletedStage < 5 ? (derived.lastCompletedStage + 1) as ResumeStage : null);
+  if (!resumeStage) return null;
   const modelingIdea = uniqueString([run.modelingIdeaId, run.ideaId, raw?.modelingIdeaId]);
   const sourceVideoId = uniqueString([run.sourceVideoId, raw?.sourceVideoId]);
   const channelId = uniqueString([run.channelId, raw?.channelId, expected.channelId]);
   if (modelingIdea.conflict || sourceVideoId.conflict || channelId.conflict || !modelingIdea.value || !sourceVideoId.value || !channelId.value) return null;
   if (expected.modelingIdeaId && modelingIdea.value !== expected.modelingIdeaId) return null;
   if (sourceVideoId.value !== String(run.sourceVideoId).trim() || channelId.value !== expected.channelId) return null;
-  if (raw?.resumeTarget !== undefined && raw.resumeTarget !== null && normalizeResumeTarget(raw.resumeTarget) !== "CONTENT_PROJECT_CREATION") return null;
+  if (raw?.resumeTarget !== undefined && raw.resumeTarget !== null && normalizeResumeTarget(raw.resumeTarget) !== resumeTargetForStage(resumeStage)) return null;
   const incidentHistory = run.incidentHistory !== undefined ? run.incidentHistory : raw?.incidentHistory ?? [];
   if (!Array.isArray(incidentHistory)) return null;
+  const contentProjectId = run.projectId ?? (typeof raw?.contentProjectId === "string" ? raw.contentProjectId : null);
+  if (resumeStage >= 3 && !contentProjectId) return null;
   return {
     ...raw,
     version: 1,
     runId: run.id,
-    lastCompletedStage: 1,
-    failedStage: 2,
-    resumeTarget: "CONTENT_PROJECT_CREATION",
+    lastCompletedStage: derived.lastCompletedStage,
+    failedStage: derived.failedStage,
+    resumeTarget: resumeTargetForStage(resumeStage),
     modelingIdeaId: modelingIdea.value,
     sourceVideoId: sourceVideoId.value,
     channelId: channelId.value,
     attemptCount: validAttemptCount(run.attemptCount) ?? validAttemptCount(raw?.attemptCount) ?? 0,
     incidentHistory,
-    contentProjectId: run.projectId ?? (typeof raw?.contentProjectId === "string" ? raw.contentProjectId : null),
+    contentProjectId,
     sourceModelingSpecVersion: run.sourceModelingSpecVersion ?? (typeof raw?.sourceModelingSpecVersion === "string" ? raw.sourceModelingSpecVersion : null),
     failureFingerprint: run.failureFingerprint ?? (typeof raw?.failureFingerprint === "string" ? raw.failureFingerprint : null),
   };
@@ -360,7 +365,9 @@ export function resolveResumableRun(runs: ResumableRunInput[], expected: { sourc
   const modelingIdea = run.modelingIdea;
   if (!checkpoint) return { status: "NEEDS_REVIEW", reason: "CHECKPOINT_AMBIGUOUS_OR_CONTEXT_MISMATCH", runId: run.id };
   if (!modelingIdea || String((modelingIdea as { id?: unknown }).id ?? "") !== checkpoint.modelingIdeaId) return { status: "NEEDS_REVIEW", reason: "MODELING_IDEA_MISSING_OR_MISMATCH", runId: run.id };
-  return { status: "RESUME", run, checkpoint, failedStage: 2, modelingIdeaId: checkpoint.modelingIdeaId, modelingIdea };
+  const resumeStage = checkpoint.failedStage ?? (checkpoint.lastCompletedStage < 5 ? (checkpoint.lastCompletedStage + 1) as ResumeStage : null);
+  if (!resumeStage) return { status: "NEEDS_REVIEW", reason: "CHECKPOINT_COMPLETE_WITHOUT_TARGET", runId: run.id };
+  return { status: "RESUME", run, checkpoint, failedStage: resumeStage, modelingIdeaId: checkpoint.modelingIdeaId, modelingIdea };
 }
 
 export function assertNoWrongStageRestart(state: Pick<AuthoritativeResumeState, "lastCompletedStage" | "failedStage"> & { resumeTarget?: ResumeTarget | null }, targetStage: number) {
@@ -369,12 +376,14 @@ export function assertNoWrongStageRestart(state: Pick<AuthoritativeResumeState, 
 
 export function prepareResumeSteps(steps: Array<{ key: string; label: string; status: string; detail?: string; error?: string; startedAt?: string; completedAt?: string }>): Array<{ key: string; label: string; status: "pending" | "running" | "completed" | "failed"; detail?: string; error?: string; startedAt?: string; completedAt?: string }> {
   const derived = deriveStageStateFromSteps(steps);
-  if (derived.status !== "OK" || derived.lastCompletedStage !== 1 || derived.failedStage !== 2) throw new Error("RESUME_STATE_INCONSISTENT");
+  if (derived.status !== "OK") throw new Error("RESUME_STATE_INCONSISTENT");
+  const targetStage = derived.failedStage ?? (derived.lastCompletedStage < 5 ? (derived.lastCompletedStage + 1) as ResumeStage : null);
+  if (!targetStage) throw new Error("RESUME_STATE_INCONSISTENT");
   return stageKeys.map((key, index) => {
     const source = steps.find((step) => step.key === key);
     const preserved = source ? { ...source } : { key, label: key, status: "pending" };
-    if (index === 0) return { ...preserved, status: "completed" as const, error: undefined };
-    if (index === 1) return { ...preserved, status: "running" as const, error: undefined, startedAt: new Date().toISOString(), completedAt: undefined };
+    if (index < targetStage - 1) return { ...preserved, status: "completed" as const, error: undefined };
+    if (index === targetStage - 1) return { ...preserved, status: "running" as const, error: undefined, startedAt: new Date().toISOString(), completedAt: undefined };
     return { ...preserved, status: "pending" as const, error: undefined, startedAt: undefined, completedAt: undefined };
   });
 }

@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const { isValidFileChooserEvent, uploadWithEdgeFileChooser } = require("./gemini-edge-file-chooser.cjs") as {
@@ -6,7 +7,7 @@ const { isValidFileChooserEvent, uploadWithEdgeFileChooser } = require("./gemini
   uploadWithEdgeFileChooser: (input: Record<string, unknown>) => Promise<Record<string, unknown>>;
 };
 
-const fixture = "C:\\Users\\Admin\\Desktop\\ytuongnoidung\\scripts\\production-validation\\fixtures\\gemini-neutral-reference.svg";
+const fixture = path.resolve(__dirname, "../scripts/production-validation/fixtures/gemini-neutral-reference.svg");
 
 class FakeCdp extends EventEmitter {
   commands: Array<{ method: string; params: Record<string, unknown> }> = [];

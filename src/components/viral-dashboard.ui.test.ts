@@ -50,7 +50,7 @@ describe("Video Modeling automatic-only UI", () => {
     expect(source).toContain("await generateModelingIdea(runId)");
     expect(source).toContain("await createContentProject(currentIdea, true, runId)");
     expect(source).toContain("await generateAllProjectImages(project)");
-    expect(source).toContain("await generateAllProjectVideos(project, images)");
+    expect(source).toContain("await generateAllProjectVideos(project, images, undefined, videos)");
     expect(source).toContain("await renderFinalProjectVideo(project, videos)");
   });
 
@@ -77,5 +77,40 @@ describe("Video Modeling automatic-only UI", () => {
     expect(source).toContain("if (resumedFromCheckpoint && !activeStep) return;");
     expect(source).toContain("resumeSelection.runId");
     expect(source).toContain("validationStopAfterStage");
+  });
+
+  it("CASE 13: clears historical run errors after Stage 2 succeeds", () => {
+    expect(source.match(/error: null, lastCompletedStage: 2/g)?.length).toBe(2);
+    expect(source.match(/failureFingerprint: null, attemptCount: runAttemptCount/g)?.length).toBe(3);
+    expect(source.match(/incidentHistory, failureFingerprint: null, contentProjectId: project\.id/g)?.length).toBe(3);
+  });
+
+  it("CASE 14: resumes Stage 4 without re-running completed images and hydrates persisted media", () => {
+    expect(source).toContain("const targetStage = resumedFromCheckpoint ? (resumeStage ?? 2) : 1;");
+    expect(source).toContain("if (targetStage <= 3)");
+    expect(source).toContain("loadPersistedProjectImages(project.id, project.scenes)");
+    expect(source).toContain("if (targetStage <= 4)");
+    expect(source).toContain("loadPersistedProjectVideos(project.id, project.scenes)");
+  });
+
+  it("CASE 15: preserves structured Flow failures instead of converting them to null", () => {
+    const videoFunctionStart = source.indexOf("async function generateAllProjectVideos");
+    const videoFunctionEnd = source.indexOf("async function loadPersistedProjectImages", videoFunctionStart);
+    const videoFunction = source.slice(videoFunctionStart, videoFunctionEnd);
+    expect(videoFunction).toContain("throw caught;");
+    expect(videoFunction).not.toContain("setContentProjectError(caught instanceof Error ? caught.message : \"Không thể tạo video bằng Flow Veo 3.\");\n      return null;");
+  });
+
+  it("CASE 16: shows a non-retryable provider block with manual Flow and Resume actions", () => {
+    expect(source).toContain("FLOW_PROVIDER_UNUSUAL_ACTIVITY");
+    expect(source).toContain("Google Flow tạm chặn tạo video vì phát hiện hoạt động bất thường.");
+    expect(source).toContain(">Mở Flow</button>");
+    expect(source).toContain(">Resume</button>");
+  });
+
+  it("CASE 17: loads persisted videos and excludes completed scenes before Stage 4 generation", () => {
+    expect(source).toContain("const persistedVideos = await loadPersistedProjectVideos(project.id, project.scenes);");
+    expect(source).toContain("generateAllProjectVideos(project, images, undefined, videos)");
+    expect(source).toContain("!existingVideos[`scene-${scene.sceneNumber}`]");
   });
 });

@@ -98,7 +98,9 @@ export async function verifyPersistedPromptForScene(input: { promptId: string; p
 export async function verifyPersistedPromptByScene(input: { promptId: string; projectId: string; userId: string; sceneNumber?: number; promptType: PromptType; prompt: string; promptHash?: string }) {
   const project = await db.contentProject.findFirst({ where: { id: input.projectId, channel: { userId: input.userId } }, select: { id: true, scenes: { where: input.sceneNumber === undefined ? undefined : { sceneNumber: input.sceneNumber }, select: { id: true }, take: 1 } } });
   if (!project) throw new AppError("PROJECT_NOT_FOUND", "Không tìm thấy Content Project.", 404);
-  const sceneId = project.scenes[0]?.id ?? null;
+  // A background prompt intentionally has no scene number and its trace has
+  // sceneId=null. Do not select the first scene as a surrogate identity.
+  const sceneId = input.sceneNumber === undefined ? null : project.scenes[0]?.id ?? null;
   if (input.sceneNumber !== undefined && !sceneId) throw new AppError("SCENE_NOT_FOUND", "Không tìm thấy scene.", 404);
   return verifyPersistedPromptForScene({ promptId: input.promptId, projectId: input.projectId, sceneId, promptType: input.promptType, prompt: input.prompt, promptHash: input.promptHash });
 }

@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { GeminiCommandLifecycle, hashText, redactNetworkUrl, normalizeNetworkInitiator, normalizeDocumentNavigationRequest, extractGeminiJsonCandidate, isGeminiGenerationRequest, findAttributedGeminiGenerationRequest, shouldRetryGeminiSend, authorizeGeminiSendRetry, isGeminiTargetReady, deriveLatencyBuckets, summarizeRendererHeartbeat, isResponseComplete, describeResponseCompletion, canRunFormatRetry, isGenerationTerminal, assertParentTerminal, normalizeGeminiResponseSnapshot, buildGeminiBindingDiagnostic, buildGeminiResponseContentDiagnostic, extractFinalResponseContent } = require("./gemini-browser-lifecycle.cjs") as {
+const { GeminiCommandLifecycle, hashText, normalizePromptIdentity, promptIdentityHash, createGeminiConversationResetError, evaluateGeminiSubmission, redactNetworkUrl, normalizeNetworkInitiator, normalizeDocumentNavigationRequest, extractGeminiJsonCandidate, isGeminiGenerationRequest, findAttributedGeminiGenerationRequest, shouldRetryGeminiSend, authorizeGeminiSendRetry, isGeminiTargetReady, deriveLatencyBuckets, summarizeRendererHeartbeat, isResponseComplete, describeResponseCompletion, canRunFormatRetry, isGenerationTerminal, assertParentTerminal, normalizeGeminiResponseSnapshot, buildGeminiBindingDiagnostic, buildGeminiResponseContentDiagnostic, extractFinalResponseContent } = require("./gemini-browser-lifecycle.cjs") as {
   GeminiCommandLifecycle: typeof import("./gemini-browser-lifecycle.cjs").GeminiCommandLifecycle;
   hashText: typeof import("./gemini-browser-lifecycle.cjs").hashText;
+  normalizePromptIdentity: typeof import("./gemini-browser-lifecycle.cjs").normalizePromptIdentity;
+  promptIdentityHash: typeof import("./gemini-browser-lifecycle.cjs").promptIdentityHash;
+  createGeminiConversationResetError: typeof import("./gemini-browser-lifecycle.cjs").createGeminiConversationResetError;
+  evaluateGeminiSubmission: typeof import("./gemini-browser-lifecycle.cjs").evaluateGeminiSubmission;
   isResponseComplete: typeof import("./gemini-browser-lifecycle.cjs").isResponseComplete;
   canRunFormatRetry: typeof import("./gemini-browser-lifecycle.cjs").canRunFormatRetry;
   isGenerationTerminal: typeof import("./gemini-browser-lifecycle.cjs").isGenerationTerminal;
@@ -56,6 +60,82 @@ const candidate = (candidateId: string, parentTurnId: string, overrides: Record<
   stopButtonPresent: false,
   streamingIndicatorPresent: false,
   ...overrides,
+});
+
+const conversationUrl = "https://gemini.google.com/app/conversation-1";
+const userTurn = (text: string, turnId: string) => ({ turnId, candidateId: turnId, normalizedTextHash: promptIdentityHash(text), textHash: hashText(text), textLength: text.length, visible: true, attached: true });
+const baselinePrompt = "old prompt";
+const submissionPrompt = "prompt hiện tại";
+const baselineUserTurns = [userTurn(baselinePrompt, "user-old")];
+const strictSubmissionSnapshot = (prompt = submissionPrompt) => ({
+  conversationUrl,
+  userTurnCount: 2,
+  assistantTurnCount: 1,
+  userTurns: [...baselineUserTurns, userTurn(prompt, "user-new")],
+  composerReady: true,
+  userMessagePresent: true,
+  stopButtonPresent: false,
+  streamingIndicatorPresent: false,
+  newResponseCount: 0,
+});
+
+describe("ISSUE-002 strict Gemini submission contract", () => {
+  const expected = { expectedConversationUrl: conversationUrl, baselineUserTurnCount: 1, baselineAssistantTurnCount: 1, baselineUserTurnHashes: baselineUserTurns.map((turn) => turn.normalizedTextHash), promptIdentityHash: promptIdentityHash(submissionPrompt) };
+
+  it("A/E rejects composer clear and generic /app without a new user turn", () => {
+    expect(evaluateGeminiSubmission({ conversationUrl: "https://gemini.google.com/app", userTurnCount: 1, assistantTurnCount: 1, userTurns: baselineUserTurns, composerReady: true }, expected)).toMatchObject({ conversationOwnershipConfirmed: false, newUserTurnConfirmed: false, submissionConfirmed: false, userTurnDelta: 0 });
+  });
+
+  it("B/D confirms only one exact new user turn in the intended conversation", () => {
+    expect(evaluateGeminiSubmission(strictSubmissionSnapshot(), expected)).toMatchObject({ conversationOwnershipConfirmed: true, newUserTurnConfirmed: true, submissionConfirmed: true, userTurnDelta: 1, exactPromptDelta: 1 });
+  });
+
+  it("allows a new conversation to remain on /app until Gemini assigns its conversation id", () => {
+    expect(evaluateGeminiSubmission({ ...strictSubmissionSnapshot(), conversationUrl: "https://gemini.google.com/app" }, { ...expected, allowNewConversation: true, expectedConversationUrl: "https://gemini.google.com/app", expectedConversationId: null })).toMatchObject({ conversationOwnershipConfirmed: true, newUserTurnConfirmed: true, submissionConfirmed: true });
+  });
+
+  it("F does not count an old matching prompt as the current send", () => {
+    expect(evaluateGeminiSubmission({ ...strictSubmissionSnapshot(), userTurnCount: 1, userTurns: [userTurn(submissionPrompt, "user-old-matching")] }, { ...expected, baselineUserTurnCount: 1, baselineUserTurnHashes: [promptIdentityHash(submissionPrompt)] })).toMatchObject({ newUserTurnConfirmed: false, submissionConfirmed: false, userTurnDelta: 0, exactPromptDelta: 0 });
+  });
+
+  it("G rejects a new user turn whose normalized text is not the current prompt", () => {
+    expect(evaluateGeminiSubmission(strictSubmissionSnapshot("different prompt"), expected)).toMatchObject({ conversationOwnershipConfirmed: true, newUserTurnConfirmed: false, submissionConfirmed: false, userTurnDelta: 1, exactPromptDelta: 0 });
+  });
+
+  it("normalizes prompt identity deterministically before hashing", () => {
+    expect(normalizePromptIdentity("  prompt  \n hiện tại ")).toBe("prompt hiện tại");
+    expect(promptIdentityHash(" prompt  hiện tại ")).toBe(promptIdentityHash("prompt hiện tại"));
+  });
+});
+
+describe("ISSUE-003 structured reset failure", () => {
+  it("preserves reset code and non-secret evidence after recovery is exhausted", () => {
+    const error = createGeminiConversationResetError({
+      commandId: "command-1",
+      expectedConversationUrl: conversationUrl,
+      actualUrl: "https://gemini.google.com/app",
+      recoveryAttempt: 1,
+      recoveryBudget: 1,
+      userTurnDelta: 0,
+      assistantTurnDelta: 0,
+      generationRequestObserved: true,
+      composerCleared: true,
+      authenticatedState: null,
+      cookieRotationObserved: true,
+    });
+    expect(error.code).toBe("GEMINI_CONVERSATION_RESET_DURING_SEND");
+    expect(error.context).toMatchObject({ recoveryAttempt: 1, recoveryBudget: 1, userTurnDelta: 0, assistantTurnDelta: 0, generationRequestObserved: true, composerCleared: true, cookieRotationObserved: true });
+    expect(error.message).toContain("GEMINI_CONVERSATION_RESET_DURING_SEND");
+    expect(error.message).not.toContain("password");
+  });
+
+  it("persists the structured primary error on the terminal command", () => {
+    const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: "prompt" });
+    const error = createGeminiConversationResetError({ expectedConversationUrl: conversationUrl, actualUrl: "https://gemini.google.com/app", recoveryAttempt: 1, recoveryBudget: 1 });
+    command.markFailed(error);
+    expect(command.snapshot()).toMatchObject({ state: "FAILED", primaryErrorCode: "GEMINI_CONVERSATION_RESET_DURING_SEND", primaryErrorContext: { recoveryAttempt: 1, recoveryBudget: 1 } });
+    expect(command.snapshot().error).toContain("GEMINI_CONVERSATION_RESET_DURING_SEND");
+  });
 });
 
 const contentCandidate = (candidateId: string, text: string, overrides: Record<string, unknown> = {}) => ({
@@ -452,12 +532,13 @@ describe("Gemini browser command lifecycle", () => {
   });
 
   it("LATENCY CASE 1/2/3 records submission confirmation only from positive UI evidence", () => {
-    const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: "á" });
+    const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: submissionPrompt });
+    command.setSubmissionBaseline({ expectedConversationUrl: conversationUrl, expectedConversationId: "conversation-1", userTurnCount: 1, assistantTurnCount: 1, userTurns: baselineUserTurns });
     command.markSubmitAttempt("2026-09-16T10:00:00.000Z");
     command.observeSubmission({ composerReady: false, userMessagePresent: false, stopButtonPresent: false, streamingIndicatorPresent: false, newResponseCount: 0 }, "2026-09-16T10:00:01.000Z");
     expect(command.snapshot()).toMatchObject({ state: "QUEUED", submitAttemptAt: "2026-09-16T10:00:00.000Z", submissionConfirmed: false, composerClearedAt: null, userMessageRenderedAt: null });
-    command.observeSubmission({ composerReady: true, userMessagePresent: true, stopButtonPresent: false, streamingIndicatorPresent: false, newResponseCount: 0 }, "2026-09-16T10:00:02.000Z");
-    expect(command.snapshot()).toMatchObject({ submissionConfirmed: true, submissionConfirmedAt: "2026-09-16T10:00:02.000Z", composerClearedAt: "2026-09-16T10:00:02.000Z", userMessageRenderedAt: "2026-09-16T10:00:02.000Z" });
+    command.observeSubmission(strictSubmissionSnapshot(), "2026-09-16T10:00:02.000Z");
+    expect(command.snapshot()).toMatchObject({ submissionConfirmed: true, submissionConfirmationSource: "DOM_USER_TURN_EXACT", submissionConfirmedAt: "2026-09-16T10:00:02.000Z", composerClearedAt: "2026-09-16T10:00:02.000Z", userMessageRenderedAt: "2026-09-16T10:00:02.000Z", conversationOwnershipConfirmed: true, newUserTurnConfirmed: true, userTurnDelta: 1, exactPromptDelta: 1 });
   });
 
   it("LATENCY CASE 4 records send-retry reason and snapshot without changing state", () => {
@@ -509,22 +590,25 @@ describe("Gemini browser command lifecycle", () => {
   });
 
   it("INCIDENT 1F CASE 1/3 confirms submission by attributed StreamGenerate and forbids resend", () => {
-    const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: "prompt" });
+    const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: submissionPrompt });
+    command.setSubmissionBaseline({ expectedConversationUrl: conversationUrl, expectedConversationId: "conversation-1", userTurnCount: 1, assistantTurnCount: 1, userTurns: baselineUserTurns });
     command.markSubmitAttempt("2026-09-16T10:00:00.000Z");
     const request = { commandId: command.snapshot().commandId, sessionId: command.snapshot().sessionId, method: "POST", url: "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate", startedAt: "2026-09-16T10:00:01.000Z" };
     expect(isGeminiGenerationRequest(request)).toBe(true);
     expect(findAttributedGeminiGenerationRequest([request], command.snapshot())).toBe(request);
     command.confirmSubmissionByNetwork(request);
-    expect(command.snapshot()).toMatchObject({ submissionConfirmed: true, submissionConfirmedAt: request.startedAt, submissionConfirmationSource: "NETWORK_GENERATION_REQUEST", submissionConfirmationSources: ["NETWORK_GENERATION_REQUEST"] });
+    expect(command.snapshot()).toMatchObject({ submissionConfirmed: false, generationStarted: true, generationStartSource: "NETWORK_GENERATION_REQUEST", submissionConfirmationSources: ["NETWORK_GENERATION_REQUEST"] });
+    command.observeSubmission(strictSubmissionSnapshot(), "2026-09-16T10:00:01.100Z");
+    expect(command.snapshot()).toMatchObject({ submissionConfirmed: true, submissionConfirmationSource: "DOM_USER_TURN_EXACT", submissionConfirmationSources: ["NETWORK_GENERATION_REQUEST", "DOM_USER_TURN_EXACT"] });
     expect(shouldRetryGeminiSend({ composerStillContainsPrompt: true, submissionConfirmed: true, generationRequestStarted: true, pageReady: true })).toBe(false);
   });
 
-  it("INCIDENT 1F CASE 4/5 preserves DOM confirmation and the bounded pre-confirmation retry", () => {
+  it("INCIDENT 1F CASE 4/5 rejects composer-only confirmation and keeps retry predicate pure", () => {
     expect(shouldRetryGeminiSend({ composerStillContainsPrompt: true, submissionConfirmed: false, generationRequestStarted: false, pageReady: true, retryBudgetAvailable: true })).toBe(true);
     expect(shouldRetryGeminiSend({ composerStillContainsPrompt: true, submissionConfirmed: false, generationRequestStarted: false, pageReady: false, retryBudgetAvailable: true })).toBe(false);
     const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: "prompt" });
     command.observeSubmission({ composerReady: true, userMessagePresent: false, stopButtonPresent: false, streamingIndicatorPresent: false, newResponseCount: 0 }, "2026-09-16T10:00:00.000Z");
-    expect(command.snapshot()).toMatchObject({ submissionConfirmed: true, submissionConfirmationSource: "DOM_COMPOSER_CLEARED" });
+    expect(command.snapshot()).toMatchObject({ submissionConfirmed: false, submissionConfirmationSource: null, submissionState: "UNCONFIRMED" });
   });
 
   it("INCIDENT 1F CASE 6/7 does not attribute another command or competing session request", () => {
@@ -536,23 +620,27 @@ describe("Gemini browser command lifecycle", () => {
     expect(findAttributedGeminiGenerationRequest([{ ...request, commandId: command.snapshot().commandId, sessionId: command.snapshot().sessionId, startedAt: "2026-09-16T09:59:59.000Z" }], command.snapshot())).toBeNull();
   });
 
-  it("INCIDENT 1H CASE 1: cancels pending retry when StreamGenerate arrives 32ms later", () => {
-    const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: "prompt" });
+  it("INCIDENT 1H CASE 1: StreamGenerate cannot confirm submission before the exact user turn", () => {
+    const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: submissionPrompt });
+    command.setSubmissionBaseline({ expectedConversationUrl: conversationUrl, expectedConversationId: "conversation-1", userTurnCount: 1, assistantTurnCount: 1, userTurns: baselineUserTurns });
     command.markSubmitAttempt("2026-09-16T10:00:00.000Z");
     command.markRetryEligible("2026-09-16T10:00:01.000Z");
     expect(command.snapshot()).toMatchObject({ retryConfirmationState: "RETRY_CONFIRMATION_PENDING", retryEligibleAt: "2026-09-16T10:00:01.000Z", sendRetryCount: 0, sendRetryAt: null });
     command.confirmSubmissionByNetwork({ commandId: command.snapshot().commandId, sessionId: command.snapshot().sessionId, method: "POST", url: "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate", startedAt: "2026-09-16T10:00:01.032Z" });
-    expect(command.snapshot()).toMatchObject({ submissionConfirmed: true, submissionConfirmationSource: "NETWORK_GENERATION_REQUEST", retryConfirmationState: "RETRY_CANCELLED", retryCancelledSource: "NETWORK_GENERATION_REQUEST", resendForbidden: true, sendRetryCount: 0, sendRetryAt: null, actualResendAt: null });
+    expect(command.snapshot()).toMatchObject({ submissionConfirmed: false, generationStarted: true, retryConfirmationState: "RETRY_CONFIRMATION_PENDING", resendForbidden: false, sendRetryCount: 0, sendRetryAt: null, actualResendAt: null });
+    command.observeSubmission(strictSubmissionSnapshot(), "2026-09-16T10:00:01.100Z");
+    expect(command.snapshot()).toMatchObject({ submissionConfirmed: true, submissionConfirmationSource: "DOM_USER_TURN_EXACT", retryConfirmationState: "RETRY_CANCELLED", retryCancelledSource: "DOM_USER_TURN_EXACT", resendForbidden: true });
   });
 
-  it("INCIDENT 1H CASE 2/3/4: cancels retry for network events anywhere in the grace window", () => {
+  it("INCIDENT 1H CASE 2/3/4: generation network evidence never replaces strict user-turn confirmation", () => {
     for (const offset of [1, 500, 1000]) {
-      const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: "prompt" });
+      const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: submissionPrompt });
+      command.setSubmissionBaseline({ expectedConversationUrl: conversationUrl, expectedConversationId: "conversation-1", userTurnCount: 1, assistantTurnCount: 1, userTurns: baselineUserTurns });
       command.markSubmitAttempt("2026-09-16T10:00:00.000Z");
       command.markRetryEligible("2026-09-16T10:00:01.000Z");
       command.confirmSubmissionByNetwork({ startedAt: new Date(Date.parse("2026-09-16T10:00:01.000Z") + offset).toISOString() });
       expect(command.snapshot().sendRetryCount).toBe(0);
-      expect(command.snapshot().retryConfirmationState).toBe("RETRY_CANCELLED");
+      expect(command.snapshot()).toMatchObject({ submissionConfirmed: false, generationStarted: true, retryConfirmationState: "RETRY_CONFIRMATION_PENDING" });
     }
   });
 
@@ -566,26 +654,24 @@ describe("Gemini browser command lifecycle", () => {
     expect(command.snapshot()).toMatchObject({ sendRetryCount: 1, sendRetryAt: "2026-09-16T10:00:03.000Z", actualResendAt: "2026-09-16T10:00:03.000Z", retryConfirmationState: "ACTUAL_RESEND" });
   });
 
-  it("INCIDENT 1H CASE 6/7/8: DOM confirmation cancels pending retry and forbids resend", () => {
-    for (const snapshot of [
-      { composerReady: true, userMessagePresent: false, stopButtonPresent: false, streamingIndicatorPresent: false, newResponseCount: 0 },
-      { composerReady: false, userMessagePresent: true, stopButtonPresent: false, streamingIndicatorPresent: false, newResponseCount: 0 },
-      { composerReady: false, userMessagePresent: false, stopButtonPresent: true, streamingIndicatorPresent: true, newResponseCount: 0 },
-    ]) {
-      const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: "prompt" });
-      command.markRetryEligible("2026-09-16T10:00:01.000Z");
-      command.observeSubmission(snapshot, "2026-09-16T10:00:01.100Z");
-      expect(command.snapshot()).toMatchObject({ submissionConfirmed: true, retryConfirmationState: "RETRY_CANCELLED", resendForbidden: true, sendRetryCount: 0 });
-    }
+  it("INCIDENT 1H CASE 6/7/8: only exact current user turn cancels pending retry", () => {
+    const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: submissionPrompt });
+    command.setSubmissionBaseline({ expectedConversationUrl: conversationUrl, expectedConversationId: "conversation-1", userTurnCount: 1, assistantTurnCount: 1, userTurns: baselineUserTurns });
+    command.markRetryEligible("2026-09-16T10:00:01.000Z");
+    command.observeSubmission({ composerReady: true, userMessagePresent: false, stopButtonPresent: true, streamingIndicatorPresent: true, newResponseCount: 0, conversationUrl, userTurnCount: 1, assistantTurnCount: 1, userTurns: baselineUserTurns }, "2026-09-16T10:00:01.100Z");
+    expect(command.snapshot()).toMatchObject({ submissionConfirmed: false, retryConfirmationState: "RETRY_CONFIRMATION_PENDING", resendForbidden: false, sendRetryCount: 0 });
+    command.observeSubmission(strictSubmissionSnapshot(), "2026-09-16T10:00:01.200Z");
+    expect(command.snapshot()).toMatchObject({ submissionConfirmed: true, retryConfirmationState: "RETRY_CANCELLED", resendForbidden: true, sendRetryCount: 0 });
   });
 
   it("INCIDENT 1H CASE 9/10/11: uncertain context never authorizes resend and preserves command identity", () => {
-    const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: "prompt", commandId: "command-1" });
+    const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: submissionPrompt, commandId: "command-1" });
+    command.setSubmissionBaseline({ expectedConversationUrl: conversationUrl, expectedConversationId: "conversation-1", userTurnCount: 1, assistantTurnCount: 1, userTurns: baselineUserTurns });
     command.markRetryEligible("2026-09-16T10:00:01.000Z");
     command.markSubmissionUncertain("REMOTE_CONTEXT_NOT_READY", "2026-09-16T10:00:01.100Z");
     expect(authorizeGeminiSendRetry({ retryEligible: true, confirmationGraceExpired: true, submissionConfirmed: false, generationRequestStarted: false, pageReady: false, commandStillCurrent: true })).toBe(false);
     command.confirmSubmissionByNetwork({ commandId: "command-1", sessionId: "session-1", startedAt: "2026-09-16T10:00:01.200Z" });
-    expect(command.snapshot()).toMatchObject({ commandId: "command-1", submissionConfirmed: true, submissionConfirmationSource: "NETWORK_GENERATION_REQUEST", sendRetryCount: 0, resendForbidden: true });
+    expect(command.snapshot()).toMatchObject({ commandId: "command-1", submissionConfirmed: false, generationStarted: true, sendRetryCount: 0, resendForbidden: false });
   });
 
   it("INCIDENT 1H CASE 14/15/16: final arbitration requires current command and duplicate guard", () => {
@@ -596,8 +682,10 @@ describe("Gemini browser command lifecycle", () => {
   });
 
   it("INCIDENT 1H invariant: confirmed submission cannot re-enter retry-pending", () => {
-    const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: "prompt" });
+    const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: submissionPrompt });
+    command.setSubmissionBaseline({ expectedConversationUrl: conversationUrl, expectedConversationId: "conversation-1", userTurnCount: 1, assistantTurnCount: 1, userTurns: baselineUserTurns });
     command.confirmSubmissionByNetwork({ startedAt: "2026-09-16T10:00:01.000Z" });
+    command.observeSubmission(strictSubmissionSnapshot(), "2026-09-16T10:00:01.500Z");
     command.markRetryEligible("2026-09-16T10:00:02.000Z");
     expect(command.snapshot()).toMatchObject({ submissionConfirmed: true, retryConfirmationState: "IDLE", retryEligibleAt: null, resendForbidden: false, sendRetryCount: 0 });
   });

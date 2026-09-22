@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbMock = vi.hoisted(() => ({
   $executeRawUnsafe: vi.fn(async () => undefined),
+  contentProject: { findFirst: vi.fn() },
   promptFidelityTrace: { findUnique: vi.fn(), update: vi.fn() },
   troubleshootingIncident: { findFirst: vi.fn() },
 }));
@@ -9,7 +10,7 @@ const dbMock = vi.hoisted(() => ({
 vi.mock("@/lib/db", () => ({ db: dbMock }));
 vi.mock("@/modules/troubleshooting/storage", () => ({ ensureTroubleshootingStorage: vi.fn(async () => undefined) }));
 
-import { hashPrompt, markPromptSent, verifyPersistedPromptForScene } from "./service";
+import { hashPrompt, markPromptSent, verifyPersistedPromptByScene, verifyPersistedPromptForScene } from "./service";
 
 describe("Prompt Fidelity runtime hash enforcement", () => {
   beforeEach(() => vi.clearAllMocks());
@@ -33,5 +34,11 @@ describe("Prompt Fidelity runtime hash enforcement", () => {
     const validatedPrompt = "validated prompt";
     dbMock.promptFidelityTrace.findUnique.mockResolvedValue({ id: "trace-1", projectId: "project-1", sceneId: "scene-1", promptType: "VIDEO", promptHash: hashPrompt(validatedPrompt), validatedPrompt });
     await expect(verifyPersistedPromptForScene({ promptId: "trace-1", projectId: "project-1", sceneId: "scene-1", promptType: "VIDEO", prompt: "validated prompT" })).rejects.toMatchObject({ code: "PROMPT_MUTATED_AFTER_VALIDATION" });
+  });
+  it("CASE 36 keeps a background trace bound to null sceneId", async () => {
+    const prompt = "validated background prompt";
+    dbMock.contentProject.findFirst.mockResolvedValue({ id: "project-1", scenes: [{ id: "scene-1" }] });
+    dbMock.promptFidelityTrace.findUnique.mockResolvedValue({ id: "trace-background", projectId: "project-1", sceneId: null, promptType: "IMAGE", promptHash: hashPrompt(prompt), validatedPrompt: prompt });
+    await expect(verifyPersistedPromptByScene({ promptId: "trace-background", projectId: "project-1", userId: "user-1", promptType: "IMAGE", prompt })).resolves.toMatchObject({ id: "trace-background" });
   });
 });

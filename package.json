@@ -1,21 +1,24 @@
 {
   "name": "ai-content-modeling",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "private": true,
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "node scripts/build-with-lock.cjs",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:build-contention": "vitest run scripts/build-lock.test.ts --reporter=dot",
     "test:watch": "vitest",
     "db:seed": "tsx prisma/seed.ts",
     "worker": "tsx src/workers/worker.ts",
     "scheduler": "tsx src/workers/scheduler.ts",
     "report-scheduler": "tsx src/workers/report-scheduler.ts",
     "production:validate:resume": "node scripts/production-validation/cdp-resume-validation.mjs",
+    "dev:local": "node scripts/recovery-desktop-runtime.mjs",
+    "recovery:desktop": "npm run dev:local",
     "nest:dev": "tsx src/nest/main.ts",
     "electron:dev": "concurrently -k \"npm run dev\" \"npm run nest:dev\" \"wait-on http://localhost:3000 && electron electron/main.cjs\"",
     "electron:prepare": "npm run build && node electron/prepare-desktop.mjs",
@@ -62,7 +65,7 @@
     "productName": "Modeling AI",
     "artifactName": "Modeling.AI.Setup.${version}.${ext}",
     "directories": {
-      "output": "release/1.0.4-production"
+      "output": "release/1.0.5-production"
     },
     "files": [
     "electron/main.cjs",
@@ -71,9 +74,10 @@
     "electron/edge-gemini-cdp.cjs",
     "electron/gemini-edge-file-chooser.cjs",
     "electron/gemini-browser-lifecycle.cjs",
-    "electron/gemini-conversation-lifecycle.cjs",
-    "electron/gemini-remote-script.cjs",
-    "electron/preload.cjs",
+      "electron/gemini-conversation-lifecycle.cjs",
+      "electron/gemini-remote-script.cjs",
+      "electron/gemini-error-transport.cjs",
+      "electron/preload.cjs",
       "electron/dist/**/*",
       "package.json"
     ],

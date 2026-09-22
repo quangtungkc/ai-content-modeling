@@ -33,7 +33,16 @@ export const STRICT_GEMINI_PROMPT_COMPILER_SYSTEM_INSTRUCTION = [
 
 const normalize = (value: string) => value.toLowerCase().replace(/[“”‘’]/g, "\"").replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\s+/g, " ").trim();
 const contains = (prompt: string, value: string) => normalize(prompt).includes(normalize(value));
-const positiveLines = (prompt: string) => prompt.split(/\r?\n/).filter((line) => !/\b(?:do not|don't|never|must not|forbidden|without|no readable|không|khong|cấm)\b/i.test(line)).join("\n");
+const authoritativePromptLine = (line: string) => /^\s*(?:PROMPT TYPE|SOURCE MODELING MODE|SOURCE VIDEO|TARGET SOURCE FIDELITY|MUST PRESERVE|ALLOWED TRANSFORMATIONS ONLY|DO NOT SILENTLY|SOURCE SCENE|CAMERA|FRAMING\/SPATIAL|ACTION SEQUENCE(?: \(authoritative\))?|START\s*[→-]\s*END|TIMING\/RHYTHM|SOURCE SPEC VERSION|TIMING TOLERANCE|CHARACTER IDENTITY PACK|LOCKED TRAITS|PRESERVE IDENTITY|SCENE APPEARANCE STATE|TEXT POLICY|ALLOWED TRANSFORMATIONS|EXECUTION|SCENE ACTION \/ FROZEN INITIAL STATE|BACKGROUND \/ CAMERA \/ COMPOSITION|DRAFT PROMPT FROM GEMINI|VIDEO CONTRACT|VIDEO SOURCE BEAT|VIDEO ACTION PROGRESSION|VIDEO CAMERA \/ FRAMING|VIDEO CAMERA MOVEMENT|VIDEO SPATIAL RELATIONSHIP|VIDEO TIMING \/ RHYTHM|VIDEO START STATE|VIDEO END STATE|VIDEO MOTION CONTINUITY|VIDEO CHARACTER IDENTITY LOCK|VIDEO SCENE APPEARANCE|VIDEO MUST PRESERVE|VIDEO ALLOWED TRANSFORMATIONS|VIDEO TEXT POLICY|VIDEO CREATIVE BOUNDARY)(?:\s*\([^)]*\))?\s*:/i.test(line);
+const positiveLines = (prompt: string) => {
+  let inApprovedSceneAppearance = false;
+  return prompt.split(/\r?\n/).filter((line) => {
+    if (/^\s*(?:SCENE APPEARANCE STATE|VIDEO SCENE APPEARANCE)(?:\s*\([^)]*\))?\s*:/i.test(line)) { inApprovedSceneAppearance = true; return false; }
+    if (inApprovedSceneAppearance && authoritativePromptLine(line)) inApprovedSceneAppearance = false;
+    if (inApprovedSceneAppearance || authoritativePromptLine(line)) return false;
+    return !/\b(?:do not|don't|never|must not|forbidden|without|no readable|không|khong|cấm)\b/i.test(line);
+  }).join("\n");
+};
 const statusOf = (ok: boolean, actual: unknown): PromptValidationStatus => actual === undefined || actual === null ? "NOT_EVALUATED" : ok ? "PASS" : "FAIL";
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 

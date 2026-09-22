@@ -75,6 +75,13 @@ describe("external Edge Gemini runtime", () => {
     expect(source).toContain("this.currentUrl = params.url;");
   });
 
+  it("verifies navigation results and can reacquire a managed page for one bounded retry", () => {
+    const source = readFileSync("electron/edge-gemini-cdp.cjs", "utf8");
+    expect(source).toContain("return this.currentUrl;");
+    expect(source).toContain("async reacquireManagedPage(window");
+    expect(source).toContain("window.replaceConnection(connection, target);");
+  });
+
   it("keeps the CDP port in the local deterministic range", () => {
     expect(edge.DEFAULT_PORT).toBeGreaterThanOrEqual(1024);
     expect(edge.DEFAULT_PORT).toBeLessThanOrEqual(65535);

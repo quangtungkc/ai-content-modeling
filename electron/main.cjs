@@ -8,13 +8,18 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { initializeUserData } = require("./user-data.cjs");
+const { cleanupManagedTemporaryFiles } = require("./temp-cleanup.cjs");
 initializeUserData(app);
-const { GeminiCommandLifecycle, hashText, redactNetworkUrl, normalizeNetworkInitiator, normalizeDocumentNavigationRequest, extractGeminiJsonCandidate, isGeminiGenerationRequest, findAttributedGeminiGenerationRequest, isGeminiTargetReady, isResponseComplete, canRunFormatRetry, isGenerationTerminal, assertParentTerminal, normalizeGeminiResponseSnapshot, buildGeminiBindingDiagnostic, buildGeminiResponseContentDiagnostic } = require("./gemini-browser-lifecycle.cjs");
+try { cleanupManagedTemporaryFiles(app.getPath("userData")); } catch { /* Cleanup is bounded to the managed temporary directory. */ }
+const { GeminiCommandLifecycle, hashText, createGeminiConversationResetError, redactNetworkUrl, normalizeNetworkInitiator, normalizeDocumentNavigationRequest, extractGeminiJsonCandidate, isGeminiGenerationRequest, findAttributedGeminiGenerationRequest, isGeminiTargetReady, isResponseComplete, canRunFormatRetry, isGenerationTerminal, assertParentTerminal, normalizeGeminiResponseSnapshot, buildGeminiBindingDiagnostic, buildGeminiResponseContentDiagnostic } = require("./gemini-browser-lifecycle.cjs");
 const { isJsonSerializable, wrapGeminiRemoteExpression, normalizeRemoteFailure } = require("./gemini-remote-script.cjs");
 const { EdgeGeminiRuntime, isFlowUrl } = require("./edge-gemini-cdp.cjs");
 const { ensureSqliteReleaseSchema } = require("./sqlite-release-schema.cjs");
 const { assertReadableAbsoluteFile, uploadWithEdgeFileChooser } = require("./gemini-edge-file-chooser.cjs");
-const { conversationIdFromUrl, normalizeConversationBinding, bindConversationFromUrl, markConversationStep, assertConversationReady } = require("./gemini-conversation-lifecycle.cjs");
+const { serializeGeminiError } = require("./gemini-error-transport.cjs");
+const { isAllowedExternalUrl } = require("./ipc-contract.cjs");
+const { buildDevRuntimeIdentity, compareDevRuntimeIdentity } = require("./dev-runtime-identity.cjs");
+const { conversationIdFromUrl, conversationNavigationDisposition, isBareGeminiAppUrl, normalizeConversationBinding, bindConversationFromUrl, markConversationStep, markConversationStale, assertConversationReady } = require("./gemini-conversation-lifecycle.cjs");
 
 // Keep development Electron and the packaged desktop app on the same local data store.
 if (app.isPackaged && !process.argv.some((value) => value.startsWith("--remote-debugging-port="))) {
@@ -24,11 +29,15 @@ if (app.isPackaged && !process.argv.some((value) => value.startsWith("--remote-d
 
 const PORT = 3210;
 const APP_URL = process.env.DESKTOP_APP_URL || (app.isPackaged ? `http://127.0.0.1:${PORT}` : "http://localhost:3000");
+const DEV_RUNTIME_IDENTITY = buildDevRuntimeIdentity({ root: path.resolve(__dirname, "..") });
 const FACEBOOK_MEDIA_DISCOVERY_TIMEOUT_MS = 10_000;
 const FACEBOOK_MEDIA_POLL_INTERVAL_MS = 100;
 const GEMINI_PRE_RETRY_CONFIRMATION_GRACE_MS = 2_000;
 const GEMINI_PRE_RETRY_CONFIRMATION_POLL_MS = 50;
 const GEMINI_CONTEXT_RECOVERY_TIMEOUT_MS = 5_000;
+const GEMINI_SEND_RECOVERY_SETTLE_MS = 750;
+const GEMINI_GENERATION_START_TIMEOUT_MS = 15_000;
+const GEMINI_GENERATION_START_POLL_MS = 100;
 const GEMINI_CONVERSATION_REOPEN_STABILIZATION_MS = 3_000;
 const GEMINI_CONVERSATION_REOPEN_POLL_MS = 100;
 const DESKTOP_FLOW_BRIDGE_REVISION = "flow-recovery-v3";
@@ -74,6 +83,21 @@ const FLOW_STATE_TIMEOUTS = Object.freeze({
   FLOW_PROJECT_LOADING: 60_000,
   FLOW_PROJECT_READY: 30_000,
 });
+const MANUAL_FLOW_HANDOFF_MEDIA_TIMEOUT_MS = 45_000;
+
+async function withTimeout(promise, timeoutMs, errorCode) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve(promise),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(errorCode)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function safeSendToRenderer(target, channel, payload) {
   const sender = target?.sender ?? target?.webContents ?? target;
@@ -150,6 +174,7 @@ function geminiResponseSnapshotExpression() {
     for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
     const all = () => [...new Set(roots.flatMap((root) => [...root.querySelectorAll('*')]))];
     const selector = 'model-response, message-content, [data-message-author-role="model"]';
+    const userSelector = '[data-message-author-role="user"], [data-author-role="user"], user-query, user-message, [data-testid*="user-message"]';
     const finalSelector = 'message-content, [data-message-content], [data-response-content], [data-testid*="markdown"], [data-testid*="response"], [class*="markdown"], [class*="response-content"]';
     const statusSelector = '[role="status"], [aria-live], [aria-busy="true"], [role="progressbar"], mat-progress-spinner';
     const streamingSelector = '[aria-busy="true"], [role="progressbar"], mat-progress-spinner';
@@ -160,8 +185,10 @@ function geminiResponseSnapshotExpression() {
     const identity = (element) => { if (!element) return null; for (const attribute of ['data-message-id', 'data-turn-id', 'data-testid', 'id']) { const value = element.getAttribute?.(attribute); if (value) return element.tagName.toLowerCase() + ':' + attribute + '=' + value; } const parts = []; let current = element; while (current && current.nodeType === 1 && parts.length < 12) { const parent = parentAcrossShadow(current); const index = parent?.children ? [...parent.children].indexOf(current) : 0; parts.unshift(current.tagName.toLowerCase() + ':' + index); current = parent; } return parts.join('/'); };
     const ancestors = (element) => { const values = []; let current = parentAcrossShadow(element); while (current && values.length < 6) { values.push({ tag: current.tagName.toLowerCase(), id: current.id || null, role: current.getAttribute?.('role') || null, authorRole: current.getAttribute?.('data-message-author-role') || null, ariaLabel: current.getAttribute?.('aria-label') || null, className: typeof current.className === 'string' ? current.className.slice(0, 200) : null }); current = parentAcrossShadow(current); } return values; };
     const turnRoot = (element) => { const modelRoot = closestAcrossShadow(element, 'model-response, [data-message-author-role="model"]'); if (modelRoot) return modelRoot; let current = element; while (parentAcrossShadow(current)?.matches?.('message-content')) current = parentAcrossShadow(current); return current; };
+    const userTurnRoot = (element) => closestAcrossShadow(element, userSelector) || element;
     const roleOf = (turn) => turn.getAttribute?.('data-message-author-role') || closestAcrossShadow(turn, '[data-message-author-role]')?.getAttribute?.('data-message-author-role') || (turn.matches?.('model-response, message-content') ? 'model' : null);
     const textOf = (element) => String(element?.innerText || element?.textContent || '');
+    const userPromptTextOf = (element) => { const lines = [...(element?.querySelectorAll?.('.query-text-line') || [])].map(textOf).filter((value) => value.trim()); return lines.length ? lines.join('\\n') : textOf(element); };
     const insideComposer = (element) => Boolean(closestAcrossShadow(element, '[contenteditable="true"], textarea, [role="textbox"]'));
     const statusLike = (element) => Boolean(element?.matches?.(statusSelector) || closestAcrossShadow(element, streamingSelector));
     const accessibilityChrome = (element) => Boolean((element?.hasAttribute?.('aria-label') || element?.hasAttribute?.('title')) && !element?.matches?.(finalSelector));
@@ -174,8 +201,10 @@ function geminiResponseSnapshotExpression() {
     const stopButtonPresent = roots.flatMap((root) => [...root.querySelectorAll('button')]).some((element) => /stop|dừng/i.test([element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent].filter(Boolean).join(' ')) && visible(element));
     const streamingIndicatorPresent = roots.flatMap((root) => [...root.querySelectorAll('[aria-busy="true"], [role="progressbar"], mat-progress-spinner')]).some(visible);
     const assistantTurnCount = elements.length;
-    const userTurnCount = roots.reduce((count, root) => count + root.querySelectorAll('[data-message-author-role="user"], [data-author-role="user"], user-query, user-message, [data-testid*="user-message"]').length, 0);
-    const conversationMeta = { conversationUrl: location.href, assistantTurnCount, userTurnCount, approximateMessageNodeCount: assistantTurnCount + userTurnCount, userMessagePresent: userTurnCount > 0, conversationMode: assistantTurnCount + userTurnCount > 0 ? 'EXISTING' : 'NEW' };
+    const userElements = [...new Set(roots.flatMap((root) => [...root.querySelectorAll(userSelector)]))];
+    const userTurns = [...new Set(userElements.map(userTurnRoot))].filter(visible).map((turn, orderIndex) => { const text = userPromptTextOf(turn); return { turnId: identity(turn), candidateId: identity(turn), textHash: hashText(text), normalizedTextHash: hashText(String(text || '').normalize('NFKC').replace(/\\s+/g, ' ').trim()), textLength: text.length, visible: visible(turn), attached: Boolean(turn.isConnected), orderIndex }; });
+    const userTurnCount = userTurns.length;
+    const conversationMeta = { conversationUrl: location.href, assistantTurnCount, userTurnCount, userTurns, approximateMessageNodeCount: assistantTurnCount + userTurnCount, userMessagePresent: userTurnCount > 0, conversationMode: assistantTurnCount + userTurnCount > 0 ? 'EXISTING' : 'NEW' };
     return { candidates, composerReady, stopButtonPresent, streamingIndicatorPresent, ...conversationMeta, domSnapshotSummary: { url: location.href, title: document.title, candidateCount: candidates.length, attachedCandidateCount: candidates.filter((candidate) => candidate.attached).length } };
   })()`;
 }
@@ -548,17 +577,62 @@ async function waitForAttributedGeminiGenerationRequest(command, timeoutMs = 500
   return null;
 }
 
-async function waitForPreRetryConfirmation(window, command, preSubmitSnapshot, firstSnapshot) {
-  command.markRetryEligible();
+function geminiCookieRotationObserved() {
+  return Boolean(geminiNavigationObserver?.events?.some((event) => /RotateCookies/i.test([event.url, event.frameUrl, event.targetUrl].filter(Boolean).join(" "))));
+}
+
+function geminiSendResetEvidence(window, command) {
+  const expectedUrl = command.snapshot().expectedConversationUrl;
+  const actualUrl = window?.webContents && !window.webContents.isDestroyed() ? window.webContents.getURL() : null;
+  const disposition = conversationNavigationDisposition(expectedUrl, actualUrl);
+  if (disposition === "AUTH_REQUIRED") return { authRequired: true, expectedUrl, actualUrl, disposition };
+  if (disposition !== "RETRY") return null;
+  const metadata = command.snapshot();
+  return {
+    reset: true,
+    code: "GEMINI_CONVERSATION_RESET_DURING_SEND",
+    reason: geminiCookieRotationObserved() ? "COOKIE_ROTATION" : "CONVERSATION_RESET",
+    expectedUrl,
+    actualUrl,
+    disposition,
+    attempt: metadata.sendRetryCount,
+    userTurnDelta: metadata.userTurnDelta ?? null,
+    assistantTurnDelta: metadata.assistantTurnDelta ?? null,
+    generationRequestObserved: metadata.generationStarted === true,
+  };
+}
+
+function geminiAuthStateExpression() {
+  return `(() => {
+    const roots = [document]; const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+    const visible = (element) => { const bounds = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element && bounds && bounds.width > 100 && bounds.height >= 20 && style?.visibility !== 'hidden' && style?.display !== 'none'); };
+    const text = String(document.body?.innerText || '');
+    const controls = roots.flatMap((root) => [...root.querySelectorAll('button, a, [role="button"]')]);
+    const signInControl = controls.some((element) => visible(element) && /^(sign in|đăng nhập|log in)$/i.test(String(element.textContent || element.getAttribute('aria-label') || element.getAttribute('title') || '').replace(/\\s+/g, ' ').trim()));
+    const composerPresent = roots.flatMap((root) => [...root.querySelectorAll('[contenteditable="true"], textarea, [role="textbox"]')]).some(visible);
+    const authText = !composerPresent && /sign in|đăng nhập|log in|choose an account|chọn tài khoản|captcha|verify you are human|xác minh bạn là người/i.test(text);
+    return { url: location.href, loginRequired: /accounts\\.google\\.com/i.test(location.href) || signInControl || authText };
+  })()`;
+}
+
+async function inspectGeminiAuthState(window) {
+  return executeGeminiRemoteScript(window, { expression: geminiAuthStateExpression(), phase: "SEND_AUTH_STATE_CHECK", commandPurpose: "GEMINI_SEND_RECOVERY" });
+}
+
+async function waitForGeminiSubmissionConfirmation(window, command, preSubmitSnapshot, firstSnapshot) {
   const deadline = Date.now() + GEMINI_PRE_RETRY_CONFIRMATION_GRACE_MS;
   let snapshot = firstSnapshot;
   while (Date.now() <= deadline) {
+    const reset = geminiSendResetEvidence(window, command);
+    if (reset?.authRequired) return { confirmed: false, authRequired: true, snapshot, reset };
+    if (reset?.reset && command.snapshot().newUserTurnConfirmed !== true) return { confirmed: false, reset, snapshot };
     const generationRequest = geminiNetworkObserver ? findAttributedGeminiGenerationRequest([...geminiNetworkObserver.requests.values()], command.snapshot()) : null;
     if (generationRequest) {
       command.confirmSubmissionByNetwork(generationRequest);
-      recordBrowserAction({ action: "gemini-submission-confirmed-by-network", commandId: command.snapshot().commandId, requestId: generationRequest.requestId, startedAt: generationRequest.startedAt, url: generationRequest.url });
-      return { confirmed: true, generationRequest, pageReady: true, snapshot };
+      recordBrowserAction({ action: "gemini-generation-start-observed", commandId: command.snapshot().commandId, requestId: generationRequest.requestId, startedAt: generationRequest.startedAt, url: generationRequest.url, submissionConfirmed: command.snapshot().submissionConfirmed === true });
     }
+    if (command.snapshot().submissionConfirmed === true) return { confirmed: true, generationRequest, pageReady: true, snapshot };
     const pageReady = !window.webContents.isLoading() && /^https:\/\/gemini\.google\.com\//i.test(window.webContents.getURL());
     if (!pageReady) {
       command.markSubmissionUncertain("REMOTE_CONTEXT_NOT_READY");
@@ -569,7 +643,7 @@ async function waitForPreRetryConfirmation(window, command, preSubmitSnapshot, f
     try {
       snapshot = await captureGeminiResponseSnapshot(window, preSubmitSnapshot, command.snapshot().purpose);
       command.observeSubmission(snapshot);
-      if (command.snapshot().submissionConfirmed) return { confirmed: true, generationRequest: null, pageReady: true, snapshot };
+      if (command.snapshot().submissionConfirmed === true) return { confirmed: true, generationRequest, pageReady: true, snapshot };
     } catch (error) {
       if (!isGeminiPageNotReadyError(error)) throw error;
       command.markSubmissionUncertain("REMOTE_CONTEXT_NOT_READY");
@@ -578,14 +652,57 @@ async function waitForPreRetryConfirmation(window, command, preSubmitSnapshot, f
     }
     await delay(GEMINI_PRE_RETRY_CONFIRMATION_POLL_MS);
   }
-  const finalGenerationRequest = geminiNetworkObserver ? findAttributedGeminiGenerationRequest([...geminiNetworkObserver.requests.values()], command.snapshot()) : null;
-  if (finalGenerationRequest) {
-    command.confirmSubmissionByNetwork(finalGenerationRequest);
-    recordBrowserAction({ action: "gemini-submission-confirmed-by-network", commandId: command.snapshot().commandId, requestId: finalGenerationRequest.requestId, startedAt: finalGenerationRequest.startedAt, url: finalGenerationRequest.url });
-    return { confirmed: true, generationRequest: finalGenerationRequest, pageReady: true, snapshot };
+  return { confirmed: command.snapshot().submissionConfirmed === true, generationRequest: null, pageReady: true, snapshot, confirmationTimeout: command.snapshot().submissionConfirmed !== true };
+}
+
+async function waitForGeminiGenerationStart(window, command, preSubmitSnapshot) {
+  const deadline = Date.now() + GEMINI_GENERATION_START_TIMEOUT_MS;
+  while (Date.now() <= deadline) {
+    const generationRequest = geminiNetworkObserver ? findAttributedGeminiGenerationRequest([...geminiNetworkObserver.requests.values()], command.snapshot()) : null;
+    if (generationRequest) command.confirmSubmissionByNetwork(generationRequest);
+    if (command.snapshot().generationStarted === true) return generationRequest;
+    try {
+      const snapshot = await captureGeminiResponseSnapshot(window, preSubmitSnapshot, command.snapshot().purpose);
+      command.observeSubmission(snapshot);
+      if (command.snapshot().generationStarted === true) return generationRequest;
+    } catch (error) {
+      if (!isGeminiPageNotReadyError(error)) throw error;
+      if (!await waitForGeminiPageReady(window)) {
+        command.markFailed("GEMINI_REMOTE_CONTEXT_RECOVERY_FAILED");
+        throw new Error(`GEMINI_REMOTE_CONTEXT_RECOVERY_FAILED: ${command.snapshot().commandId}`);
+      }
+    }
+    await delay(GEMINI_GENERATION_START_POLL_MS);
   }
-  const pageReady = !window.webContents.isLoading() && /^https:\/\/gemini\.google\.com\//i.test(window.webContents.getURL());
-  return { confirmed: command.snapshot().submissionConfirmed === true, generationRequest: null, pageReady, snapshot };
+  command.markFailed("GEMINI_GENERATION_START_TIMEOUT");
+  throw new Error(`GEMINI_GENERATION_START_TIMEOUT: commandId=${command.snapshot().commandId}`);
+}
+
+async function recoverGeminiConversationForSend(window, command, preSubmitSnapshot) {
+  await delay(GEMINI_SEND_RECOVERY_SETTLE_MS);
+  const expectedUrl = command.snapshot().expectedConversationUrl;
+  try {
+    const authState = await inspectGeminiAuthState(window);
+    if (authState?.loginRequired) throw new Error("GEMINI_AUTH_REQUIRED");
+  } catch (error) {
+    if (String(error?.message || error).includes("GEMINI_AUTH_REQUIRED")) throw error;
+    if (isGeminiPageNotReadyError(error)) await waitForGeminiPageReady(window, GEMINI_CONTEXT_RECOVERY_TIMEOUT_MS);
+    else throw error;
+  }
+  await navigateToGeminiConversation(window, expectedUrl);
+  const actualUrl = await window.webContents.executeJavaScript("location.href", true).catch(() => window.webContents.getURL());
+  const disposition = conversationNavigationDisposition(expectedUrl, actualUrl);
+  if (disposition === "AUTH_REQUIRED") throw new Error("GEMINI_AUTH_REQUIRED");
+  if (disposition !== "MATCH" || (command.snapshot().expectedConversationId && conversationIdFromUrl(actualUrl) !== command.snapshot().expectedConversationId)) {
+    throw new Error(`GEMINI_CONVERSATION_RESET_DURING_SEND: attempt=1 expectedUrl=${expectedUrl} actualUrl=${actualUrl} userTurnDelta=${command.snapshot().userTurnDelta ?? 0} assistantTurnDelta=${command.snapshot().assistantTurnDelta ?? 0} generationRequestObserved=${command.snapshot().generationStarted === true ? "YES" : "NO"}`);
+  }
+  const baselineSnapshot = await captureGeminiResponseSnapshot(window, null, "GEMINI_SEND_RECOVERY_BASELINE");
+  const baseline = command.snapshot();
+  if (baselineSnapshot.userTurnCount !== baseline.baselineUserTurnCount || baselineSnapshot.assistantTurnCount !== baseline.baselineAssistantTurnCount) {
+    throw new Error(`GEMINI_CONVERSATION_RESET_DURING_SEND: attempt=1 expectedUrl=${expectedUrl} actualUrl=${actualUrl} userTurnDelta=${(baselineSnapshot.userTurnCount ?? 0) - (baseline.baselineUserTurnCount ?? 0)} assistantTurnDelta=${(baselineSnapshot.assistantTurnCount ?? 0) - (baseline.baselineAssistantTurnCount ?? 0)} generationRequestObserved=${baseline.generationStarted === true ? "YES" : "NO"}`);
+  }
+  recordBrowserAction({ action: "gemini-conversation-reset-recovery", commandId: baseline.commandId, attempt: 1, reason: baseline.conversationResetReason, expectedUrl, actualUrl, baselineUserTurnCount: baseline.baselineUserTurnCount, baselineAssistantTurnCount: baseline.baselineAssistantTurnCount, result: "REOPEN_PASS" });
+  return baselineSnapshot;
 }
 
 async function waitForGeminiPageReady(window, timeoutMs = 5_000) {
@@ -819,41 +936,74 @@ function persistGeminiResponseEvidence(command, rawResponse, responseNode, parse
 }
 
 async function submitGeminiCommand(window, command, prompt, missingCode, preSubmitSnapshot = null) {
-  command.markSubmitAttempt();
-  const prepared = await executeGeminiRemoteScript(window, { expression: geminiFillPromptExpression(prompt, missingCode), phase: "PROMPT_INJECTION", selector: "[contenteditable=true], textarea, [role=textbox]", commandPurpose: command.snapshot().purpose });
-  if (!prepared?.textLength) throw new Error(missingCode);
-  await captureGeminiSendElementSnapshot(window, command, "BEFORE_INITIAL_SEND");
-  command.markSubmitted();
-  dispatchGeminiEnter(window, command, "INITIAL_SEND");
-  command.markGenerating();
-  await delay(1_200);
-  const firstSnapshot = await captureGeminiResponseSnapshot(window, preSubmitSnapshot, command.snapshot().purpose);
-  command.observeSubmission(firstSnapshot);
-  await captureGeminiLatencyPageState(window, command, "SUBMIT");
-  const composerStillContainsPrompt = firstSnapshot?.composerReady === false && firstSnapshot?.newResponseCount === 0;
-  if (!composerStillContainsPrompt) return;
-  const confirmation = await waitForPreRetryConfirmation(window, command, preSubmitSnapshot, firstSnapshot);
-  if (confirmation.confirmed) return;
-  if (confirmation.recoveryFailed) {
-    command.markFailed("GEMINI_REMOTE_CONTEXT_RECOVERY_FAILED");
-    throw new Error(`GEMINI_REMOTE_CONTEXT_RECOVERY_FAILED: ${command.snapshot().commandId}`);
+  let attempt = 0;
+  while (attempt <= 1) {
+    if (attempt === 0) command.markSubmitAttempt();
+    const prepared = await executeGeminiRemoteScript(window, { expression: geminiFillPromptExpression(prompt, missingCode), phase: attempt === 0 ? "PROMPT_INJECTION" : "PROMPT_INJECTION_RECOVERY", selector: "[contenteditable=true], textarea, [role=textbox]", commandPurpose: command.snapshot().purpose });
+    if (!prepared?.textLength) {
+      command.markFailed(missingCode);
+      throw new Error(missingCode);
+    }
+    await captureGeminiSendElementSnapshot(window, command, attempt === 0 ? "BEFORE_INITIAL_SEND" : "BEFORE_RECOVERY_SEND");
+    if (attempt === 0) command.markSubmitted();
+    dispatchGeminiEnter(window, command, attempt === 0 ? "INITIAL_SEND" : "RECOVERY_SEND");
+    await delay(1_200);
+    const firstSnapshot = await captureGeminiResponseSnapshot(window, preSubmitSnapshot, command.snapshot().purpose);
+    command.observeSubmission(firstSnapshot);
+    await captureGeminiLatencyPageState(window, command, attempt === 0 ? "SUBMIT" : "RECOVERY_SUBMIT");
+    const confirmation = await waitForGeminiSubmissionConfirmation(window, command, preSubmitSnapshot, firstSnapshot);
+    if (confirmation.confirmed) {
+      await waitForGeminiGenerationStart(window, command, preSubmitSnapshot);
+      command.markGenerating();
+      return;
+    }
+    if (confirmation.recoveryFailed) {
+      command.markFailed("GEMINI_REMOTE_CONTEXT_RECOVERY_FAILED");
+      throw new Error(`GEMINI_REMOTE_CONTEXT_RECOVERY_FAILED: ${command.snapshot().commandId}`);
+    }
+    if (confirmation.authRequired) {
+      command.markFailed("GEMINI_AUTH_REQUIRED");
+      throw new Error(`GEMINI_AUTH_REQUIRED: commandId=${command.snapshot().commandId}`);
+    }
+    if (confirmation.reset?.reset) {
+      command.markConversationReset(confirmation.reset.reason);
+      recordBrowserAction({ action: "gemini-conversation-reset-during-send", commandId: command.snapshot().commandId, attempt: attempt + 1, expectedUrl: confirmation.reset.expectedUrl, actualUrl: confirmation.reset.actualUrl, reason: confirmation.reset.reason, userTurnDelta: confirmation.reset.userTurnDelta, assistantTurnDelta: confirmation.reset.assistantTurnDelta, generationRequestObserved: confirmation.reset.generationRequestObserved ? "YES" : "NO" });
+      if (attempt === 0) {
+        try {
+          preSubmitSnapshot = await recoverGeminiConversationForSend(window, command, preSubmitSnapshot);
+        } catch (error) {
+          const message = String(error?.message || error);
+          const code = /GEMINI_AUTH_REQUIRED/.test(message) ? "GEMINI_AUTH_REQUIRED" : "GEMINI_CONVERSATION_RESET_DURING_SEND";
+          command.markFailed(code);
+          throw new Error(`${code}: attempt=1 expectedUrl=${command.snapshot().expectedConversationUrl} actualUrl=${window.webContents.getURL()} userTurnDelta=${command.snapshot().userTurnDelta ?? 0} assistantTurnDelta=${command.snapshot().assistantTurnDelta ?? 0} generationRequestObserved=${command.snapshot().generationStarted ? "YES" : "NO"}`);
+        }
+        command.markSendRetry("GEMINI_CONVERSATION_RESET_DURING_SEND", confirmation.reset);
+        recordBrowserAction({ action: "gemini-conversation-reset-recovery-ready", commandId: command.snapshot().commandId, attempt: 1, expectedUrl: command.snapshot().expectedConversationUrl, actualUrl: window.webContents.getURL(), result: "RESEND_ALLOWED_ONCE" });
+        attempt = 1;
+        continue;
+      }
+      const resetError = createGeminiConversationResetError({
+        commandId: command.snapshot().commandId,
+        expectedConversationUrl: confirmation.reset.expectedUrl || command.snapshot().expectedConversationUrl,
+        actualUrl: confirmation.reset.actualUrl || window.webContents.getURL(),
+        recoveryAttempt: command.snapshot().sendRetryCount,
+        recoveryBudget: 1,
+        userTurnDelta: confirmation.reset.userTurnDelta ?? command.snapshot().userTurnDelta ?? 0,
+        assistantTurnDelta: confirmation.reset.assistantTurnDelta ?? command.snapshot().assistantTurnDelta ?? 0,
+        generationRequestObserved: confirmation.reset.generationRequestObserved === true || command.snapshot().generationStarted === true,
+        composerCleared: Boolean(command.snapshot().composerClearedAt),
+        authenticatedState: null,
+        cookieRotationObserved: confirmation.reset.reason === "COOKIE_ROTATION",
+      });
+      command.markFailed(resetError);
+      throw resetError;
+    }
+    const failureCode = confirmation.confirmationTimeout ? "GEMINI_SUBMISSION_NOT_CONFIRMED" : "GEMINI_SUBMISSION_FAILED";
+    command.markFailed(failureCode);
+    throw new Error(`${failureCode}: commandId=${command.snapshot().commandId} userTurnDelta=${command.snapshot().userTurnDelta ?? 0} assistantTurnDelta=${command.snapshot().assistantTurnDelta ?? 0} generationRequestObserved=${command.snapshot().generationStarted ? "YES" : "NO"}`);
   }
-  const currentGenerationRequest = geminiNetworkObserver ? findAttributedGeminiGenerationRequest([...geminiNetworkObserver.requests.values()], command.snapshot()) : null;
-  if (currentGenerationRequest) {
-    command.confirmSubmissionByNetwork(currentGenerationRequest);
-    recordBrowserAction({ action: "gemini-submission-confirmed-by-network", commandId: command.snapshot().commandId, requestId: currentGenerationRequest.requestId, startedAt: currentGenerationRequest.startedAt, url: currentGenerationRequest.url });
-    return;
-  }
-  const pageReady = confirmation.pageReady && !window.webContents.isLoading() && /^https:\/\/gemini\.google\.com\//i.test(window.webContents.getURL());
-  const commandStillCurrent = geminiWindow === window && geminiSessionId === command.snapshot().sessionId && !window.isDestroyed() && !window.webContents.isDestroyed();
-  if (authorizeGeminiSendRetry({ retryEligible: command.snapshot().retryConfirmationState === "RETRY_CONFIRMATION_PENDING", confirmationGraceExpired: true, submissionConfirmed: command.snapshot().submissionConfirmed, generationRequestStarted: false, pageReady, retryBudgetAvailable: command.snapshot().sendRetryCount < 1, duplicateSendGuardPass: command.snapshot().sendRetryCount === 0 && command.snapshot().resendForbidden !== true, commandStillCurrent })) {
-    const retryReason = "COMPOSER_STILL_CONTAINS_PROMPT_AND_NO_RESPONSE";
-    const retrySnapshot = { composerHasPrompt: true, userMessagePresent: firstSnapshot?.userMessagePresent ?? null, generationIndicatorPresent: firstSnapshot?.stopButtonPresent === true || firstSnapshot?.streamingIndicatorPresent === true, responseTurnPresent: firstSnapshot?.newResponseCount === 1 };
-    command.markSendRetry(retryReason, retrySnapshot);
-    recordBrowserAction({ action: "gemini-command-send-retry", commandId: command.snapshot().commandId, purpose: command.snapshot().purpose, reason: retryReason, snapshot: retrySnapshot });
-    void captureGeminiSendElementSnapshot(window, command, "BEFORE_RESEND");
-    dispatchGeminiEnter(window, command, "RESEND");
-  }
+  command.markFailed("GEMINI_CONVERSATION_RESET_DURING_SEND");
+  throw new Error(`GEMINI_CONVERSATION_RESET_DURING_SEND: commandId=${command.snapshot().commandId}`);
 }
 
 function extractJsonCandidate(rawResponse) {
@@ -863,8 +1013,9 @@ function extractJsonCandidate(rawResponse) {
 async function runGeminiJsonCommand({ window, prompt, purpose, missingCode, beforeCount, timeoutMs, validate, parentCommand = null, runId = null, stage = null }) {
   assertParentTerminal(parentCommand);
   const command = createGeminiCommand({ purpose, prompt, parentCommandId: parentCommand?.snapshot().commandId ?? null });
+  let primaryCommandError = null;
   try {
-    await prepareGeminiConversationForCommand(window, runId, stage);
+    const conversationBinding = await prepareGeminiConversationForCommand(window, runId, stage);
     await startGeminiNavigationObserver(window, command);
     await startGeminiNetworkObserver(window, command);
     try {
@@ -890,6 +1041,14 @@ async function runGeminiJsonCommand({ window, prompt, purpose, missingCode, befo
       preSubmitSnapshot = await captureGeminiResponseSnapshot(window, null, purpose);
     }
     command.recordConversationState({ url: preSubmitSnapshot?.conversationUrl, mode: preSubmitSnapshot?.conversationMode, assistantTurnCount: preSubmitSnapshot?.assistantTurnCount, userTurnCount: preSubmitSnapshot?.userTurnCount, approximateMessageNodeCount: preSubmitSnapshot?.approximateMessageNodeCount });
+    command.setSubmissionBaseline({
+      expectedConversationUrl: conversationBinding?.geminiConversationUrl || preSubmitSnapshot?.conversationUrl,
+      expectedConversationId: conversationBinding?.geminiConversationId || conversationIdFromUrl(preSubmitSnapshot?.conversationUrl),
+      allowNewConversation: !conversationBinding?.geminiConversationId && !conversationIdFromUrl(preSubmitSnapshot?.conversationUrl),
+      userTurnCount: preSubmitSnapshot?.userTurnCount,
+      assistantTurnCount: preSubmitSnapshot?.assistantTurnCount,
+      userTurns: preSubmitSnapshot?.userTurns,
+    });
     await submitGeminiCommand(window, command, prompt, missingCode, preSubmitSnapshot);
     if (parentCommand) parentCommand.markNextCommandSent(command.snapshot().commandSentAt);
     const latencyMilestones = new Set(["SUBMIT"]);
@@ -985,12 +1144,18 @@ async function runGeminiJsonCommand({ window, prompt, purpose, missingCode, befo
     }
     command.markTimeout(`GEMINI_COMMAND_TIMEOUT: ${purpose}`);
     throw new Error(`GEMINI_COMMAND_TIMEOUT: purpose=${purpose} commandId=${command.snapshot().commandId}`);
+  } catch (error) {
+    primaryCommandError = error;
+    throw error;
   } finally {
     try {
       await finalizeGeminiLatency(window, command);
     } finally {
       try {
         if (runId) await persistGeminiConversationAfterStep(window, command, runId, stage);
+      } catch (finalizerError) {
+        if (!primaryCommandError) throw finalizerError;
+        recordBrowserAction({ action: "gemini-conversation-finalizer-secondary-failure", commandId: command.snapshot().commandId, primaryError: primaryCommandError instanceof Error ? primaryCommandError.message : String(primaryCommandError), secondaryError: finalizerError instanceof Error ? finalizerError.message : String(finalizerError), primaryFailurePreserved: true });
       } finally {
         if (runId) await closeGeminiAfterStep(window);
       }
@@ -1268,9 +1433,10 @@ async function processDesktopFlowBridgeJob(job) {
     await requestDesktopFlowBridge(`/api/v1/desktop-flow/jobs/${encodeURIComponent(claimed.id)}/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "succeeded", result: redactDesktopRuntime(result) }) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const structuredFailure = serializeGeminiError(error);
     await captureBrowserFailure(claimed.name === "desktop.flow.quality" ? getGeminiWindow() : getFlowWindow(), { action: "desktop-flow-job", state: "FLOW_FAILED", jobName: claimed.name, error: message, ...activeDesktopFlowBridgeContext });
     try {
-      await requestDesktopFlowBridge(`/api/v1/desktop-flow/jobs/${encodeURIComponent(claimed.id)}/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "failed", error: redactDesktopRuntime(message) }) });
+      await requestDesktopFlowBridge(`/api/v1/desktop-flow/jobs/${encodeURIComponent(claimed.id)}/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "failed", error: redactDesktopRuntime(message), failure: redactDesktopRuntime(structuredFailure) }) });
     } catch (reportError) {
       void reportDesktopRuntimeFailure("electron:flow-bridge:complete", reportError, activeDesktopFlowBridgeContext);
     }
@@ -1863,8 +2029,13 @@ ipcMain.handle("gemini-browser:generate-idea", async (_event, value) => {
 });
 
 ipcMain.handle("gemini-browser:develop-project", async (_event, value) => {
-  if (!value?.video || !value?.analysis || !value?.idea) throw new Error("CONTENT_PROJECT_BROWSER_INVALID_REQUEST");
-  return withGeminiBrowserOperation(() => runBrowserDevelopedIdeaJobUnlocked(value));
+  try {
+    if (!value?.video || !value?.analysis || !value?.idea) throw new Error("CONTENT_PROJECT_BROWSER_INVALID_REQUEST");
+    const data = await withGeminiBrowserOperation(() => runBrowserDevelopedIdeaJobUnlocked(value));
+    return { ok: true, data };
+  } catch (error) {
+    return { ok: false, error: serializeGeminiError(error) };
+  }
 });
 
 async function runBrowserSourceAnalysisJobUnlocked(payload) {
@@ -2206,7 +2377,8 @@ async function runBrowserQualityJobUnlocked(payload) {
 
 async function preflightGeminiBrowser(window, targetUrl = "https://gemini.google.com/app") {
   if (!window || window.isDestroyed()) throw new Error("BROWSER_ENVIRONMENT_NOT_READY: Cửa sổ Gemini không tồn tại.");
-  if (window.webContents.getURL() !== targetUrl) await window.webContents.loadURL(targetUrl);
+  if (conversationIdFromUrl(targetUrl)) await navigateToGeminiConversation(window, targetUrl);
+  else if (window.webContents.getURL() !== targetUrl) await window.webContents.loadURL(targetUrl);
   for (let elapsed = 0; elapsed < 90_000; elapsed += 500) {
     if (window.isDestroyed()) throw new Error("BROWSER_ENVIRONMENT_NOT_READY: Cửa sổ Gemini đã bị đóng.");
     const state = await window.webContents.executeJavaScript(`(() => {
@@ -2217,13 +2389,68 @@ async function preflightGeminiBrowser(window, targetUrl = "https://gemini.google
       const composer = roots.flatMap((root) => [...root.querySelectorAll('rich-textarea, input-container, [data-placeholder="Hỏi Gemini"]')]).find(visible);
       const text = document.body?.innerText || '';
       const signInControl = roots.flatMap((root) => [...root.querySelectorAll('button, a, [role="button"]')]).some((element) => visible(element) && /^(sign in|đăng nhập|log in)$/i.test(String(element.textContent || element.getAttribute('aria-label') || element.getAttribute('title') || '').replace(/\\s+/g, ' ').trim()));
-      return { url: location.href, inputReady: Boolean(input), composerReady: Boolean(composer) || /tôi có thể giúp gì cho bạn|hỏi gemini/i.test(text), authenticated: !signInControl, loginRequired: /accounts\\.google\\.com/i.test(location.href) || signInControl || (!input && !composer && /sign in|đăng nhập|log in/i.test(text)) };
+      const authFailureText = /choose an account|chọn tài khoản|captcha|verify you are human|xác minh bạn là người/i.test(text);
+      return { url: location.href, inputReady: Boolean(input), composerReady: Boolean(composer) || /tôi có thể giúp gì cho bạn|hỏi gemini/i.test(text), authenticated: !signInControl && !authFailureText, loginRequired: /accounts\\.google\\.com/i.test(location.href) || signInControl || authFailureText || (!input && !composer && /sign in|đăng nhập|log in/i.test(text)) };
     })()`, true).catch(() => null);
     if (state?.loginRequired) throw new Error("BROWSER_ENVIRONMENT_NOT_READY: Gemini yêu cầu đăng nhập.");
     if (state?.inputReady || state?.composerReady) return state;
     await delay(500);
   }
   throw new Error("BROWSER_ENVIRONMENT_NOT_READY: Gemini chưa sẵn sàng, chưa có composer để nhập prompt.");
+}
+
+async function verifyDevRendererIdentity() {
+  if (app.isPackaged) return null;
+  const port = (() => {
+    try { return new URL(APP_URL).port || "80"; } catch { return "unknown"; }
+  })();
+  let response;
+  try {
+    response = await fetch(`${APP_URL}/api/runtime-identity`, { cache: "no-store" });
+  } catch (error) {
+    const failure = new Error(`DEV_RENDERER_PORT_OCCUPIED_BY_UNEXPECTED_RUNTIME: ${JSON.stringify({ port, expectedIdentity: DEV_RUNTIME_IDENTITY })}`);
+    failure.code = "DEV_RENDERER_PORT_OCCUPIED_BY_UNEXPECTED_RUNTIME";
+    failure.cause = error;
+    throw failure;
+  }
+  let actual = null;
+  try { actual = await response.json(); } catch { /* An unrelated server may return non-JSON content. */ }
+  const comparison = compareDevRuntimeIdentity(DEV_RUNTIME_IDENTITY, actual);
+  if (!response.ok || !comparison.match) {
+    const code = response.ok && actual ? "RENDERER_SOURCE_MISMATCH" : "DEV_RENDERER_PORT_OCCUPIED_BY_UNEXPECTED_RUNTIME";
+    const failure = new Error(`${code}: ${JSON.stringify({ port, expectedIdentity: DEV_RUNTIME_IDENTITY, actualIdentity: actual, status: response.status })}`);
+    failure.code = code;
+    failure.context = { port, expectedIdentity: DEV_RUNTIME_IDENTITY, actualIdentity: actual, mismatchedFields: comparison.mismatchedFields, status: response.status };
+    throw failure;
+  }
+  return actual;
+}
+
+async function navigateToGeminiConversation(window, targetUrl) {
+  let observedUrl = window.webContents.getURL();
+  for (let attempt = 0; attempt <= 1; attempt += 1) {
+    const before = conversationNavigationDisposition(targetUrl, observedUrl);
+    if (before === "MATCH") return observedUrl;
+    if (before === "AUTH_REQUIRED") throw new Error("BROWSER_ENVIRONMENT_NOT_READY: Gemini yêu cầu đăng nhập.");
+    const loadedUrl = await window.webContents.loadURL(targetUrl);
+    observedUrl = typeof loadedUrl === "string" && loadedUrl ? loadedUrl : window.webContents.getURL();
+    const after = conversationNavigationDisposition(targetUrl, observedUrl);
+    recordBrowserAction({ action: "gemini-conversation-navigation", requestedReopenUrl: targetUrl, attempt: attempt + 1, finalObservedUrl: observedUrl, disposition: after, result: after === "MATCH" ? "PASS" : "RETRY_REQUIRED" });
+    if (after === "MATCH") return observedUrl;
+    if (after === "AUTH_REQUIRED") throw new Error("BROWSER_ENVIRONMENT_NOT_READY: Gemini yêu cầu đăng nhập.");
+    if (after === "RETRY" && isBareGeminiAppUrl(observedUrl)) {
+      const error = new Error("GEMINI_CONVERSATION_STALE");
+      error.code = "GEMINI_CONVERSATION_STALE";
+      error.firstDivergence = "GEMINI_CONVERSATION_STALE";
+      error.details = { requestedUrl: targetUrl, actualUrl: observedUrl, reason: "SAVED_CONVERSATION_REDIRECTED_TO_BARE_APP" };
+      throw error;
+    }
+    if (attempt === 0 && typeof window.edgeRuntime?.reacquireManagedPage === "function") {
+      await window.edgeRuntime.reacquireManagedPage(window);
+      observedUrl = window.webContents.getURL();
+    }
+  }
+  return observedUrl;
 }
 
 async function runBrowserQualityJob(payload) {
@@ -2249,10 +2476,67 @@ async function createGeminiWindow() {
 async function preflightGeminiForRun(window, runId, stage) {
   if (!runId) return preflightGeminiBrowser(window);
   const binding = await getGeminiConversationForRun(runId);
-  const requestedUrl = binding.geminiConversationUrl || "https://gemini.google.com/app";
-  const preflight = await preflightGeminiBrowser(window, requestedUrl);
-  if (binding.geminiConversationId) await waitForGeminiConversationIdentity(window, binding, runId, requestedUrl);
-  return preflight;
+  if (binding.geminiConversationState === "DELETED") {
+    await openNewGeminiConversation(window, runId, stage);
+    return preflightGeminiBrowser(window, "https://gemini.google.com/app");
+  }
+  if (!binding.geminiConversationId) return preflightGeminiBrowser(window, "https://gemini.google.com/app");
+  const requestedUrl = binding.geminiConversationUrl;
+  try {
+    const preflight = await preflightGeminiBrowser(window, requestedUrl);
+    await waitForGeminiConversationIdentity(window, binding, runId, requestedUrl);
+    return preflight;
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== "GEMINI_CONVERSATION_STALE") throw error;
+    await persistGeminiConversationCheckpoint(runId, markConversationStale(binding, runId, stage));
+    await openNewGeminiConversation(window, runId, stage);
+    return preflightGeminiBrowser(window, "https://gemini.google.com/app");
+  }
+}
+
+async function openNewGeminiConversation(window, runId, stage) {
+  if (!window || window.isDestroyed()) throw new Error("BROWSER_ENVIRONMENT_NOT_READY: Cửa sổ Gemini không tồn tại.");
+  const clicked = await window.webContents.executeJavaScript(`(() => {
+    const roots = [document]; const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+    const visible = (element) => { const rect = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element && element.isConnected && rect && rect.width > 0 && rect.height > 0 && style?.display !== 'none' && style?.visibility !== 'hidden'); };
+    const label = (element) => String(element?.getAttribute?.('aria-label') || element?.getAttribute?.('title') || element?.textContent || '').replace(/\\s+/g, ' ').trim();
+    const isNewChat = (element) => /^(?:new chat|cuộc trò chuyện mới|cuộc trò chuyện mới trên gemini)$/i.test(label(element)) || /^(?:new chat|cuộc trò chuyện mới)$/i.test(label(element).toLowerCase());
+    const candidates = roots.flatMap((root) => [...root.querySelectorAll('a[href],button,[role="button"]')]).filter(visible).filter((element) => {
+      if (isNewChat(element) && !element.href) return true;
+      try {
+        const url = new URL(element.href || '', location.href);
+        return url.origin === 'https://gemini.google.com' && /^\\/app\\/?$/i.test(url.pathname);
+      } catch { return false; }
+    });
+    const candidate = candidates.find(isNewChat);
+    if (!candidate) return false;
+    candidate.click();
+    return true;
+  })()`, true).catch(() => false);
+  if (!clicked) throw new Error("GEMINI_NEW_CHAT_CONTROL_NOT_FOUND");
+  const ready = await waitForGeminiNewChatReady(window);
+  recordBrowserAction({ action: "gemini-new-chat-open", runId, stage, result: "PASS", url: window.webContents.getURL(), conversationId: conversationIdFromUrl(window.webContents.getURL()) });
+  return ready;
+}
+
+async function waitForGeminiNewChatReady(window) {
+  for (let elapsed = 0; elapsed <= 30_000; elapsed += 250) {
+    if (window.isDestroyed()) throw new Error("BROWSER_ENVIRONMENT_NOT_READY: Cửa sổ Gemini đã bị đóng.");
+    const state = await window.webContents.executeJavaScript(`(() => {
+      const roots = [document]; const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      const visible = (element) => { const rect = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element && element.isConnected && rect && rect.width > 100 && rect.height >= 20 && style?.display !== 'none' && style?.visibility !== 'hidden'); };
+      const input = roots.flatMap((root) => [...root.querySelectorAll('[contenteditable="true"],textarea,[role="textbox"]')]).find(visible);
+      const url = location.href;
+      const auth = /accounts\\.google\\.com|signin|challenge|captcha/i.test(url) || /sign in|đăng nhập|choose an account|chọn tài khoản|captcha|verify you are human/i.test(String(document.body?.innerText || '').slice(0, 4000));
+      return { url, bare: /^https:\\/\\/gemini\\.google\\.com\\/app\\/?(?:[?#].*)?$/i.test(url), inputReady: Boolean(input), auth };
+    })()`, true).catch(() => null);
+    if (state?.auth) throw new Error("GEMINI_AUTH_REQUIRED");
+    if (state?.bare && state.inputReady) return { url: state.url, conversationId: null, state: "UNBOUND" };
+    await delay(250);
+  }
+  throw new Error("GEMINI_NEW_CHAT_NOT_READY");
 }
 
 async function createFlowWindow() {
@@ -2480,17 +2764,25 @@ async function getGeminiConversationForRun(runId) {
   return normalizeConversationBinding(run.checkpoint, runId);
 }
 
+async function getGeminiRuntimeConversationForRun(runId) {
+  const binding = await getGeminiConversationForRun(runId);
+  if (binding.geminiConversationState !== "DELETED") return binding;
+  return { ...binding, geminiConversationId: null, geminiConversationUrl: null, geminiConversationState: "UNBOUND" };
+}
+
 async function prepareGeminiConversationForCommand(window, runId, stage) {
   if (!runId) return null;
-  const binding = await getGeminiConversationForRun(runId);
-  if (binding.geminiConversationId && binding.geminiConversationUrl) {
-    const requestedUrl = binding.geminiConversationUrl;
-    if (window.webContents.getURL() !== requestedUrl) await window.webContents.loadURL(requestedUrl);
-    return waitForGeminiConversationIdentity(window, binding, runId, requestedUrl);
-  }
-  if (conversationIdFromUrl(window.webContents.getURL())) await window.webContents.loadURL("https://gemini.google.com/app");
-  await persistGeminiConversationCheckpoint(runId, { geminiConversationId: null, geminiConversationUrl: null, geminiConversationOwnerRunId: runId, geminiConversationState: "UNBOUND", geminiConversationCreatedAt: null, geminiConversationDeletedAt: null, lastGeminiStage: stage || null, lastGeminiCommandId: null });
-  return null;
+  // Always validate the persisted binding before composing a prompt. This is
+  // the real send path, so bypassing preflight here would reuse a deleted
+  // conversation and misclassify it as a send-time cookie reset.
+  await preflightGeminiForRun(window, runId, stage);
+  const binding = await getGeminiRuntimeConversationForRun(runId);
+  if (!binding.geminiConversationId || !binding.geminiConversationUrl) return null;
+  // preflightGeminiForRun already performed the bounded ownership and
+  // stabilization check. Do not start a second full stabilization window
+  // immediately before send; that can expire at the boundary and report a
+  // false URL mismatch even though the validated URL is still current.
+  return binding;
 }
 
 async function waitForGeminiConversationIdentity(window, binding, runId, requestedUrl) {
@@ -2498,13 +2790,26 @@ async function waitForGeminiConversationIdentity(window, binding, runId, request
   let firstObservedUrl = null;
   let lastObservedUrl = null;
   let attempts = 0;
+  let verifiedBinding = null;
   while (Date.now() - startedAt <= GEMINI_CONVERSATION_REOPEN_STABILIZATION_MS) {
     attempts += 1;
     const observedUrl = await window.webContents.executeJavaScript("location.href", true).catch(() => window.webContents.getURL());
     if (!firstObservedUrl) firstObservedUrl = observedUrl;
     lastObservedUrl = observedUrl;
+    if (isBareGeminiAppUrl(observedUrl)) {
+      const error = new Error("GEMINI_CONVERSATION_STALE");
+      error.code = "GEMINI_CONVERSATION_STALE";
+      error.firstDivergence = "GEMINI_CONVERSATION_STALE";
+      error.details = { requestedUrl, actualUrl: observedUrl, reason: "SAVED_CONVERSATION_REDIRECTED_TO_BARE_APP" };
+      throw error;
+    }
     try {
       const ready = assertConversationReady(binding, runId, observedUrl);
+      verifiedBinding = ready;
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "GEMINI_CONVERSATION_URL_MISMATCH") throw error;
+    }
+    if (verifiedBinding && Date.now() - startedAt >= GEMINI_CONVERSATION_REOPEN_STABILIZATION_MS) {
       recordBrowserAction({
         action: "gemini-conversation-reopen-identity",
         persistedConversationUrl: binding.geminiConversationUrl,
@@ -2518,11 +2823,30 @@ async function waitForGeminiConversationIdentity(window, binding, runId, request
         attempts,
         result: "PASS",
       });
-      return ready;
-    } catch (error) {
-      if (!(error instanceof Error) || error.message !== "GEMINI_CONVERSATION_URL_MISMATCH") throw error;
+      return verifiedBinding;
     }
     await delay(GEMINI_CONVERSATION_REOPEN_POLL_MS);
+  }
+  // The final polling delay can carry the elapsed time just past the
+  // stabilization boundary. If the last observed URL was still the exact
+  // owned conversation and it was verified successfully, preserve that
+  // successful observation instead of manufacturing a URL mismatch.
+  if (verifiedBinding && conversationIdFromUrl(lastObservedUrl) === binding.geminiConversationId) {
+    recordBrowserAction({
+      action: "gemini-conversation-reopen-identity",
+      persistedConversationUrl: binding.geminiConversationUrl,
+      requestedReopenUrl: requestedUrl,
+      urlImmediatelyAfterNavigation: firstObservedUrl,
+      finalObservedUrl: lastObservedUrl,
+      persistedConversationId: binding.geminiConversationId,
+      observedConversationId: conversationIdFromUrl(lastObservedUrl),
+      navigationRedirectOccurred: firstObservedUrl !== lastObservedUrl,
+      urlStabilizationDurationMs: Date.now() - startedAt,
+      attempts,
+      result: "PASS",
+      stabilizationBoundary: "FINAL_VERIFIED_OBSERVATION",
+    });
+    return verifiedBinding;
   }
   recordBrowserAction({
     action: "gemini-conversation-reopen-identity",
@@ -2550,7 +2874,7 @@ async function persistGeminiConversationAfterStep(window, command, runId, stage)
   });
   let current;
   try {
-    current = await getGeminiConversationForRun(runId);
+    current = await getGeminiRuntimeConversationForRun(runId);
     const next = current.geminiConversationId
       ? assertConversationReady(current, runId, actualUrl)
       : conversationIdFromUrl(actualUrl)
@@ -3744,6 +4068,8 @@ async function clearFlowComposer(window) {
 
 async function ensureFlowMode(window, modes) {
   const wanted = (Array.isArray(modes) ? modes : [modes]).map((mode) => mode.toLowerCase());
+  let reopenAttempts = 0;
+  let lastObserved = [];
   for (let elapsed = 0; elapsed < 15_000; elapsed += 500) {
     const state = await executeFlowJavaScript(window, `(() => {
       const roots = [document];
@@ -3760,20 +4086,34 @@ async function ensureFlowMode(window, modes) {
       };
       const labelsFor = (element) => [element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent]
         .filter(Boolean).map((value) => value.replace(/\\s+/g, ' ').trim().toLowerCase());
-      const candidate = roots.flatMap((root) => [...root.querySelectorAll('[role="radio"]')])
-        .find((element) => isVisible(element) && labelsFor(element).some((label) => ${JSON.stringify(wanted)}.some((value) => label === value || label.endsWith(' ' + value) || label.endsWith(value))));
-      if (!candidate) return { selected: false, point: null };
+      const panel = roots.flatMap((root) => [...root.querySelectorAll('flow-toggles[aria-label="Mode"]')]).find(isVisible);
+      const candidates = panel ? [...panel.querySelectorAll('[role="radio"]')].filter(isVisible) : [];
+      const candidate = candidates.find((element) => labelsFor(element).some((label) => ${JSON.stringify(wanted)}.some((value) => label === value || label.endsWith(' ' + value) || label.endsWith(value))));
+      const observed = candidates.flatMap(labelsFor);
+      if (!candidate) return { selected: false, point: null, panelVisible: Boolean(panel), observed };
       const bounds = candidate.getBoundingClientRect();
-      return { selected: candidate.getAttribute('aria-checked') === 'true', point: { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 } };
+      const selected = candidate.getAttribute('aria-checked') === 'true' || Boolean(candidate.closest('mat-button-toggle')?.classList.contains('mat-button-toggle-checked'));
+      return { selected, point: { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 }, panelVisible: true, observed };
     })()`, true);
+    lastObserved = state?.observed || lastObserved;
     if (state?.selected) return;
     if (state?.point) {
       await dispatchBrowserClick(window, state.point);
       await delay(350);
       return;
     }
+    if (!state?.panelVisible && reopenAttempts < 2) {
+      const reopened = await executeFlowJavaScript(window, `(() => {
+        const button = [...document.querySelectorAll('button[aria-label="Settings trigger"]')].find((element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return bounds.width > 0 && bounds.height > 0 && style.display !== 'none' && style.visibility !== 'hidden'; });
+        if (!button) return false;
+        button.click();
+        return true;
+      })()`, true).catch(() => false);
+      if (reopened) reopenAttempts += 1;
+    }
     await delay(500);
   }
+  recordBrowserAction({ action: "flow-mode-control-missing", wanted, observed: lastObserved, reopenAttempts });
   throw new Error('Không tìm thấy chế độ ' + wanted.join(' / ') + ' trong cài đặt Google Flow.');
 }
 
@@ -3810,6 +4150,56 @@ async function ensureFlowVideoMode(window) {
   throw new Error('Không tìm thấy hoặc không chọn được chế độ Video trong cài đặt Google Flow.');
 }
 
+async function ensureFlowFramesMode(window, timeout = 15_000) {
+  const startedAt = Date.now();
+  let lastObserved = [];
+  while (Date.now() - startedAt < timeout) {
+    const state = await executeFlowJavaScript(window, `(() => {
+      const roots = [document];
+      const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll('*')) {
+          if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        }
+      }
+      const visible = (element) => {
+        const bounds = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return bounds.width > 0 && bounds.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const labelsFor = (element) => [element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent].filter(Boolean).map(normalize);
+      const hasLabel = (element, target) => labelsFor(element).some((label) => label === target || label.endsWith(' ' + target) || label.endsWith(target));
+      const radios = roots.flatMap((root) => [...root.querySelectorAll('button[role="radio"], [role="radio"]')]).filter(visible);
+      const frames = radios.find((element) => hasLabel(element, 'frames'));
+      const ingredients = radios.find((element) => hasLabel(element, 'ingredients'));
+      const checked = (element) => Boolean(element && (element.getAttribute('aria-checked') === 'true' || element.closest('mat-button-toggle')?.classList.contains('mat-button-toggle-checked')));
+      const framesSelected = checked(frames);
+      const ingredientsSelected = checked(ingredients);
+      if (!frames) return { ready: false, clicked: false, framesSelected, ingredientsSelected, observed: radios.flatMap(labelsFor).filter(Boolean) };
+      if (!framesSelected || ingredientsSelected) frames.click();
+      return {
+        ready: framesSelected && !ingredientsSelected,
+        clicked: !framesSelected || ingredientsSelected,
+        framesSelected,
+        ingredientsSelected,
+        observed: radios.flatMap(labelsFor).filter(Boolean),
+      };
+    })()`, true);
+    lastObserved = state?.observed || lastObserved;
+    if (state?.ready) {
+      recordBrowserAction({ action: "flow-frames-mode-verified", framesSelected: true, ingredientsSelected: false, observed: lastObserved });
+      return;
+    }
+    await delay(state?.clicked ? 500 : 350);
+  }
+  recordBrowserAction({ action: "flow-frames-mode-not-selected", framesSelected: false, ingredientsSelected: false, observed: lastObserved });
+  throw createFlowGenerationFailure("FLOW_START_FRAME_MODE_NOT_SELECTED", "Google Flow chưa xác nhận chế độ Frames/Start frame.", {
+    firstDivergence: "FLOW_START_FRAME_MODE_NOT_CONFIRMED",
+    observed: lastObserved,
+  });
+}
+
 async function configureFlowVideo(window) {
   await clickFlowControl(window, ["Settings trigger"], true);
   await ensureFlowVideoMode(window);
@@ -3821,7 +4211,7 @@ async function configureFlowVideo(window) {
   await clickFlowControl(window, ["4 giây", "4 seconds", "4s"], false);
   await clickFlowControl(window, ["x1"], true);
   // Flow exposes the Start/End frame inputs after the other settings are set.
-  await clickFlowControl(window, ["Frames"], true);
+  await ensureFlowFramesMode(window);
   await dispatchBrowserEscape(window);
 }
 
@@ -3843,6 +4233,31 @@ async function verifyFlowStartFrameAttachment(window, asset) {
   if (!asset?.mediaId && !asset?.source) return false;
   return Boolean(await executeFlowJavaScript(window, `(() => {
     const expected = ${JSON.stringify(asset)};
+    const roots = [document];
+    const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) {
+      for (const element of roots[index].querySelectorAll('*')) {
+        if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      }
+    }
+    const visible = (element) => {
+      const bounds = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return bounds.width > 0 && bounds.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const labelsFor = (element) => [element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent].filter(Boolean).map(normalize);
+    const hasLabel = (element, target) => labelsFor(element).some((label) => label === target || label.endsWith(' ' + target) || label.endsWith(target));
+    const radios = roots.flatMap((root) => [...root.querySelectorAll('button[role="radio"], [role="radio"]')]).filter(visible);
+    const frames = radios.find((element) => hasLabel(element, 'frames'));
+    const ingredients = radios.find((element) => hasLabel(element, 'ingredients'));
+    const framesSelected = Boolean(frames && (frames.getAttribute('aria-checked') === 'true' || frames.closest('mat-button-toggle')?.classList.contains('mat-button-toggle-checked')));
+    const ingredientsSelected = Boolean(ingredients && (ingredients.getAttribute('aria-checked') === 'true' || ingredients.closest('mat-button-toggle')?.classList.contains('mat-button-toggle-checked')));
+    // Flow closes the settings popover after the Start-frame picker opens. In that
+    // state the radio controls are absent, so rely on the pre-submit Frames
+    // postcondition and require a slot-specific attachment below. If controls are
+    // still present, a visible Ingredients selection remains a hard failure.
+    if ((frames || ingredients) && (!framesSelected || ingredientsSelected)) return false;
     const sourceFor = (image) => image?.currentSrc || image?.src || '';
     const clean = (value) => { try { return new URL(value).pathname; } catch { return String(value || '').split('?')[0]; } };
     const sameAsset = (image) => {
@@ -3850,7 +4265,7 @@ async function verifyFlowStartFrameAttachment(window, asset) {
       return (expected.mediaId && (image?.getAttribute('data-media-id') === expected.mediaId || source.includes('/image/' + expected.mediaId)))
         || (expected.source && clean(source) === clean(expected.source));
     };
-    const attached = [...document.querySelectorAll('img.ghost-image, flow-image-ingredient-chip img, flow-media-chip img, .filled-chip img, img[data-media-id]')]
+    const attached = roots.flatMap((root) => [...root.querySelectorAll('button[aria-label="Image ingredient"] img, .chip-container[aria-label="Image ingredient"] img, img.ghost-image, flow-image-ingredient-chip img, flow-media-chip img, .filled-chip img')])
       .some(sameAsset);
     return attached;
   })()`));
@@ -4117,6 +4532,21 @@ async function waitForFlowComposer(window, timeout = 20_000) {
   throw new Error("Google Flow chưa quay về màn hình soạn lệnh.");
 }
 
+function createFlowGenerationFailure(code, message, details = {}) {
+  const error = new Error(`${code}: ${message}`);
+  error.code = code;
+  error.firstDivergence = typeof details.firstDivergence === "string" ? details.firstDivergence : code;
+  error.details = details;
+  if (typeof details.cause === "string") error.cause = details.cause;
+  return error;
+}
+
+function isNonRetryableFlowProviderBlock(error) {
+  return Boolean(error && typeof error === "object" && error.code === "FLOW_PROVIDER_UNUSUAL_ACTIVITY");
+}
+
+const MAX_FLOW_PROVIDER_RELOAD_RECOVERY = 1;
+
 async function inspectFlowVideo(window, beforeSources = [], beforeCardCount = 0) {
   const expression = [
     "(() => {",
@@ -4138,17 +4568,44 @@ async function inspectFlowVideo(window, beforeSources = [], beforeCardCount = 0)
     "  const playCircleBounds = playCircle?.getBoundingClientRect();",
     "  const downloadBounds = downloadButton?.getBoundingClientRect();",
     "  const editorPage = /\\/edit\\//i.test(location.href) && (Boolean(thumbnail) || /total duration|current time/i.test(text));",
-    "  return { videoSource: video ? sourceFor(video) : (resourceSources[resourceSources.length - 1] || null), duration: video && Number.isFinite(video.duration) ? video.duration : null, videoCardCount: videoCards.length, videoCard: Boolean(thumbnail), thumbnailPoint: thumbnailBounds ? { x: thumbnailBounds.left + thumbnailBounds.width / 2, y: thumbnailBounds.top + thumbnailBounds.height / 2 } : null, playButton: Boolean(playButton), playButtonPoint: playButtonBounds ? { x: playButtonBounds.left + playButtonBounds.width / 2, y: playButtonBounds.top + playButtonBounds.height / 2 } : null, playCircle: Boolean(playCircle), playCirclePoint: playCircleBounds ? { x: playCircleBounds.left + playCircleBounds.width / 2, y: playCircleBounds.top + playCircleBounds.height / 2 } : null, editorReady: editorPage, downloadPoint: downloadBounds ? { x: downloadBounds.left + downloadBounds.width / 2, y: downloadBounds.top + downloadBounds.height / 2 } : null, failed: /không thành công|không tải được video|failed|couldn't load video|could not load video|generation failed/i.test(text) };",
+    "  const unusualActivity = /unusual activity|hoạt động bất thường/i.test(text);",
+    "  const notCharged = /not been charged|chưa bị tính phí/i.test(text);",
+    "  return { videoSource: video ? sourceFor(video) : (resourceSources[resourceSources.length - 1] || null), duration: video && Number.isFinite(video.duration) ? video.duration : null, videoCardCount: videoCards.length, videoCard: Boolean(thumbnail), thumbnailPoint: thumbnailBounds ? { x: thumbnailBounds.left + thumbnailBounds.width / 2, y: thumbnailBounds.top + thumbnailBounds.height / 2 } : null, playButton: Boolean(playButton), playButtonPoint: playButtonBounds ? { x: playButtonBounds.left + playButtonBounds.width / 2, y: playButtonBounds.top + playButtonBounds.height / 2 } : null, playCircle: Boolean(playCircle), playCirclePoint: playCircleBounds ? { x: playCircleBounds.left + playCircleBounds.width / 2, y: playCircleBounds.top + playCircleBounds.height / 2 } : null, editorReady: editorPage, downloadPoint: downloadBounds ? { x: downloadBounds.left + downloadBounds.width / 2, y: downloadBounds.top + downloadBounds.height / 2 } : null, unusualActivity, notCharged, failed: unusualActivity || /không thành công|không tải được video|failed|couldn't load video|could not load video|generation failed/i.test(text) };",
     "})()",
   ].join("\n");
   return executeFlowJavaScript(window, expression).then((state) => ({ ...state, beforeCardCount }));
 }
 
-async function waitForFlowVideo(window, beforeSources, beforeCardCount = 0, timeout = 600_000) {
+async function waitForFlowVideo(window, beforeSources, beforeCardCount = 0, timeout = 600_000, context = {}) {
   let openedVideoCard = false;
   let startedPlayback = false;
   for (let elapsed = 0; elapsed < timeout; elapsed += 2_000) {
     const state = await inspectFlowVideo(window, beforeSources, beforeCardCount);
+    if (state?.unusualActivity) {
+      const details = {
+        stage: context.stage || "STAGE_4_VIDEO_GENERATION",
+        sceneId: typeof context.sceneId === "string" ? context.sceneId : null,
+        flowProjectUrl: redactNetworkUrl(typeof context.flowProjectUrl === "string" ? context.flowProjectUrl : window?.webContents?.getURL?.() || ""),
+        flowUrl: redactNetworkUrl(window?.webContents?.getURL?.() || ""),
+        providerMessage: "We noticed some unusual activity. Please visit the Help Center for more information. You have not been charged for this generation.",
+        providerBlockedAt: new Date().toISOString(),
+        recommendedManualRetryAfter: null,
+        autoRetryAllowed: false,
+        generateTriggered: context.generateTriggered !== false,
+        generationStarted: false,
+        providerJobCreated: false,
+        beforeCardCount,
+        observedCardCount: state.videoCardCount ?? 0,
+        generationRequestObserved: false,
+        notCharged: state.notCharged === true,
+        recoveryAttempt: Number.isInteger(context.providerRecoveryAttempt) ? context.providerRecoveryAttempt : 0,
+        recoveryBudget: MAX_FLOW_PROVIDER_RELOAD_RECOVERY,
+        boundedReloadRecoveryAllowed: context.allowProviderReloadRecovery === true,
+        firstDivergence: "FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK",
+      };
+      recordBrowserAction({ action: "flow-generation-blocked", code: "FLOW_PROVIDER_UNUSUAL_ACTIVITY", ...details });
+      throw createFlowGenerationFailure("FLOW_PROVIDER_UNUSUAL_ACTIVITY", "Google Flow tạm chặn tạo video vì phát hiện hoạt động bất thường.", details);
+    }
     if (state?.videoSource) return state;
     if (state?.editorReady) return state;
     if (state?.videoCardCount > beforeCardCount && !openedVideoCard) {
@@ -4169,24 +4626,83 @@ async function waitForFlowVideo(window, beforeSources, beforeCardCount = 0, time
   return { failed: false, timedOut: true };
 }
 
-async function readFlowMediaBufferThroughPage(window, source, mediaType = "video") {
+async function waitForFlowSubmissionAcknowledgement(window, beforeSources = [], beforeCardCount = 0, timeout = 7_000) {
+  for (let elapsed = 0; elapsed < timeout; elapsed += 250) {
+    const videoState = await inspectFlowVideo(window, beforeSources, beforeCardCount).catch(() => null);
+    if (videoState?.unusualActivity || videoState?.videoSource || videoState?.editorReady || videoState?.videoCardCount > beforeCardCount) return videoState;
+    const uiState = await executeFlowJavaScript(window, `(() => {
+      const roots = [document]; const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      const visible = (element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return bounds.width > 0 && bounds.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'; };
+      const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]')]).find(visible);
+      const button = roots.flatMap((root) => [...root.querySelectorAll('button, [role="button"]')]).find((element) => visible(element) && String(element.getAttribute('aria-label') || '').toLowerCase() === 'start generation');
+      const text = document.body?.innerText || '';
+      return { promptPresent: Boolean(input), sendDisabled: Boolean(button?.disabled || button?.getAttribute('aria-disabled') === 'true'), busy: /generating|đang tạo|stop generation|dừng tạo|cancel generation/i.test(text) };
+    })()`).catch(() => null);
+    if (uiState && (!uiState.promptPresent || uiState.sendDisabled || uiState.busy)) return { submitted: true, ...uiState };
+    await delay(250);
+  }
+  return null;
+}
+
+async function clickFlowGenerateDomFallback(window) {
+  return executeFlowJavaScript(window, `(() => {
+    const roots = [document]; const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+    const visible = (element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return bounds.width > 0 && bounds.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'; };
+    const button = roots.flatMap((root) => [...root.querySelectorAll('button, [role="button"]')]).find((element) => visible(element) && String(element.getAttribute('aria-label') || '').toLowerCase() === 'start generation');
+    if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
+    button.click();
+    return true;
+  })()`).catch(() => false);
+}
+
+async function readFlowMediaDataThroughPageOnce(window, source, mediaType = "video") {
   if (typeof source !== "string" || !source) return null;
-  const dataUrl = await executeFlowJavaScript(window, `(async () => {
+  const result = await executeFlowJavaScript(window, `(async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
     try {
-      const response = await fetch(${JSON.stringify(source)}, { credentials: 'include' });
+      const response = await fetch(${JSON.stringify(source)}, { credentials: 'include', cache: 'no-store', signal: controller.signal });
       if (!response.ok) return null;
       const blob = await response.blob();
       if (!blob.type.startsWith(${JSON.stringify(mediaType + "/")} ) || blob.size < 1024) return null;
-      return await new Promise((resolve, reject) => {
+      const dataUrl = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result);
         reader.onerror = reject;
         reader.readAsDataURL(blob);
       });
+      return { dataUrl, mimeType: blob.type.toLowerCase(), size: blob.size };
     } catch { return null; }
-  })()`);
+    finally { clearTimeout(timeout); }
+  })()`).catch(() => null);
+  const dataUrl = result?.dataUrl;
   const match = typeof dataUrl === "string" ? new RegExp(`^data:${mediaType}/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=]+)$`, "i").exec(dataUrl) : null;
-  return match ? Buffer.from(match[1], "base64") : null;
+  return match ? { buffer: Buffer.from(match[1], "base64"), mimeType: result.mimeType || `${mediaType}/octet-stream` } : null;
+}
+
+async function readFlowMediaDataThroughPage(window, source, mediaType = "video") {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const result = await readFlowMediaDataThroughPageOnce(window, source, mediaType);
+    if (result) return result;
+    if (attempt < 7) await delay(2_000);
+  }
+  return null;
+}
+
+async function readFlowMediaBufferThroughPage(window, source, mediaType = "video") {
+  const result = await readFlowMediaDataThroughPage(window, source, mediaType);
+  return result?.buffer || null;
+}
+
+function detectFlowImageMimeType(buffer) {
+  if (!Buffer.isBuffer(buffer)) return "image/png";
+  if (buffer.length >= 12 && buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (buffer.length >= 3 && buffer.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return "image/jpeg";
+  if (buffer.length >= 6 && (buffer.subarray(0, 6).toString("ascii") === "GIF87a" || buffer.subarray(0, 6).toString("ascii") === "GIF89a")) return "image/gif";
+  return "image/png";
 }
 
 function flowMediaOriginPath(value) {
@@ -4211,7 +4727,10 @@ async function readFlowMediaBufferThroughCdp(window, source, mediaType = "video"
   const connection = window.webContents?.debugger;
   const expectedPath = flowMediaOriginPath(source);
   if (!connection || typeof connection.sendCommand !== "function" || !expectedPath) return null;
-  const pattern = mediaType === "video" ? "*://flow-content.google/video/*" : "*://flow-content.google/image/*";
+  // Match the exact generated media URL. A broad host pattern can pause
+  // unrelated Flow requests and, more importantly, miss the query-bearing
+  // response after the page has cached the asset.
+  const pattern = `${expectedPath}*`;
   let timer;
   let captured = false;
   let resolveCapture;
@@ -4242,9 +4761,11 @@ async function readFlowMediaBufferThroughCdp(window, source, mediaType = "video"
   };
   connection.on("message", onMessage);
   try {
+    await connection.sendCommand("Network.enable").catch(() => {});
+    await connection.sendCommand("Network.setCacheDisabled", { cacheDisabled: true }).catch(() => {});
     await connection.sendCommand("Fetch.enable", { patterns: [{ urlPattern: pattern, requestStage: "Response" }] });
     timer = setTimeout(() => rejectCapture(new Error("FLOW_CDP_MEDIA_CAPTURE_TIMEOUT")), 120_000);
-    await window.webContents.reload();
+    await connection.sendCommand("Page.reload", { ignoreCache: true });
     return await capturePromise;
   } catch {
     return null;
@@ -4252,6 +4773,7 @@ async function readFlowMediaBufferThroughCdp(window, source, mediaType = "video"
     clearTimeout(timer);
     connection.off("message", onMessage);
     try { await connection.sendCommand("Fetch.disable"); } catch { /* CDP session may have closed after capture. */ }
+    try { await connection.sendCommand("Network.setCacheDisabled", { cacheDisabled: false }); } catch { /* CDP session may have closed after capture. */ }
   }
 }
 
@@ -4288,22 +4810,159 @@ async function getFlowVideoBuffer(window, result) {
   return Buffer.from(match[1], "base64");
 }
 
-async function waitForFlowVideoWithRecovery(window, projectUrl, beforeSources, beforeCardCount = 0) {
-  let state = await waitForFlowVideo(window, beforeSources, beforeCardCount);
-  if (state?.videoSource && !state?.failed) return state;
-  await reloadFlowProject(window, projectUrl);
-  state = await waitForFlowVideo(window, beforeSources, beforeCardCount, 30_000);
-  if (state?.failed) {
-    const retryPoint = await waitForFlowControlPoint(window, ["Thử lại", "Try again", "Retry"], true, 15_000);
-    await dispatchBrowserClick(window, retryPoint);
-    state = await waitForFlowVideo(window, beforeSources, beforeCardCount);
+async function waitForFlowVideoWithRecovery(window, projectUrl, beforeSources, beforeCardCount = 0, context = {}) {
+  try {
+    let state = await waitForFlowVideo(window, beforeSources, beforeCardCount, 600_000, context);
     if (state?.videoSource && !state?.failed) return state;
-    if (state?.videoSource && state?.failed) throw new Error("Google Flow vẫn báo tạo video không thành công sau khi gửi tạo lại.");
-    throw new Error("Google Flow vẫn không tạo được video sau khi gửi tạo lại.");
+    await reloadFlowProject(window, projectUrl);
+    state = await waitForFlowVideo(window, beforeSources, beforeCardCount, 30_000, context);
+    if (state?.failed) {
+      const retryPoint = await waitForFlowControlPoint(window, ["Thử lại", "Try again", "Retry"], true, 15_000);
+      await dispatchBrowserClick(window, retryPoint);
+      state = await waitForFlowVideo(window, beforeSources, beforeCardCount, 600_000, context);
+      if (state?.videoSource && !state?.failed) return state;
+      if (state?.videoSource && state?.failed) throw new Error("Google Flow vẫn báo tạo video không thành công sau khi gửi tạo lại.");
+      throw new Error("Google Flow vẫn không tạo được video sau khi gửi tạo lại.");
+    }
+    if (state?.videoSource) return state;
+    if (!state?.failed) throw new Error("Google Flow không trả về video sau khi tải lại trang.");
+    throw new Error("Google Flow vẫn báo tạo video không thành công sau khi tải lại và gửi tạo lại.");
+  } catch (error) {
+    if (isNonRetryableFlowProviderBlock(error) && context.allowProviderReloadRecovery === true) {
+      const recoveryAttempt = Number.isInteger(context.providerRecoveryAttempt) ? context.providerRecoveryAttempt : 0;
+      if (recoveryAttempt < MAX_FLOW_PROVIDER_RELOAD_RECOVERY && typeof context.resendAfterReload === "function") {
+        recordBrowserAction({
+          action: "flow-provider-block-reload-recovery",
+          success: false,
+          recoveryAttempt: recoveryAttempt + 1,
+          recoveryBudget: MAX_FLOW_PROVIDER_RELOAD_RECOVERY,
+          projectUrl: redactNetworkUrl(projectUrl),
+          code: error.code,
+        });
+        await reloadFlowProject(window, projectUrl);
+        const prepared = await context.resendAfterReload(window, recoveryAttempt + 1);
+        const retryContext = {
+          ...context,
+          providerRecoveryAttempt: recoveryAttempt + 1,
+          allowProviderReloadRecovery: true,
+        };
+        try {
+          const state = await waitForFlowVideo(window, prepared?.beforeSources || [], prepared?.beforeCardCount || 0, 600_000, retryContext);
+          if (state?.videoSource && !state?.failed) return state;
+          if (state?.failed) throw new Error("Google Flow vẫn báo tạo video không thành công sau khi tải lại và gửi lại.");
+          throw new Error("Google Flow không trả về video sau khi tải lại và gửi lại.");
+        } catch (retryError) {
+          // Keep the provider's structured failure if the bounded resend is
+          // blocked again; never downgrade it to a generic video error.
+          if (isNonRetryableFlowProviderBlock(retryError)) throw retryError;
+          throw retryError;
+        }
+      }
+    }
+    throw error;
   }
-  if (state?.videoSource) return state;
-  if (!state?.failed) throw new Error("Google Flow không trả về video sau khi tải lại trang.");
-  throw new Error("Google Flow vẫn báo tạo video không thành công sau khi tải lại và gửi tạo lại.");
+}
+
+function normalizeFlowPromptText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+async function setFlowPrompt(window, prompt) {
+  const prepared = await executeFlowJavaScript(window, `(() => {
+    const roots = [document];
+    const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) {
+      for (const element of roots[index].querySelectorAll('*')) {
+        if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      }
+    }
+    const visible = (element) => {
+      const bounds = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return bounds.width > 100 && bounds.height >= 20 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]')]).find(visible);
+    if (!input) return { error: 'FLOW_PROMPT_INPUT_NOT_FOUND' };
+    input.focus();
+    if (input.tagName === 'TEXTAREA') {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      setter?.call(input, '');
+    } else {
+      document.execCommand('selectAll', false);
+      document.execCommand('delete', false);
+    }
+    input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'deleteContentBackward' }));
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return { tagName: input.tagName, contentEditable: input.getAttribute('contenteditable') === 'true' };
+  })()`);
+  if (prepared?.error) throw new Error(prepared.error);
+
+  if (prepared?.contentEditable && window?.edgeRuntime) {
+    await window.webContents.debugger.sendCommand("Input.insertText", { text: prompt });
+  } else {
+    await executeFlowJavaScript(window, `(() => {
+      const roots = [document];
+      const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll('*')) {
+          if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        }
+      }
+      const visible = (element) => {
+        const bounds = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return bounds.width > 100 && bounds.height >= 20 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]')]).find(visible);
+      if (!input) return false;
+      input.focus();
+      if (input.tagName === 'TEXTAREA') {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+        setter?.call(input, ${JSON.stringify(prompt)});
+      } else {
+        document.execCommand('insertText', false, ${JSON.stringify(prompt)});
+      }
+      input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(prompt)} }));
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(prompt)} }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    })()`);
+  }
+
+  await delay(500);
+  const state = await executeFlowJavaScript(window, `(() => {
+    const roots = [document];
+    const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) {
+      for (const element of roots[index].querySelectorAll('*')) {
+        if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      }
+    }
+    const visible = (element) => {
+      const bounds = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return bounds.width > 100 && bounds.height >= 20 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]')]).find(visible);
+    const button = roots.flatMap((root) => [...root.querySelectorAll('button, [role="button"]')]).find((element) => visible(element) && String(element.getAttribute('aria-label') || '').toLowerCase() === 'start generation');
+    return {
+      text: input?.tagName === 'TEXTAREA' ? input.value : (input?.innerText || input?.textContent || ''),
+      sendDisabled: Boolean(button?.disabled || button?.getAttribute('aria-disabled') === 'true'),
+    };
+  })()`);
+  const observed = normalizeFlowPromptText(state?.text);
+  const expected = normalizeFlowPromptText(prompt);
+  if (observed !== expected) {
+    recordBrowserAction({ action: "flow-prompt-input", success: false, inputMethod: prepared?.contentEditable && window?.edgeRuntime ? "EDGE_CDP_INPUT_INSERT_TEXT" : "DOM_INPUT", expectedLength: prompt.length, observedLength: String(state?.text || "").length, sendDisabled: Boolean(state?.sendDisabled) });
+    throw new Error("FLOW_PROMPT_INPUT_NOT_ACCEPTED");
+  }
+  if (state?.sendDisabled) {
+    recordBrowserAction({ action: "flow-prompt-input", success: false, inputMethod: prepared?.contentEditable && window?.edgeRuntime ? "EDGE_CDP_INPUT_INSERT_TEXT" : "DOM_INPUT", expectedLength: prompt.length, observedLength: observed.length, sendDisabled: true });
+    throw new Error("FLOW_GENERATE_CONTROL_DISABLED_AFTER_PROMPT");
+  }
+  recordBrowserAction({ action: "flow-prompt-input", success: true, inputMethod: prepared?.contentEditable && window?.edgeRuntime ? "EDGE_CDP_INPUT_INSERT_TEXT" : "DOM_INPUT", expectedLength: prompt.length, observedLength: observed.length, sendDisabled: false });
+  return state;
 }
 
 async function downloadFlowEditorVideo(window, downloadPoint) {
@@ -4359,7 +5018,7 @@ async function inspectFlowImage(window, beforeSources = []) {
     "  const sourceFor = (image) => image.currentSrc || image.src || image.querySelector('source')?.src || '';",
     "  const referenceSources = new Set(images.filter((candidate) => candidate.closest('flow-base-prompt-box, flow-ingredient-bar, .frame-trigger')).map(sourceFor).filter(Boolean));",
     "  const isReferenceImage = (candidate) => referenceSources.has(sourceFor(candidate)) || Boolean(candidate.closest('flow-base-prompt-box, flow-ingredient-bar, .frame-trigger'));",
-    "  const image = images.reverse().find((candidate) => { const source = sourceFor(candidate); return source && !before.has(source) && !isReferenceImage(candidate) && candidate.complete && (candidate.naturalWidth || candidate.width) >= 128 && (candidate.naturalHeight || candidate.height) >= 128 && /flow-content\\.google\\/image\\//i.test(source); });",
+    "  const image = images.reverse().find((candidate) => { const source = sourceFor(candidate); return source && !before.has(source) && !isReferenceImage(candidate) && candidate.complete && (candidate.naturalWidth || candidate.width) >= 128 && (candidate.naturalHeight || candidate.height) >= 128 && /(?:flow-content\\.google\\/image\\/|flow\\.google\\.com\\/asb\\/)/i.test(source); });",
     "  const text = document.body?.innerText || '';",
     "  const cleanSource = (value) => String(value || '').split('?')[0];",
     "  const mediaIdFromSource = (value) => { const source = cleanSource(value); const marker = '/image/'; const index = source.indexOf(marker); return index >= 0 ? source.slice(index + marker.length).split('/')[0] : null; };",
@@ -4383,9 +5042,29 @@ async function waitForFlowImage(window, beforeSources, timeout = 600_000) {
 async function getFlowImageBuffer(window, result) {
   if (typeof result?.imageSource === "string" && result.imageSource && !result.imageSource.startsWith("blob:")) {
     if (window?.edgeRuntime) {
-      const buffer = await readFlowMediaBufferThroughPage(window, result.imageSource, "image");
-      if (!buffer) throw new Error("Google Flow không cho phép tải ảnh vừa tạo qua Edge/CDP.");
-      return { buffer, mimeType: "image/png" };
+      const pageMedia = await readFlowImageDataFromCandidates(window, result.imageSource);
+      if (pageMedia) {
+        return pageMedia;
+      }
+      // Managed Edge owns the authenticated Flow page, so the Electron
+      // session may not be able to read the image through page-context fetch.
+      // Reuse the response-body CDP bridge already used for Flow video before
+      // failing closed; never substitute a screenshot or an unvalidated blob.
+      const cdpSources = [...new Set([...(await listFlowImageSources(window)), result.imageSource])];
+      recordBrowserAction({ action: "flow-image-cdp-candidates", count: cdpSources.length, sources: cdpSources.map((source) => redactNetworkUrl(source)) });
+      for (const candidateSource of cdpSources) {
+        const cdpBuffer = await readFlowMediaBufferThroughCdp(window, candidateSource, "image");
+        if (cdpBuffer) return { buffer: cdpBuffer, mimeType: detectFlowImageMimeType(cdpBuffer) };
+      }
+      // The exact-source CDP reload can cause Flow to replace its temporary
+      // flow-content URL with the final asb tile source. Re-observe the live
+      // DOM after that reload before failing closed.
+      const postReloadPageMedia = await readFlowImageDataFromCandidates(window, result.imageSource, 45_000);
+      if (postReloadPageMedia) {
+        recordBrowserAction({ action: "flow-image-post-cdp-page-fetch-success", mimeType: postReloadPageMedia.mimeType, byteLength: postReloadPageMedia.buffer.length });
+        return postReloadPageMedia;
+      }
+      throw new Error("Google Flow không cho phép tải ảnh vừa tạo qua Edge/CDP.");
     }
     try {
       const response = await window.webContents.session.fetch(result.imageSource, { signal: AbortSignal.timeout(30_000) });
@@ -4432,6 +5111,46 @@ async function waitForFlowImageWithRecovery(window, projectUrl, beforeSources) {
   if (state?.imageSource) return state;
   if (!state?.failed) throw new Error("Google Flow không trả về ảnh sau khi tải lại trang.");
   throw new Error("Google Flow vẫn báo tạo ảnh không thành công sau khi tải lại và gửi tạo lại.");
+}
+
+async function listFlowImageSources(window) {
+  const sources = await executeFlowJavaScript(window, `(() => {
+    const roots = [document]; const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+    return [...new Set(roots.flatMap((root) => [...root.querySelectorAll('img')]).map((image) => image.currentSrc || image.src || image.querySelector('source')?.src || '').filter((source) => source.startsWith("https://flow-content.google/image/") || source.startsWith("https://flow.google.com/asb/")))];
+  })()`).catch(() => []);
+  return Array.isArray(sources) ? sources.filter((source) => typeof source === "string" && source) : [];
+}
+
+async function readFlowImageDataFromCandidates(window, initialSource, timeoutMs = 120_000) {
+  const candidates = new Set();
+  const lastAttemptAt = new Map();
+  const startedAt = Date.now();
+  let lastLoggedSources = "";
+  while (Date.now() - startedAt < timeoutMs) {
+    const observedSources = await listFlowImageSources(window);
+    for (const source of [initialSource, ...observedSources]) {
+      if (typeof source === "string" && source && !source.startsWith("blob:")) candidates.add(source);
+    }
+    const sources = [...candidates];
+    const sourceKey = sources.join("|");
+    if (sourceKey !== lastLoggedSources) {
+      lastLoggedSources = sourceKey;
+      recordBrowserAction({ action: "flow-image-download-candidates", count: sources.length, sources: sources.map((source) => redactNetworkUrl(source)) });
+    }
+    for (const candidateSource of sources) {
+      const lastAttempt = lastAttemptAt.get(candidateSource) || 0;
+      if (Date.now() - lastAttempt < 8_000) continue;
+      lastAttemptAt.set(candidateSource, Date.now());
+      const pageMedia = await readFlowMediaDataThroughPageOnce(window, candidateSource, "image");
+      if (pageMedia) {
+        recordBrowserAction({ action: "flow-image-page-fetch-success", source: redactNetworkUrl(candidateSource), mimeType: pageMedia.mimeType, byteLength: pageMedia.buffer.length });
+        return pageMedia;
+      }
+    }
+    await delay(2_000);
+  }
+  return null;
 }
 
 async function captureGeminiImage(window, rect, source = null) {
@@ -4976,59 +5695,65 @@ async function runFlowVideoJobUnlocked(event, projectId, channelId, slots) {
     const imagePath = findSceneImagePath(projectId, sceneNumber);
     sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label: slot.label || "Cảnh " + sceneNumber });
 
-    await clearFlowComposer(window);
-    sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang cấu hình Google Flow cho cảnh " + sceneNumber + "..." });
-    await configureFlowVideo(window);
-    sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang tải đúng ảnh cảnh " + sceneNumber + " lên Google Flow..." });
-    await uploadFlowAsset(window, imagePath, false, (label) => sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label }), { preferDropFallback: true });
-    await addFlowAssetToStart(window, imagePath);
-
-    const prepared = await window.webContents.executeJavaScript([
-      "(() => {",
-      "  const roots = [document];",
-      "  const seen = new Set(roots);",
-      "  for (let index = 0; index < roots.length; index += 1) {",
-      "    for (const element of roots[index].querySelectorAll('*')) {",
-      "      if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }",
-      "    }",
-      "  }",
-      "  const videos = roots.flatMap((root) => [...root.querySelectorAll('video')]);",
-      "  const beforeSources = videos.map((video) => video.currentSrc || video.src || video.querySelector('source')?.src).filter(Boolean);",
-      "  const beforeCardCount = roots.flatMap((root) => [...root.querySelectorAll('img[alt=\"Generated video thumbnail\"]')]).filter((element) => { const bounds = element.getBoundingClientRect(); return bounds.width > 0 && bounds.height > 0; }).length;",
-      "  const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable=\"true\"], [role=\"textbox\"]')]).filter((element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return bounds.width > 100 && bounds.height >= 20 && style.visibility !== 'hidden' && style.display !== 'none'; }).at(-1);",
-      "  if (!input) return { error: 'Không tìm thấy ô nhập prompt Google Flow.' };",
-      "  input.focus();",
-      "  if (input.tagName === 'TEXTAREA') { const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, ''); }",
-      "  else { document.execCommand('selectAll', false); document.execCommand('delete', false); }",
-      "  input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));",
-      "  return { beforeSources, beforeCardCount };",
-      "})()",
-    ].join("\n"), true);
-    if (prepared?.error) throw new Error(prepared.error);
-
     const prompt = await validatedPromptForSend(slot, "video cảnh " + sceneNumber, { projectId, channelId, promptType: "VIDEO", sceneNumber });
     assertFlowPromptContract(prompt, "video cảnh " + sceneNumber);
-    const promptResult = await window.webContents.executeJavaScript([
-      "(() => {",
-      "  const prompt = " + JSON.stringify(prompt) + ";",
-      "  const roots = [document];",
-      "  const seen = new Set(roots);",
-      "  for (let index = 0; index < roots.length; index += 1) {",
-      "    for (const element of roots[index].querySelectorAll('*')) {",
-      "      if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }",
-      "    }",
-      "  }",
-      "  const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable=\"true\"]')]).find((element) => { const bounds = element.getBoundingClientRect(); return bounds.width > 100 && bounds.height >= 20; });",
-      "  if (!input) return { error: 'Không tìm thấy ô nhập prompt Google Flow.' };",
-      "  input.focus();",
-      "  if (input.tagName === 'TEXTAREA') { const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, prompt); }",
-      "  else { document.execCommand('insertText', false, prompt); }",
-      "  input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));",
-      "  input.dispatchEvent(new Event('change', { bubbles: true }));",
-      "  return { promptPrefix: prompt.slice(0, 48) };",
-      "})()",
-    ].join("\n"), true);
-    if (promptResult?.error) throw new Error(promptResult.error);
+
+    const prepareVideoSubmission = async (targetWindow) => {
+      await clearFlowComposer(targetWindow);
+      sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang cấu hình Google Flow cho cảnh " + sceneNumber + "..." });
+      await configureFlowVideo(targetWindow);
+      sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang tải đúng ảnh cảnh " + sceneNumber + " lên Google Flow..." });
+      await uploadFlowAsset(targetWindow, imagePath, false, (label) => sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label }), { preferDropFallback: true });
+      await addFlowAssetToStart(targetWindow, imagePath);
+
+      const prepared = await targetWindow.webContents.executeJavaScript([
+        "(() => {",
+        "  const roots = [document];",
+        "  const seen = new Set(roots);",
+        "  for (let index = 0; index < roots.length; index += 1) {",
+        "    for (const element of roots[index].querySelectorAll('*')) {",
+        "      if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }",
+        "    }",
+        "  }",
+        "  const videos = roots.flatMap((root) => [...root.querySelectorAll('video')]);",
+        "  const beforeSources = videos.map((video) => video.currentSrc || video.src || video.querySelector('source')?.src).filter(Boolean);",
+        "  const beforeCardCount = roots.flatMap((root) => [...root.querySelectorAll('img[alt=\"Generated video thumbnail\"]')]).filter((element) => { const bounds = element.getBoundingClientRect(); return bounds.width > 0 && bounds.height > 0; }).length;",
+        "  const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable=\"true\"], [role=\"textbox\"]')]).filter((element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return bounds.width > 100 && bounds.height >= 20 && style.visibility !== 'hidden' && style.display !== 'none'; }).at(-1);",
+        "  if (!input) return { error: 'Không tìm thấy ô nhập prompt Google Flow.' };",
+        "  input.focus();",
+        "  if (input.tagName === 'TEXTAREA') { const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, ''); }",
+        "  else { document.execCommand('selectAll', false); document.execCommand('delete', false); }",
+        "  input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));",
+        "  return { beforeSources, beforeCardCount };",
+        "})()",
+      ].join("\n"), true);
+      if (prepared?.error) throw new Error(prepared.error);
+      await setFlowPrompt(targetWindow, prompt);
+      return prepared;
+    };
+
+    const submitPreparedVideo = async (targetWindow, prepared) => {
+      const sendPoint = await waitForFlowControlPoint(targetWindow, ["Bắt đầu tạo", "Tạo video", "Generate", "Create", "Start generation", "arrow_forward"], false, 30_000);
+      await dispatchBrowserClick(targetWindow, sendPoint);
+      let acknowledgement = await waitForFlowSubmissionAcknowledgement(targetWindow, prepared.beforeSources ?? [], prepared.beforeCardCount ?? 0);
+      if (!acknowledgement) {
+        const fallbackClicked = await clickFlowGenerateDomFallback(targetWindow);
+        if (fallbackClicked) acknowledgement = await waitForFlowSubmissionAcknowledgement(targetWindow, prepared.beforeSources ?? [], prepared.beforeCardCount ?? 0);
+      }
+      if (!acknowledgement) throw createFlowGenerationFailure("FLOW_GENERATION_SUBMISSION_NOT_CONFIRMED", "Google Flow không xác nhận đã nhận lệnh tạo video.", {
+        stage: "STAGE_4_VIDEO_GENERATION",
+        sceneId: typeof slot.sceneId === "string" ? slot.sceneId : null,
+        flowProjectUrl: projectUrl,
+        generateTriggered: true,
+        generationStarted: false,
+        providerJobCreated: false,
+        beforeCardCount: prepared.beforeCardCount ?? 0,
+        userAction: "GENERATE_CLICK_WITH_DOM_FALLBACK",
+      });
+      return prepared;
+    };
+
+    const prepared = await prepareVideoSubmission(window);
 
     const checkpointId = `manual-flow:${projectId}:scene-${sceneNumber}`;
     saveManualFlowCheckpoint({
@@ -5046,12 +5771,27 @@ async function runFlowVideoJobUnlocked(event, projectId, channelId, slots) {
     });
 
     sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang gửi lệnh tạo video cảnh " + sceneNumber + "..." });
-    const sendPoint = await waitForFlowControlPoint(window, ["Bắt đầu tạo", "Tạo video", "Generate", "Create", "Start generation", "arrow_forward"], false, 30_000);
-    await dispatchBrowserClick(window, sendPoint);
-    await delay(1_200);
+    await submitPreparedVideo(window, prepared);
 
     sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label: "Đang chờ Google Flow tạo video cảnh " + sceneNumber + "..." });
-    const result = await waitForFlowVideoWithRecovery(window, projectUrl, prepared.beforeSources ?? [], prepared.beforeCardCount ?? 0);
+    const result = await waitForFlowVideoWithRecovery(window, projectUrl, prepared.beforeSources ?? [], prepared.beforeCardCount ?? 0, {
+      stage: "STAGE_4_VIDEO_GENERATION",
+      sceneId: typeof slot.sceneId === "string" ? slot.sceneId : null,
+      flowProjectUrl: projectUrl,
+      generateTriggered: true,
+      allowProviderReloadRecovery: true,
+      resendAfterReload: async (targetWindow, recoveryAttempt) => {
+        sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label: "Flow tạm báo hoạt động bất thường; đã tải lại project và gửi lại một lần (" + recoveryAttempt + "/" + MAX_FLOW_PROVIDER_RELOAD_RECOVERY + ")..." });
+        const retryPrepared = await prepareVideoSubmission(targetWindow);
+        updateManualFlowCheckpoint(checkpointId, {
+          preSubmitVideoSources: retryPrepared.beforeSources ?? [],
+          preSubmitCardCount: retryPrepared.beforeCardCount ?? 0,
+          updatedAt: new Date().toISOString(),
+        });
+        await submitPreparedVideo(targetWindow, retryPrepared);
+        return retryPrepared;
+      },
+    });
     const buffer = await getFlowVideoBuffer(window, result);
     const url = saveGeminiVideo(projectId, sceneNumber, buffer);
     const savedPath = path.join(app.getPath("userData"), "generated-videos", projectId, "scene-" + sceneNumber + ".mp4");
@@ -5077,39 +5817,54 @@ async function resumeAfterManualFlowSubmission(checkpointId) {
     throw new Error("MANUAL_FLOW_CHECKPOINT_NOT_FOUND");
   }
   const savedPath = path.join(app.getPath("userData"), "generated-videos", checkpoint.projectId, "scene-" + checkpoint.sceneNumber + ".mp4");
-  if (checkpoint.resolvedVideoSource && fs.existsSync(savedPath) && fs.statSync(savedPath).size >= 1024) {
+  const savedVideoAvailable = fs.existsSync(savedPath) && fs.statSync(savedPath).size >= 1024;
+  if (savedVideoAvailable) {
     updateManualFlowCheckpoint(checkpointId, { status: "COMPLETED", savedVideoPath: savedPath });
     return { status: "MANUAL_HANDOFF_RESUME", checkpointId, video: `/api/v1/projects/${checkpoint.projectId}/videos?sceneNumber=${checkpoint.sceneNumber}` };
   }
-  let window = await createFlowWindow();
-  await window.webContents.loadURL(checkpoint.flowProjectUrl);
-  await delay(1_500);
-  let result = await waitForFlowVideo(window, checkpoint.preSubmitVideoSources || [], checkpoint.preSubmitCardCount || 0, 20_000);
-  if (!result?.videoSource && !result?.editorReady) {
-    return { status: "MANUAL_SUBMISSION_NOT_COMPLETED", checkpointId };
-  }
-  let buffer;
   try {
-    buffer = await getFlowVideoBuffer(window, result);
-  } catch (primaryError) {
-    const fallbackSource = checkpoint.resolvedVideoSource;
-    if (typeof fallbackSource !== "string") throw primaryError;
-    if (window?.edgeRuntime) {
-      buffer = await readFlowMediaBufferThroughPage(window, fallbackSource, "video");
-      if (!buffer) throw primaryError;
-    } else {
-      const response = await window.webContents.session.fetch(fallbackSource);
-      if (!response.ok) throw primaryError;
-      buffer = Buffer.from(await response.arrayBuffer());
+    let window = await createFlowWindow();
+    try {
+      await window.webContents.loadURL(checkpoint.flowProjectUrl);
+      await delay(1_500);
+      let result = await waitForFlowVideo(window, checkpoint.preSubmitVideoSources || [], checkpoint.preSubmitCardCount || 0, 20_000, {
+        stage: "STAGE_4_VIDEO_GENERATION",
+        sceneId: typeof checkpoint.sceneId === "string" ? checkpoint.sceneId : null,
+        flowProjectUrl: checkpoint.flowProjectUrl,
+        generateTriggered: true,
+      });
+      if (!result?.videoSource && !result?.editorReady) {
+        return { status: "MANUAL_SUBMISSION_NOT_COMPLETED", checkpointId };
+      }
+      let buffer;
+      try {
+        buffer = await withTimeout(getFlowVideoBuffer(window, result), MANUAL_FLOW_HANDOFF_MEDIA_TIMEOUT_MS, "MANUAL_FLOW_HANDOFF_MEDIA_TIMEOUT");
+      } catch (primaryError) {
+        const fallbackSource = checkpoint.resolvedVideoSource;
+        if (typeof fallbackSource !== "string") throw primaryError;
+        if (window?.edgeRuntime) {
+          buffer = await withTimeout(readFlowMediaBufferThroughPage(window, fallbackSource, "video"), MANUAL_FLOW_HANDOFF_MEDIA_TIMEOUT_MS, "MANUAL_FLOW_HANDOFF_MEDIA_TIMEOUT");
+          if (!buffer) throw primaryError;
+        } else {
+          const response = await window.webContents.session.fetch(fallbackSource);
+          if (!response.ok) throw primaryError;
+          buffer = Buffer.from(await response.arrayBuffer());
+        }
+        updateManualFlowCheckpoint(checkpointId, { recoveredWarning: `RECOVERED_WARNING: ${primaryError instanceof Error ? primaryError.message : String(primaryError)}` });
+      }
+      const url = saveGeminiVideo(checkpoint.projectId, checkpoint.sceneNumber, buffer);
+      if (buffer.length < 1024 || !fs.existsSync(savedPath) || !fs.readFileSync(savedPath).equals(buffer)) {
+        throw new Error("MANUAL_FLOW_VIDEO_SAVE_FAILED");
+      }
+      updateManualFlowCheckpoint(checkpointId, { status: "COMPLETED", savedVideoPath: savedPath, resolvedVideoSource: result.videoSource || checkpoint.resolvedVideoSource || null });
+      return { status: "MANUAL_HANDOFF_RESUME", checkpointId, video: url };
+    } finally {
+      await closeFlowWindow(false).catch(() => {});
     }
-    updateManualFlowCheckpoint(checkpointId, { recoveredWarning: `RECOVERED_WARNING: ${primaryError instanceof Error ? primaryError.message : String(primaryError)}` });
+  } catch (error) {
+    await closeFlowWindow(false).catch(() => {});
+    throw error;
   }
-  const url = saveGeminiVideo(checkpoint.projectId, checkpoint.sceneNumber, buffer);
-  if (buffer.length < 1024 || !fs.existsSync(savedPath) || !fs.readFileSync(savedPath).equals(buffer)) {
-    throw new Error("MANUAL_FLOW_VIDEO_SAVE_FAILED");
-  }
-  updateManualFlowCheckpoint(checkpointId, { status: "COMPLETED", savedVideoPath: savedPath, resolvedVideoSource: result.videoSource || checkpoint.resolvedVideoSource || null });
-  return { status: "MANUAL_HANDOFF_RESUME", checkpointId, video: url };
 }
 
 async function prepareManualFlowSubmission(projectId, channelId, slot) {
@@ -5177,15 +5932,19 @@ ipcMain.handle("flow-browser:run-image-job", async (event, value) => {
 });
 
 ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
-  const projectId = value?.projectId;
-  const channelId = value?.channelId;
-  const slots = value?.slots;
-  if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || typeof channelId !== "string" || !/^[A-Za-z0-9_-]+$/.test(channelId) || !Array.isArray(slots) || slots.length === 0) {
-    throw new Error("Yêu cầu tạo video không hợp lệ.");
+  try {
+    const projectId = value?.projectId;
+    const channelId = value?.channelId;
+    const slots = value?.slots;
+    if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || typeof channelId !== "string" || !/^[A-Za-z0-9_-]+$/.test(channelId) || !Array.isArray(slots) || slots.length === 0) {
+      throw new Error("Yêu cầu tạo video không hợp lệ.");
+    }
+    const result = await runFlowVideoJob(event, projectId, channelId, slots);
+    await closeFlowWindow();
+    return { ok: true, data: result };
+  } catch (error) {
+    return { ok: false, error: serializeGeminiError(error) };
   }
-  const result = await runFlowVideoJob(event, projectId, channelId, slots);
-  await closeFlowWindow();
-  return result;
 });
 
 ipcMain.handle("flow-browser:resume-after-manual-submission", async (_event, value) => {
@@ -5293,6 +6052,7 @@ async function createWindow(syncAfterUpdate = false) {
   });
 
   window.webContents.setWindowOpenHandler(({ url }) => {
+    if (!isAllowedExternalUrl(url)) return { action: "deny" };
     void shell.openExternal(url);
     return { action: "deny" };
   });
@@ -5318,6 +6078,7 @@ app.whenReady()
   .then(async () => {
     await startLocalServices();
     await waitForServer();
+    await verifyDevRendererIdentity();
     await flushDesktopRuntimeFailures();
     await createWindow(consumeSyncAfterUpdate());
     if (process.env.DESKTOP_FLOW_BRIDGE_DISABLED !== "1") startDesktopFlowBridge();

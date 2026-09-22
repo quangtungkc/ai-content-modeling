@@ -90,14 +90,15 @@ describe("Gemini remote script diagnostics", () => {
     expect(source).toContain("COMPLETION_DIAGNOSTICS_COLLECT");
   });
 
-  it("INCIDENT 1H keeps retry pending through a bounded confirmation grace and final arbitration", () => {
+  it("INCIDENT 1H keeps retry bounded and requires strict submission confirmation", () => {
     const source = readFileSync(new URL("./main.cjs", import.meta.url), "utf8");
     expect(source).toContain("const GEMINI_PRE_RETRY_CONFIRMATION_GRACE_MS = 2_000");
-    expect(source).toContain("async function waitForPreRetryConfirmation");
-    expect(source).toContain("command.markRetryEligible()");
-    expect(source).toContain("authorizeGeminiSendRetry");
+    expect(source).toContain("async function waitForGeminiSubmissionConfirmation");
+    expect(source).toContain("async function recoverGeminiConversationForSend");
     expect(source).toContain("GEMINI_REMOTE_CONTEXT_RECOVERY_FAILED");
-    expect(source).toContain("command.markSendRetry(retryReason, retrySnapshot)");
+    expect(source).toContain('command.markSendRetry("GEMINI_CONVERSATION_RESET_DURING_SEND", confirmation.reset)');
+    expect(source).toContain("recoveryBudget: 1");
+    expect(source).toContain("GEMINI_GENERATION_START_TIMEOUT_MS");
   });
 
   it("INCIDENT 1J adds read-only Page/Runtime/Target and navigation-initiator evidence", () => {

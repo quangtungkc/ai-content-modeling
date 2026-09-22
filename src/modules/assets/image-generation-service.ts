@@ -8,8 +8,11 @@ import { AppError } from "@/lib/errors";
 export type GeneratedImageKind = "character" | "background" | "scene";
 const appDataRoot = () => applicationDataDirectory(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd());
 const legacyAppDataRoot = () => applicationDataDirectory(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "Modeling AI");
-const root = () => path.join(appDataRoot(), "generated-images");
-const videoRoot = () => path.join(appDataRoot(), "generated-videos");
+const generatedMediaRoot = () => process.env.MODELING_AI_GENERATED_MEDIA_ROOT
+  ? path.resolve(process.env.MODELING_AI_GENERATED_MEDIA_ROOT)
+  : appDataRoot();
+const root = () => path.join(generatedMediaRoot(), "generated-images");
+const videoRoot = () => path.join(generatedMediaRoot(), "generated-videos");
 const legacyImageRoot = () => path.join(legacyAppDataRoot(), "generated-images");
 const legacyVideoRoot = () => path.join(legacyAppDataRoot(), "generated-videos");
 const imageFormats = [

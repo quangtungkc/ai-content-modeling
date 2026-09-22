@@ -32,6 +32,7 @@ export type BrowserFlowImageSlot = {
 
 export type BrowserFlowVideoSlot = {
   sceneNumber: number;
+  sceneId?: string;
   label?: string;
   visualBlock: string;
   actionBlock: string;
@@ -84,7 +85,12 @@ export async function waitForBridgeJob(jobId: string, onProgress?: BridgeRequest
       const payload = record(job.payload);
       return record(payload.bridgeResult);
     }
-    if (job.status === "failed") throw new Error(job.error || "Google Flow trên trình duyệt không hoàn tất.");
+    if (job.status === "failed") {
+      const failure = record(record(job.payload).bridgeFailure);
+      const error = new Error(typeof failure.message === "string" ? failure.message : job.error || "Google Flow trên trình duyệt không hoàn tất.");
+      Object.assign(error, failure);
+      throw error;
+    }
     if (job.status === "running" && job.startedAt && Date.now() - job.startedAt.getTime() >= BRIDGE_HEARTBEAT_STALE_MS) {
       throw new Error("FLOW_BRIDGE_HEARTBEAT_STALE: Electron không còn heartbeat; dừng chờ để recovery từ checkpoint.");
     }

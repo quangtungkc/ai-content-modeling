@@ -3,10 +3,13 @@ import { describe, expect, it } from "vitest";
 const lifecycle = require("./gemini-conversation-lifecycle.cjs") as {
   extractGeminiConversationId: (value: string) => string | null;
   conversationIdFromUrl: (value: string) => string | null;
+  conversationNavigationDisposition: (requestedUrl: string, observedUrl: string) => string;
   conversationUrl: (value: string) => string | null;
+  isBareGeminiAppUrl: (value: string) => boolean;
   normalizeConversationBinding: (value: unknown, runId: string) => Record<string, unknown>;
   bindConversationFromUrl: (value: unknown, runId: string, url: string, stage: string, commandId: string, at?: string) => Record<string, unknown>;
   markConversationStep: (value: unknown, runId: string, stage: string, commandId: string, at?: string) => Record<string, unknown>;
+  markConversationStale: (value: unknown, runId: string, stage: string, at?: string) => Record<string, unknown>;
   assertConversationReady: (value: unknown, runId: string, currentUrl: string) => Record<string, unknown>;
 };
 
@@ -41,6 +44,34 @@ describe("one-run one-Gemini-conversation lifecycle", () => {
     expect(() => lifecycle.assertConversationReady(bound, runId, "https://gemini.google.com/app")).toThrow("GEMINI_CONVERSATION_URL_MISMATCH");
     expect(() => lifecycle.assertConversationReady(bound, runId, "https://example.test/app/conversation-1")).toThrow("GEMINI_CONVERSATION_URL_MISMATCH");
     expect(() => lifecycle.assertConversationReady(bound, runId, "not-a-url")).toThrow("GEMINI_CONVERSATION_URL_MISMATCH");
+  });
+
+  it("classifies a generic Gemini app URL as retryable, never as the bound conversation", () => {
+    expect(lifecycle.conversationNavigationDisposition(url, "https://gemini.google.com/app")).toBe("RETRY");
+    expect(lifecycle.conversationNavigationDisposition(url, url)).toBe("MATCH");
+    expect(lifecycle.conversationNavigationDisposition(url, "https://accounts.google.com/signin")).toBe("AUTH_REQUIRED");
+    expect(lifecycle.conversationNavigationDisposition(url, "https://gemini.google.com/app/other")).toBe("MISMATCH");
+  });
+
+  it("recognizes the bare app route as the stale-conversation redirect target", () => {
+    expect(lifecycle.isBareGeminiAppUrl("https://gemini.google.com/app")).toBe(true);
+    expect(lifecycle.isBareGeminiAppUrl("https://gemini.google.com/app/?hl=vi")).toBe(true);
+    expect(lifecycle.isBareGeminiAppUrl(url)).toBe(false);
+    expect(lifecycle.isBareGeminiAppUrl("https://accounts.google.com/signin")).toBe(false);
+  });
+
+  it("marks the persisted binding stale without inventing a replacement", () => {
+    const bound = lifecycle.bindConversationFromUrl({}, runId, url, "PROJECT", "command-1");
+    const stale = lifecycle.markConversationStale(bound, runId, "CONTENT_PROJECT", "2026-09-21T00:00:00.000Z");
+    expect(stale).toMatchObject({
+      geminiConversationId: "conversation-1",
+      geminiConversationUrl: url,
+      geminiConversationState: "DELETED",
+      geminiConversationDeletedAt: "2026-09-21T00:00:00.000Z",
+      geminiConversationOwnerRunId: runId,
+      lastGeminiStage: "CONTENT_PROJECT",
+    });
+    expect(() => lifecycle.assertConversationReady(stale, runId, url)).toThrow("GEMINI_CONVERSATION_NOT_ACTIVE");
   });
 
   it("records terminal step metadata without changing conversation identity", () => {

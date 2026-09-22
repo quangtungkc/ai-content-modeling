@@ -24,6 +24,105 @@ function hashText(value) {
   return crypto.createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
 }
 
+function normalizePromptIdentity(value) {
+  return String(value ?? "").normalize("NFKC").replace(/\s+/g, " ").trim();
+}
+
+function promptIdentityHash(value) {
+  let hash = 2166136261;
+  for (const character of normalizePromptIdentity(value)) {
+    hash ^= character.codePointAt(0) || 0;
+    hash = Math.imul(hash, 16777619);
+  }
+  return `fnv1a-${hash >>> 0}`;
+}
+
+function createGeminiConversationResetError({ commandId = null, expectedConversationUrl = null, actualUrl = null, recoveryAttempt = 0, recoveryBudget = 1, userTurnDelta = null, assistantTurnDelta = null, generationRequestObserved = false, composerCleared = false, authenticatedState = null, cookieRotationObserved = false } = {}) {
+  const context = {
+    code: "GEMINI_CONVERSATION_RESET_DURING_SEND",
+    firstDivergence: "GEMINI_CONVERSATION_RESET_DURING_SEND",
+    cause: cookieRotationObserved === true ? "AUTH_COOKIE_ROTATION_CONVERSATION_RESET" : "GEMINI_CONVERSATION_RESET",
+    commandId,
+    expectedConversationUrl,
+    actualUrl,
+    recoveryAttempt,
+    recoveryBudget,
+    userTurnDelta,
+    assistantTurnDelta,
+    generationRequestObserved: generationRequestObserved === true,
+    composerCleared: composerCleared === true,
+    authenticatedState: authenticatedState ?? null,
+    cookieRotationObserved: cookieRotationObserved === true,
+  };
+  const error = new Error(`${context.code}: ${JSON.stringify(context)}`);
+  error.name = "GeminiConversationResetError";
+  error.code = context.code;
+  error.firstDivergence = context.firstDivergence;
+  error.cause = context.cause;
+  error.context = context;
+  return error;
+}
+
+function canonicalGeminiConversationUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    if (url.origin !== "https://gemini.google.com") return null;
+    const pathname = url.pathname.replace(/\/+$/, "") || "/";
+    return `${url.origin}${pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+function sameGeminiConversationUrl(expectedUrl, actualUrl) {
+  const expected = canonicalGeminiConversationUrl(expectedUrl);
+  const actual = canonicalGeminiConversationUrl(actualUrl);
+  return Boolean(expected && actual && expected === actual && /\/app\/[^/]+$/i.test(expected));
+}
+
+function isGeminiConversationUrl(value) {
+  const canonical = canonicalGeminiConversationUrl(value);
+  return Boolean(canonical && /\/app\/[^/]+$/i.test(canonical));
+}
+
+function evaluateGeminiSubmission(snapshot, { expectedConversationUrl = null, allowNewConversation = false, baselineUserTurnCount = null, baselineAssistantTurnCount = null, baselineUserTurnHashes = [], promptIdentityHash = null } = {}) {
+  const userTurns = Array.isArray(snapshot?.userTurns) ? snapshot.userTurns : [];
+  const currentUserTurnCount = Number.isInteger(snapshot?.userTurnCount) ? snapshot.userTurnCount : userTurns.length;
+  const currentAssistantTurnCount = Number.isInteger(snapshot?.assistantTurnCount) ? snapshot.assistantTurnCount : null;
+  const userTurnDelta = Number.isInteger(baselineUserTurnCount) && Number.isInteger(currentUserTurnCount)
+    ? currentUserTurnCount - baselineUserTurnCount
+    : null;
+  const assistantTurnDelta = Number.isInteger(baselineAssistantTurnCount) && Number.isInteger(currentAssistantTurnCount)
+    ? currentAssistantTurnCount - baselineAssistantTurnCount
+    : null;
+  const baselineHashes = Array.isArray(baselineUserTurnHashes) ? baselineUserTurnHashes : [];
+  const currentHashes = userTurns.map((turn) => turn?.normalizedTextHash || null).filter(Boolean);
+  const baselinePromptCount = promptIdentityHash ? baselineHashes.filter((hash) => hash === promptIdentityHash).length : 0;
+  const currentPromptCount = promptIdentityHash ? currentHashes.filter((hash) => hash === promptIdentityHash).length : 0;
+  const exactPromptDelta = currentPromptCount - baselinePromptCount;
+  const expectedCanonicalUrl = canonicalGeminiConversationUrl(expectedConversationUrl);
+  const actualCanonicalUrl = canonicalGeminiConversationUrl(snapshot?.conversationUrl);
+  const conversationOwnershipConfirmed = allowNewConversation
+    ? Boolean(actualCanonicalUrl && (actualCanonicalUrl === expectedCanonicalUrl || isGeminiConversationUrl(actualCanonicalUrl)))
+    : sameGeminiConversationUrl(expectedConversationUrl, snapshot?.conversationUrl);
+  const newUserTurnConfirmed = userTurnDelta === 1 && exactPromptDelta >= 1;
+  const submissionConfirmed = conversationOwnershipConfirmed && newUserTurnConfirmed;
+  const matchedUserTurn = submissionConfirmed
+    ? [...userTurns].reverse().find((turn) => turn?.normalizedTextHash === promptIdentityHash) || null
+    : null;
+  return {
+    conversationOwnershipConfirmed,
+    newUserTurnConfirmed,
+    submissionConfirmed,
+    userTurnDelta,
+    assistantTurnDelta,
+    exactPromptDelta,
+    matchedUserTurnId: matchedUserTurn?.turnId || matchedUserTurn?.candidateId || null,
+    currentUserTurnCount,
+    currentAssistantTurnCount,
+  };
+}
+
 function redactNetworkUrl(value) {
   try {
     const url = new URL(String(value || ""));
@@ -149,10 +248,7 @@ function findAttributedGeminiGenerationRequest(requests, { commandId, sessionId,
 }
 
 function submissionConfirmationSource(snapshot) {
-  if (snapshot?.composerReady === true) return "DOM_COMPOSER_CLEARED";
-  if (snapshot?.userMessagePresent === true) return "DOM_USER_MESSAGE";
-  if (snapshot?.stopButtonPresent === true || snapshot?.streamingIndicatorPresent === true) return "DOM_GENERATING_UI";
-  if (snapshot?.newResponseCount === 1) return "DOM_RESPONSE_TURN";
+  if (snapshot?.submissionConfirmed === true) return "DOM_USER_TURN_EXACT";
   return null;
 }
 
@@ -350,6 +446,15 @@ function normalizeGeminiResponseSnapshot(rawSnapshot, preSubmitSnapshot = null) 
     });
   const newTurns = assistantTurns.filter((turn) => turn.appearedAfterSubmit);
   const boundTurn = newTurns.length === 1 ? newTurns[0] : null;
+  const userTurns = (Array.isArray(rawSnapshot?.userTurns) ? rawSnapshot.userTurns : []).map((turn) => ({
+    turnId: turn?.turnId || turn?.candidateId || null,
+    candidateId: turn?.candidateId || turn?.turnId || null,
+    textHash: turn?.textHash || null,
+    normalizedTextHash: turn?.normalizedTextHash || null,
+    textLength: Number.isInteger(turn?.textLength) ? turn.textLength : null,
+    visible: turn?.visible !== false,
+    attached: turn?.attached !== false,
+  }));
   const extracted = boundTurn ? extractFinalResponseContent(boundTurn) : { found: false, text: "", candidate: null, selector: null, score: null };
   if (boundTurn) {
     boundTurn.finalResponseText = extracted.text;
@@ -372,6 +477,7 @@ function normalizeGeminiResponseSnapshot(rawSnapshot, preSubmitSnapshot = null) 
     responseText: extracted.text,
     responseNode: boundTurn ? candidateMetadata(boundTurn) : null,
     candidateMetadata: rawCandidates.map(metadataForCandidate),
+    userTurns,
     stopButtonPresent: rawSnapshot?.stopButtonPresent === true,
     streamingIndicatorPresent: rawSnapshot?.streamingIndicatorPresent === true,
     composerReady: rawSnapshot?.composerReady === true,
@@ -509,6 +615,7 @@ class GeminiCommandLifecycle {
       sessionId,
       purpose,
       promptHash: hashText(prompt),
+      promptIdentityHash: promptIdentityHash(prompt),
       state: "QUEUED",
       commandQueuedAt: queuedAt,
       queuedAt,
@@ -534,6 +641,23 @@ class GeminiCommandLifecycle {
       submissionConfirmationSource: null,
       submissionConfirmationSources: [],
       submissionState: "UNCONFIRMED",
+      conversationOwnershipConfirmed: false,
+      newUserTurnConfirmed: false,
+      newUserTurnIdentity: null,
+      expectedConversationUrl: null,
+      expectedConversationId: null,
+      allowNewConversation: false,
+      baselineUserTurnCount: null,
+      baselineAssistantTurnCount: null,
+      baselineUserTurnHashes: [],
+      generationStarted: false,
+      generationStartSource: null,
+      generationStartedAt: null,
+      generationRequestStartedAt: null,
+      generationRequestId: null,
+      conversationResetDetected: false,
+      conversationResetAt: null,
+      conversationResetReason: null,
       retryConfirmationState: "IDLE",
       retryEligibleAt: null,
       retryConfirmationPendingAt: null,
@@ -543,6 +667,8 @@ class GeminiCommandLifecycle {
       actualResendAt: null,
       sendRetryCount: 0,
       resendForbidden: false,
+      primaryErrorCode: null,
+      primaryErrorContext: null,
       promptCharacterLength: String(prompt ?? "").length,
       promptByteLength: Buffer.byteLength(String(prompt ?? ""), "utf8"),
     };
@@ -585,6 +711,17 @@ class GeminiCommandLifecycle {
     return this.snapshot();
   }
 
+  setSubmissionBaseline({ expectedConversationUrl, expectedConversationId = null, allowNewConversation = false, userTurnCount, assistantTurnCount, userTurns = [] } = {}) {
+    this.command.expectedConversationUrl = expectedConversationUrl || null;
+    this.command.expectedConversationId = expectedConversationId || null;
+    this.command.allowNewConversation = allowNewConversation === true;
+    this.command.baselineUserTurnCount = Number.isInteger(userTurnCount) ? userTurnCount : null;
+    this.command.baselineAssistantTurnCount = Number.isInteger(assistantTurnCount) ? assistantTurnCount : null;
+    this.command.baselineUserTurnHashes = Array.isArray(userTurns) ? userTurns.map((turn) => turn?.normalizedTextHash).filter(Boolean) : [];
+    this.emit("SUBMISSION_BASELINE_CAPTURED");
+    return this.snapshot();
+  }
+
   observeSubmission(snapshot, at = isoNow(this.now)) {
     const firstObservation = this.latency.submissionObservations.length === 0;
     const hadComposerCleared = Boolean(this.command.composerClearedAt);
@@ -604,15 +741,32 @@ class GeminiCommandLifecycle {
     if (observation.userMessagePresent && !this.command.userMessageRenderedAt) this.command.userMessageRenderedAt = at;
     if (observation.generationIndicatorPresent && !this.command.generatingUiStartedAt) this.command.generatingUiStartedAt = at;
     if (snapshot?.stopButtonPresent === true && !this.command.stopButtonAppearedAt) this.command.stopButtonAppearedAt = at;
-    const domConfirmationSource = submissionConfirmationSource(snapshot);
-    if (domConfirmationSource && !this.command.submissionConfirmationSources.includes(domConfirmationSource)) this.command.submissionConfirmationSources.push(domConfirmationSource);
-    if (!this.command.submissionConfirmed && domConfirmationSource) {
+    if (observation.generationIndicatorPresent && !this.command.generationStarted) {
+      this.command.generationStarted = true;
+      this.command.generationStartSource = "DOM_GENERATING_UI";
+      this.command.generationStartedAt = at;
+    } else if (snapshot?.newResponseCount === 1 && !this.command.generationStarted) {
+      this.command.generationStarted = true;
+      this.command.generationStartSource = "DOM_RESPONSE_TURN";
+      this.command.generationStartedAt = at;
+    }
+    const submission = evaluateGeminiSubmission(snapshot, this.command);
+    this.command.conversationOwnershipConfirmed = submission.conversationOwnershipConfirmed;
+    this.command.newUserTurnConfirmed = submission.newUserTurnConfirmed;
+    this.command.newUserTurnIdentity = submission.matchedUserTurnId;
+    this.command.userTurnDelta = submission.userTurnDelta;
+    this.command.assistantTurnDelta = submission.assistantTurnDelta;
+    this.command.exactPromptDelta = submission.exactPromptDelta;
+    if (submission.submissionConfirmed && !this.command.submissionConfirmed) {
+      const domConfirmationSource = "DOM_USER_TURN_EXACT";
+      if (!this.command.submissionConfirmationSources.includes(domConfirmationSource)) this.command.submissionConfirmationSources.push(domConfirmationSource);
       this.command.submissionConfirmed = true;
       this.command.submissionConfirmedAt = at;
       this.command.submissionConfirmationSource = domConfirmationSource;
       this.command.submissionState = "CONFIRMED";
+      if (this.command.retryConfirmationState === "RETRY_CONFIRMATION_PENDING") this.cancelRetry("SUBMISSION_CONFIRMED", domConfirmationSource, at);
+      this.emit("SUBMISSION_CONFIRMED_BY_USER_TURN");
     }
-    if (domConfirmationSource && this.command.retryConfirmationState === "RETRY_CONFIRMATION_PENDING") this.cancelRetry("SUBMISSION_CONFIRMED", domConfirmationSource, at);
     if (this.latency.conversation.assistantTurnCountBeforeSubmit === null && Number.isInteger(snapshot?.assistantTurnCount)) {
       this.latency.conversation.assistantTurnCountBeforeSubmit = snapshot.assistantTurnCount;
       this.latency.conversation.userTurnCountBeforeSubmit = Number.isInteger(snapshot.userTurnCount) ? snapshot.userTurnCount : null;
@@ -667,17 +821,25 @@ class GeminiCommandLifecycle {
     return this.snapshot();
   }
 
+  markConversationReset(reason = "CONVERSATION_RESET", at = isoNow(this.now)) {
+    this.command.conversationResetDetected = true;
+    this.command.conversationResetAt = at;
+    this.command.conversationResetReason = reason;
+    this.command.submissionState = "RESET_DURING_SEND";
+    this.emit("CONVERSATION_RESET_DURING_SEND");
+    return this.snapshot();
+  }
+
   confirmSubmissionByNetwork(request) {
     const at = request?.startedAt || isoNow(this.now);
     if (!this.command.submissionConfirmationSources.includes("NETWORK_GENERATION_REQUEST")) this.command.submissionConfirmationSources.push("NETWORK_GENERATION_REQUEST");
-    if (!this.command.submissionConfirmed) {
-      this.command.submissionConfirmed = true;
-      this.command.submissionConfirmedAt = at;
-      this.command.submissionConfirmationSource = "NETWORK_GENERATION_REQUEST";
-      this.command.submissionState = "CONFIRMED";
-    }
-    if (this.command.retryConfirmationState === "RETRY_CONFIRMATION_PENDING") this.cancelRetry("SUBMISSION_CONFIRMED", "NETWORK_GENERATION_REQUEST", at);
-    this.emit("SUBMISSION_CONFIRMED_BY_NETWORK");
+    this.command.generationStarted = true;
+    this.command.generationStartSource = "NETWORK_GENERATION_REQUEST";
+    this.command.generationStartedAt = this.command.generationStartedAt || at;
+    this.command.generationRequestStartedAt = this.command.generationRequestStartedAt || at;
+    this.command.generationRequestId = this.command.generationRequestId || request?.requestId || null;
+    if (this.command.submissionConfirmed && this.command.retryConfirmationState === "RETRY_CONFIRMATION_PENDING") this.cancelRetry("SUBMISSION_CONFIRMED", "NETWORK_GENERATION_REQUEST", at);
+    this.emit("GENERATION_STARTED_BY_NETWORK");
     return this.snapshot();
   }
 
@@ -763,6 +925,9 @@ class GeminiCommandLifecycle {
   }
 
   markGenerating() {
+    this.command.generationStarted = true;
+    this.command.generationStartSource = this.command.generationStartSource || "STATE_TRANSITION";
+    this.command.generationStartedAt = this.command.generationStartedAt || isoNow(this.now);
     return this.transition("GENERATING");
   }
 
@@ -818,7 +983,10 @@ class GeminiCommandLifecycle {
   }
 
   markFailed(error) {
-    return this.transition("FAILED", { error: String(error ?? "GEMINI_COMMAND_FAILED") });
+    const message = error instanceof Error ? error.message : String(error ?? "GEMINI_COMMAND_FAILED");
+    const code = typeof error?.code === "string" ? error.code : null;
+    const context = error?.context && typeof error.context === "object" ? error.context : null;
+    return this.transition("FAILED", { error: message, primaryErrorCode: code, primaryErrorContext: context });
   }
 
   markNextCommandSent(at = isoNow(this.now)) {
@@ -854,4 +1022,4 @@ class GeminiCommandLifecycle {
   }
 }
 
-module.exports = { GeminiCommandLifecycle, TERMINAL_STATES, FINAL_RESPONSE_SELECTORS, POSITIVE_FINAL_RESPONSE_SIGNALS, LATENCY_PAGE_MILESTONES, STATUS_NODE_SELECTORS, ACCESSIBILITY_CHROME_SELECTORS, hashText, redactNetworkUrl, normalizeNetworkInitiator, normalizeDocumentNavigationRequest, extractGeminiJsonCandidate, isGeminiGenerationRequest, findAttributedGeminiGenerationRequest, submissionConfirmationSource, shouldRetryGeminiSend, authorizeGeminiSendRetry, isGeminiTargetReady, deriveLatencyBuckets, summarizeRendererHeartbeat, isResponseComplete, describeResponseCompletion, canRunFormatRetry, isGenerationTerminal, assertParentTerminal, normalizeGeminiResponseSnapshot, buildGeminiBindingDiagnostic, buildGeminiResponseContentDiagnostic, extractFinalResponseContent, positiveFinalResponseSignals, isStatusOnlyText };
+module.exports = { GeminiCommandLifecycle, TERMINAL_STATES, FINAL_RESPONSE_SELECTORS, POSITIVE_FINAL_RESPONSE_SIGNALS, LATENCY_PAGE_MILESTONES, STATUS_NODE_SELECTORS, ACCESSIBILITY_CHROME_SELECTORS, hashText, normalizePromptIdentity, promptIdentityHash, createGeminiConversationResetError, canonicalGeminiConversationUrl, sameGeminiConversationUrl, isGeminiConversationUrl, evaluateGeminiSubmission, redactNetworkUrl, normalizeNetworkInitiator, normalizeDocumentNavigationRequest, extractGeminiJsonCandidate, isGeminiGenerationRequest, findAttributedGeminiGenerationRequest, submissionConfirmationSource, shouldRetryGeminiSend, authorizeGeminiSendRetry, isGeminiTargetReady, deriveLatencyBuckets, summarizeRendererHeartbeat, isResponseComplete, describeResponseCompletion, canRunFormatRetry, isGenerationTerminal, assertParentTerminal, normalizeGeminiResponseSnapshot, buildGeminiBindingDiagnostic, buildGeminiResponseContentDiagnostic, extractFinalResponseContent, positiveFinalResponseSignals, isStatusOnlyText };

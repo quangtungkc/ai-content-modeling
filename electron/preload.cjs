@@ -1,9 +1,44 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const { contextBridge, ipcRenderer } = require("electron");
+// Electron runs this preload in a sandbox. Local CommonJS imports are not
+// available there, so keep the invoke allow-list self-contained in the
+// preload while the main process continues to use ipc-contract.cjs.
+const INVOKE_CHANNELS = Object.freeze([
+  "desktop-app:version", "desktop-auth:clear", "desktop-auth:save", "desktop-update:check", "desktop-update:download", "desktop-update:install",
+  "facebook-browser:open", "facebook-browser:scan", "flow-browser:prepare-manual-submission", "flow-browser:resume-after-manual-submission", "flow-browser:run-image-job",
+  "gemini-browser:analyze-source", "gemini-browser:copy", "gemini-browser:develop-project", "gemini-browser:generate-idea", "gemini-browser:import-images", "gemini-browser:open", "gemini-browser:open-flow", "gemini-browser:run-job", "gemini-browser:run-video-job",
+  "runtime-error:report", "video-editor:pick-audio", "video-editor:render-final",
+]);
+const invokeChannelSet = new Set(INVOKE_CHANNELS);
+function assertKnownInvokeChannel(channel) {
+  if (typeof channel !== "string" || !invokeChannelSet.has(channel)) throw new Error(`IPC_CHANNEL_NOT_ALLOWED: ${String(channel)}`);
+  return channel;
+}
+
+function reviveStructuredError(payload) {
+  const error = new Error(typeof payload?.message === "string" ? payload.message : "Desktop Gemini request failed.");
+  error.name = "DesktopStructuredError";
+  if (payload && typeof payload === "object") Object.assign(error, payload);
+  return error;
+}
 
 function invoke(channel, ...args) {
+  assertKnownInvokeChannel(channel);
   return ipcRenderer.invoke(channel, ...args).catch((error) => {
     void ipcRenderer.invoke("runtime-error:report", { source: `ipc:${channel}`, message: error instanceof Error ? error.message : String(error) }).catch(() => undefined);
+    throw error;
+  });
+}
+
+function invokeStructured(channel, ...args) {
+  return ipcRenderer.invoke(channel, ...args).then((result) => {
+    if (result && result.ok === false && result.error) throw reviveStructuredError(result.error);
+    if (result && result.ok === true && Object.prototype.hasOwnProperty.call(result, "data")) return result.data;
+    return result;
+  }).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    const context = error && typeof error === "object" && error.details && typeof error.details === "object" ? error.details : undefined;
+    void ipcRenderer.invoke("runtime-error:report", { source: `ipc:${channel}`, message, code: error?.code, context }).catch(() => undefined);
     throw error;
   });
 }
@@ -39,7 +74,7 @@ contextBridge.exposeInMainWorld("desktopGemini", {
   copy: (prompt) => invoke("gemini-browser:copy", prompt),
   analyzeSource: (video, channelDNA, runId) => invoke("gemini-browser:analyze-source", { video, channelDNA, runId }),
   generateIdea: (video, analysis, channelDNA, artStyle, runId) => invoke("gemini-browser:generate-idea", { video, analysis, channelDNA, artStyle, runId }),
-  developProject: (video, analysis, idea, channelDNA, aspectRatio, runId) => invoke("gemini-browser:develop-project", { video, analysis, idea, channelDNA, aspectRatio, runId }),
+  developProject: (video, analysis, idea, channelDNA, aspectRatio, runId) => invokeStructured("gemini-browser:develop-project", { video, analysis, idea, channelDNA, aspectRatio, runId }),
   importImages: (projectId, slots) => invoke("gemini-browser:import-images", { projectId, slots }),
   runJob: (projectId, slots, onProgress, runId) => {
     const handler = (_event, progress) => onProgress?.(progress);
@@ -49,7 +84,7 @@ contextBridge.exposeInMainWorld("desktopGemini", {
   runVideoJob: (projectId, slots, onProgress) => {
     const handler = (_event, progress) => onProgress?.(progress);
     ipcRenderer.on("gemini-browser:video-progress", handler);
-    return invoke("gemini-browser:run-video-job", { projectId, slots }).finally(() => ipcRenderer.removeListener("gemini-browser:video-progress", handler));
+    return invokeStructured("gemini-browser:run-video-job", { projectId, slots }).finally(() => ipcRenderer.removeListener("gemini-browser:video-progress", handler));
   },
 });
 
@@ -63,7 +98,7 @@ contextBridge.exposeInMainWorld("desktopFlow", {
   runVideoJob: (projectId, channelId, slots, onProgress) => {
     const handler = (_event, progress) => onProgress?.(progress);
     ipcRenderer.on("gemini-browser:video-progress", handler);
-    return invoke("gemini-browser:run-video-job", { projectId, channelId, slots }).finally(() => ipcRenderer.removeListener("gemini-browser:video-progress", handler));
+    return invokeStructured("gemini-browser:run-video-job", { projectId, channelId, slots }).finally(() => ipcRenderer.removeListener("gemini-browser:video-progress", handler));
   },
   resumeAfterManualSubmission: (checkpointId) => invoke("flow-browser:resume-after-manual-submission", { checkpointId }),
   prepareManualSubmission: (projectId, channelId, slot) => invoke("flow-browser:prepare-manual-submission", { projectId, channelId, slot }),

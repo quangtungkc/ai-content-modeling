@@ -342,6 +342,13 @@ const STALE_FOREIGN_KEY_REPAIRS = {
   VideoMetricSnapshot: { "CompetitorVideo__release_old": "CompetitorVideo" },
   SourceAnalysis: { "CompetitorVideo__release_old": "CompetitorVideo" },
   ReportItem: { "CompetitorVideo__release_old": "CompetitorVideo" },
+  // Rebuilding ContentProject with legacy_alter_table enabled can leave
+  // existing dependants pointing at the temporary table name. Repair those
+  // references before Prisma attempts the next ContentProject write.
+  Asset: { "ContentProject__release_old": "ContentProject" },
+  ProjectReview: { "ContentProject__release_old": "ContentProject" },
+  StoryboardScene: { "ContentProject__release_old": "ContentProject" },
+  UsageEvent: { "ContentProject__release_old": "ContentProject" },
 };
 
 function escapeRegExp(value) {

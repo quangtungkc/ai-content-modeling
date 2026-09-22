@@ -86,6 +86,28 @@ describe("SQLite release schema reconciliation", () => {
     }
   });
 
+  it("repairs ContentProject dependants left on the duration rebuild temporary name", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "sqlite-release-schema-"));
+    const client = clientFor(path.join(root, "stale-content-project-fk.db"));
+    try {
+      await createOldDb(client);
+      await ensureSqliteReleaseSchema(client);
+      await client.$executeRawUnsafe(`CREATE TABLE "ContentProject__release_old" ("id" TEXT NOT NULL PRIMARY KEY)`);
+      await client.$executeRawUnsafe(`INSERT INTO "ContentProject__release_old" ("id") VALUES ('project-1')`);
+      await client.$executeRawUnsafe(`CREATE TABLE "Asset" ("id" TEXT NOT NULL PRIMARY KEY, "projectId" TEXT NOT NULL, CONSTRAINT "Asset_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "ContentProject__release_old" ("id") ON DELETE RESTRICT ON UPDATE CASCADE)`);
+      await client.$executeRawUnsafe(`INSERT INTO "Asset" ("id", "projectId") VALUES ('asset-1', 'project-1')`);
+
+      const result = await ensureSqliteReleaseSchema(client);
+      expect(result.repairedForeignKeys).toContain("Asset");
+      const foreignKeys = await client.$queryRawUnsafe<Array<{ table: string }>>(`PRAGMA foreign_key_list("Asset")`);
+      expect(foreignKeys.map((foreignKey) => foreignKey.table)).toContain("ContentProject");
+      expect((await client.$queryRawUnsafe<Array<{ projectId: string }>>(`SELECT "projectId" FROM "Asset" WHERE "id" = 'asset-1'`))[0].projectId).toBe("project-1");
+    } finally {
+      await client.$disconnect();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("reconciles the bundled template without importing user data", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "sqlite-release-template-"));
     const file = path.join(root, "template.db");

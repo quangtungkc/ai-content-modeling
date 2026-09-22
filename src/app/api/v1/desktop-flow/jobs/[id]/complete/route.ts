@@ -10,6 +10,7 @@ const schema = z.object({
   status: z.enum(["succeeded", "failed"]),
   result: z.record(z.string(), z.unknown()).optional(),
   error: z.string().trim().max(4_000).optional(),
+  failure: z.record(z.string(), z.unknown()).optional(),
 });
 
 function record(value: unknown): Record<string, unknown> {
@@ -26,7 +27,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     if (!job || !job.name.startsWith("desktop.flow.")) throw new AppError("DESKTOP_FLOW_JOB_NOT_FOUND", "Không tìm thấy job Google Flow.", 404);
     if (record(job.payload).userId !== session.userId) throw new AppError("DESKTOP_FLOW_JOB_FORBIDDEN", "Job Google Flow không thuộc phiên desktop hiện tại.", 403);
     if (job.status !== "running" && job.status !== input.status) throw new AppError("DESKTOP_FLOW_JOB_STATE", "Job Google Flow không còn ở trạng thái đang chạy.", 409);
-    const nextPayload = { ...record(job.payload), bridgeStatus: input.status === "succeeded" ? "SUCCEEDED" : "FAILED", bridgeResult: input.status === "succeeded" ? redactSecrets(input.result ?? {}) : null, bridgeCompletedAt: new Date().toISOString() };
+    const nextPayload = { ...record(job.payload), bridgeStatus: input.status === "succeeded" ? "SUCCEEDED" : "FAILED", bridgeResult: input.status === "succeeded" ? redactSecrets(input.result ?? {}) : null, bridgeFailure: input.status === "failed" ? redactSecrets(input.failure ?? {}) : null, bridgeCompletedAt: new Date().toISOString() };
     await db.backgroundJob.update({ where: { id }, data: { status: input.status, error: input.status === "failed" ? redactSecrets(input.error ?? "Google Flow không hoàn tất.") : null, completedAt: new Date(), payload: nextPayload as Prisma.InputJsonValue } });
     return Response.json({ data: { id, status: input.status }, requestId });
   } catch (error) {
