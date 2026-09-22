@@ -53,3 +53,4 @@ The complete per-issue evidence remains in `LIVE_DEBUG_LEDGER.md`; no issue hist
 
 - Flow unusual-activity is an external Google provider block. The app reports it structurally, stops automatic retries, and waits for normal/manual provider recovery. It does not rotate accounts, spoof fingerprints, rotate proxies, or bypass anti-abuse controls.
 - The packaged runtime must contain an executable Windows FFmpeg binary; release packaging verifies this before building the installer.
+- v1.0.6 adds an archive preflight for local Electron main-process modules after v1.0.5 omitted three required helpers from `app.asar`.

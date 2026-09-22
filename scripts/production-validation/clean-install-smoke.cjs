@@ -12,6 +12,19 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function cleanInstallSmoke(executable) {
   if (!executable || !path.isAbsolute(executable) || !fs.statSync(executable).isFile()) throw new Error("Absolute installed EXE required");
   const archive = path.join(path.dirname(executable), "resources", "app.asar");
+  const requiredMainModules = [
+    "main.cjs",
+    "user-data.cjs",
+    "temp-cleanup.cjs",
+    "ipc-contract.cjs",
+    "dev-runtime-identity.cjs",
+    "gemini-error-transport.cjs",
+  ];
+  for (const moduleName of requiredMainModules) {
+    if (!asar.statFile(archive, path.join("electron", moduleName))) {
+      throw new Error(`PACKAGED_MAIN_MODULE_MISSING: electron/${moduleName}`);
+    }
+  }
   const main = asar.extractFile(archive, path.join("electron", "main.cjs")).toString();
   const helper = asar.extractFile(archive, path.join("electron", "user-data.cjs")).toString();
   if (!main.includes("initializeUserData(app)") || !helper.includes("MODELING_AI_USER_DATA_DIR")) throw new Error("Installed build does not support isolated userData; refusing launch");

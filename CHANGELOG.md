@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.6 — 2026-09-22
+
+### Fixed
+
+- Fixed a startup crash in the 1.0.5 installer caused by three Electron main-process helper modules omitted from `app.asar`: `temp-cleanup.cjs`, `ipc-contract.cjs`, and `dev-runtime-identity.cjs`.
+- The clean-install smoke now fails before launch if any required Electron main-process module is absent from the packaged archive.
+
 ## 1.0.5 — 2026-09-22
 
 ### Fixed

@@ -1165,3 +1165,22 @@ Copy this template for each new issue. Do not delete historical records.
 - `PACKAGING`: `PASS — Modeling.AI.Setup.1.0.5.exe; FFmpeg packaged and runtime-validated; latest.yml generated.`
 - `DATA_INTEGRITY`: `PASS — no database reset/destructive migration; AppData, generated assets, browser profiles, and .env preserved.`
 - `KNOWN_EXTERNAL_LIMITATION`: `Google Flow unusual-activity remains an external provider decision; the application handles it as non-retryable and does not bypass anti-abuse controls.`
+
+### ISSUE-037
+
+- `ISSUE_ID`: `ISSUE-037`
+- `STAGE`: `Release packaging / installed-app startup`
+- `FIRST_DIVERGENCE`: `PACKAGED_MAIN_MODULE_MISSING`
+- `SYMPTOM`: `The v1.0.5 installed application stopped at startup with Cannot find module './temp-cleanup.cjs'.`
+- `ROOT_CAUSE`: `The Electron build.files allowlist omitted temp-cleanup.cjs, ipc-contract.cjs, and dev-runtime-identity.cjs even though electron/main.cjs requires all three.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `CHOSEN_REPAIR`: `Add all three helper modules to build.files and add a clean-install archive preflight that rejects any package missing a required main-process helper.`
+- `TEST_RESULTS`: `PASS — package contract test 2/2; typecheck PASS; lint 0 errors; app.asar inspection confirms all required modules; clean-install smoke PASS with an isolated temporary userData directory.`
+- `STATUS`: `FIXED`
+
+## RELEASE v1.0.6
+
+- `RELEASE_CANDIDATE_READY`: `YES`
+- `PACKAGING`: `PASS — Modeling.AI.Setup.1.0.6.exe, latest.yml and blockmap generated.`
+- `CLEAN_INSTALL_SMOKE`: `PASS — isolated startup and restart completed without accessing production AppData.`
+- `PACKAGED_MAIN_MODULES`: `PASS — main.cjs, user-data.cjs, temp-cleanup.cjs, ipc-contract.cjs, dev-runtime-identity.cjs, and gemini-error-transport.cjs are present in app.asar.`
