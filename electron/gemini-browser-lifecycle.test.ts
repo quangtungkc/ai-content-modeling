@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { GeminiCommandLifecycle, hashText, normalizePromptIdentity, promptIdentityHash, createGeminiConversationResetError, evaluateGeminiSubmission, redactNetworkUrl, normalizeNetworkInitiator, normalizeDocumentNavigationRequest, extractGeminiJsonCandidate, isGeminiGenerationRequest, findAttributedGeminiGenerationRequest, shouldRetryGeminiSend, authorizeGeminiSendRetry, isGeminiTargetReady, deriveLatencyBuckets, summarizeRendererHeartbeat, isResponseComplete, describeResponseCompletion, canRunFormatRetry, isGenerationTerminal, assertParentTerminal, normalizeGeminiResponseSnapshot, buildGeminiBindingDiagnostic, buildGeminiResponseContentDiagnostic, extractFinalResponseContent } = require("./gemini-browser-lifecycle.cjs") as {
+const { GeminiCommandLifecycle, hashText, normalizePromptIdentity, promptIdentityHash, createGeminiConversationResetError, evaluateGeminiSubmission, redactNetworkUrl, normalizeNetworkInitiator, normalizeDocumentNavigationRequest, extractGeminiJsonCandidate, isGeminiGenerationRequest, findAttributedGeminiGenerationRequest, shouldRetryGeminiSend, authorizeGeminiSendRetry, isGeminiTargetReady, deriveLatencyBuckets, summarizeRendererHeartbeat, isResponseComplete, isStructuredResponseComplete, describeResponseCompletion, canRunFormatRetry, isGenerationTerminal, assertParentTerminal, normalizeGeminiResponseSnapshot, buildGeminiBindingDiagnostic, buildGeminiResponseContentDiagnostic, extractFinalResponseContent } = require("./gemini-browser-lifecycle.cjs") as {
   GeminiCommandLifecycle: typeof import("./gemini-browser-lifecycle.cjs").GeminiCommandLifecycle;
   hashText: typeof import("./gemini-browser-lifecycle.cjs").hashText;
   normalizePromptIdentity: typeof import("./gemini-browser-lifecycle.cjs").normalizePromptIdentity;
@@ -9,6 +9,7 @@ const { GeminiCommandLifecycle, hashText, normalizePromptIdentity, promptIdentit
   createGeminiConversationResetError: typeof import("./gemini-browser-lifecycle.cjs").createGeminiConversationResetError;
   evaluateGeminiSubmission: typeof import("./gemini-browser-lifecycle.cjs").evaluateGeminiSubmission;
   isResponseComplete: typeof import("./gemini-browser-lifecycle.cjs").isResponseComplete;
+  isStructuredResponseComplete: typeof import("./gemini-browser-lifecycle.cjs").isStructuredResponseComplete;
   canRunFormatRetry: typeof import("./gemini-browser-lifecycle.cjs").canRunFormatRetry;
   isGenerationTerminal: typeof import("./gemini-browser-lifecycle.cjs").isGenerationTerminal;
   assertParentTerminal: typeof import("./gemini-browser-lifecycle.cjs").assertParentTerminal;
@@ -199,6 +200,25 @@ describe("Gemini browser command lifecycle", () => {
   it("does not complete while streaming indicators remain", () => {
     const snapshot = { newResponseCount: 1, responseText: "stable text", stopButtonPresent: false, streamingIndicatorPresent: true, composerReady: true };
     expect(isResponseComplete(snapshot, 10)).toBe(false);
+  });
+
+  it("accepts a validated structured response when only the stale processing indicator remains", () => {
+    const json = '{"ok":true}';
+    const snapshot = {
+      newResponseCount: 1,
+      responseText: json,
+      composerReady: true,
+      boundTurn: {
+        finalResponseText: json,
+        finalResponseBodyFound: true,
+        stopButtonPresent: false,
+        streamingIndicatorPresent: true,
+        attached: true,
+        detached: false,
+      },
+    };
+    expect(isResponseComplete(snapshot, 3)).toBe(false);
+    expect(isStructuredResponseComplete(snapshot, 3)).toBe(true);
   });
 
   it("requires a new uniquely bound response node and a bounded stability window", () => {
@@ -500,6 +520,36 @@ describe("Gemini browser command lifecycle", () => {
     expect(snapshot.boundTurn?.qualifiedFinalResponseCandidateCount).toBe(0);
   });
 
+  it("accepts parse-checked JSON exposed only through status text when the body node is hidden", () => {
+    const payload = '{"sourceModelingSpec":{"scenes":[]}}';
+    const snapshot = normalizeGeminiResponseSnapshot({ candidates: [candidate("hidden-turn", "turn-hidden", {
+      isTurnRoot: true,
+      text: "Gemini đã nói\\n" + payload,
+      textLength: payload.length + 14,
+      statusText: "Gemini đã nói\\n" + payload,
+      contentExtractionAvailable: true,
+      contentCandidates: [{ ...candidate("hidden-body", "turn-hidden", { text: payload, textLength: payload.length, visible: false, zeroSize: true, isMessageContent: true }) }],
+    })], composerReady: true }, null);
+    expect(snapshot.responseText).toBe(payload);
+    expect(snapshot.boundTurn?.finalResponseBodyFound).toBe(true);
+    expect(snapshot.boundTurn?.finalResponseContainer?.statusTextFallback).toBe(true);
+    expect(snapshot.boundTurn?.finalResponseSelector).toBe("status-text-json-fallback");
+  });
+
+  it("uses the first complete status-text JSON object when Gemini repeats a formatted copy", () => {
+    const first = '{"sourceModelingSpec":{"scenes":[]}}';
+    const repeated = `${first}\\n{\\n  "sourceModelingSpec": {\\n    "scenes": []\\n  }\\n}`;
+    const snapshot = normalizeGeminiResponseSnapshot({ candidates: [candidate("repeated-turn", "turn-repeated", {
+      isTurnRoot: true,
+      text: "Gemini đã nói\\n" + repeated,
+      statusText: "Gemini đã nói\\n" + repeated,
+      contentExtractionAvailable: true,
+      contentCandidates: [{ ...candidate("repeated-body", "turn-repeated", { text: first, visible: false, zeroSize: true, isMessageContent: true }) }],
+    })], composerReady: true }, null);
+    expect(snapshot.responseText).toBe(first);
+    expect(snapshot.boundTurn?.finalResponseBodyFound).toBe(true);
+  });
+
   it("CASE 6 terminal status-only content remains FINAL_RESPONSE_CONTENT_NOT_FOUND", () => {
     const snapshot = finalContentSnapshot({ text: "Defining the Parameters\\nGemini đã nói", statusText: "Defining the Parameters\\nGemini đã nói", contentCandidates: [], stopButtonPresent: false, streamingIndicatorPresent: false });
     const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: "prompt-1" });
@@ -601,6 +651,16 @@ describe("Gemini browser command lifecycle", () => {
     command.observeSubmission(strictSubmissionSnapshot(), "2026-09-16T10:00:01.100Z");
     expect(command.snapshot()).toMatchObject({ submissionConfirmed: true, submissionConfirmationSource: "DOM_USER_TURN_EXACT", submissionConfirmationSources: ["NETWORK_GENERATION_REQUEST", "DOM_USER_TURN_EXACT"] });
     expect(shouldRetryGeminiSend({ composerStillContainsPrompt: true, submissionConfirmed: true, generationRequestStarted: true, pageReady: true })).toBe(false);
+  });
+
+  it("confirms a network-backed send when a new user turn and cleared composer are present but the normalized prompt hash changed", () => {
+    const command = new GeminiCommandLifecycle({ sessionId: "session-1", purpose: "CONTENT_PROJECT_DEVELOP", prompt: submissionPrompt });
+    command.setSubmissionBaseline({ expectedConversationUrl: conversationUrl, expectedConversationId: "conversation-1", userTurnCount: 1, assistantTurnCount: 1, userTurns: baselineUserTurns });
+    command.markSubmitAttempt("2026-09-16T10:00:00.000Z");
+    command.observeSubmission({ conversationUrl, conversationMode: "EXISTING", userTurnCount: 2, assistantTurnCount: 1, userTurns: [{ turnId: "user-2", normalizedTextHash: "hash-from-rendered-query" }], userMessagePresent: true, composerReady: true, stopButtonPresent: false, streamingIndicatorPresent: false, newResponseCount: 0 }, "2026-09-16T10:00:00.500Z");
+    expect(command.snapshot()).toMatchObject({ conversationOwnershipConfirmed: true, userTurnDelta: 1, exactPromptDelta: 0, submissionConfirmed: false });
+    command.confirmSubmissionByNetwork({ commandId: command.snapshot().commandId, sessionId: command.snapshot().sessionId, method: "POST", url: "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate", startedAt: "2026-09-16T10:00:00.700Z" });
+    expect(command.snapshot()).toMatchObject({ submissionConfirmed: true, submissionConfirmationSource: "NETWORK_GENERATION_REQUEST_WITH_NEW_USER_TURN", submissionConfirmationSources: ["NETWORK_GENERATION_REQUEST", "NETWORK_GENERATION_REQUEST_WITH_NEW_USER_TURN"] });
   });
 
   it("INCIDENT 1F CASE 4/5 rejects composer-only confirmation and keeps retry predicate pure", () => {

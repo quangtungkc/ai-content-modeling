@@ -1,10 +1,6 @@
 import { db } from "@/lib/db";
 import { AppError } from "@/lib/errors";
-import { decryptSecret } from "@/lib/secrets";
-import { GeminiProvider } from "@/services/ai/gemini";
-import { AIService } from "@/services/ai/service";
 import type { ChannelDNA, VideoContext } from "@/services/ai/types";
-import { readChannelMainCharacterImage } from "@/modules/channels/service";
 import { analyzeSourceVideoWithGeminiBrowser } from "@/modules/generation/browser-flow-bridge";
 import { videoAnalysisSchema } from "@/services/ai/schemas";
 
@@ -15,6 +11,7 @@ export function analysisEvidenceScore(value: unknown) {
   const parsed = videoAnalysisSchema.safeParse(value);
   if (!parsed.success) return Number.NEGATIVE_INFINITY;
   const content = parsed.data;
+  if (content.analysisEvidence?.sourceVideoAttached !== true) return Number.NEGATIVE_INFINITY;
   const usableFields = ANALYSIS_FIELDS.filter((field) => content[field].trim().length >= 24 && !INSUFFICIENT_EVIDENCE.test(content[field])).length;
   const interactionScore = content.characterInteractions.filter((item) => item.trim().length >= 16 && !INSUFFICIENT_EVIDENCE.test(item)).length;
   const whyScore = content.whyItWorks.filter((item) => item.trim().length >= 16 && !INSUFFICIENT_EVIDENCE.test(item)).length;
@@ -23,6 +20,15 @@ export function analysisEvidenceScore(value: unknown) {
 
 export function isAnalysisUsableForModeling(value: unknown) {
   return analysisEvidenceScore(value) >= 10;
+}
+
+export function assertAttachedSourceVideoEvidence(value: unknown) {
+  const parsed = videoAnalysisSchema.safeParse(value);
+  if (!parsed.success || parsed.data.analysisEvidence?.sourceVideoAttached !== true) {
+    throw new AppError("SOURCE_VIDEO_EVIDENCE_REQUIRED", "Chưa có phân tích dựa trên tệp video nguồn thật. Hãy chạy lại phân tích qua trình duyệt/CDP trước khi modeling.", 409);
+  }
+  if (!isAnalysisUsableForModeling(parsed.data)) throw new AppError("SOURCE_VIDEO_ANALYSIS_INSUFFICIENT", "Phân tích video nguồn chưa đủ bằng chứng để modeling.", 409);
+  return parsed.data;
 }
 
 export function selectBestAnalysis<T extends { id: string; version: number; content: unknown }>(records: T[], preferredId?: string) {
@@ -82,20 +88,8 @@ export async function analyzeCompetitorVideo(videoId: string, userId: string) {
     publishedAt: video.publishedAt?.toISOString(),
     duration: video.duration,
   };
-  const mainCharacterImage = await readChannelMainCharacterImage(channel);
-  let analysis;
-  let providerName = "gemini-browser";
-  if (process.env.DESKTOP_MODE === "1") {
-    const browserResult = await analyzeSourceVideoWithGeminiBrowser({ userId, channelId: channel.id, video: videoContext, channelDNA });
-    analysis = videoAnalysisSchema.parse(browserResult);
-  } else {
-    const connection = await db.aIConnection.findFirst({ where: { userId, kind: "AI", provider: "GEMINI", revokedAt: null }, orderBy: { updatedAt: "desc" } });
-    if (!connection) throw new AppError("AI_CONNECTION_REQUIRED", "Vào Cài đặt AI và kết nối Gemini API trước khi phân tích.", 409);
-    const apiKey = decryptSecret(connection.encryptedKey);
-    const provider = new GeminiProvider(apiKey);
-    const aiService = new AIService(provider, { userId, channelId: channel.id });
-    analysis = await aiService.analyzeVideo({ channelDNA, video: videoContext, mainCharacterImage });
-    providerName = aiService.providerName;
-  }
-  return storeCompetitorVideoAnalysis(video.id, userId, analysis, providerName);
+  if (process.env.DESKTOP_MODE !== "1") throw new AppError("SOURCE_VIDEO_BROWSER_REQUIRED", "Phân tích video nguồn yêu cầu trình duyệt Gemini/Facebook qua CDP để đính kèm tệp video thật.", 409);
+  const browserResult = await analyzeSourceVideoWithGeminiBrowser({ userId, channelId: channel.id, video: videoContext, channelDNA });
+  const analysis = assertAttachedSourceVideoEvidence(browserResult);
+  return storeCompetitorVideoAnalysis(video.id, userId, analysis, "gemini-browser-cdp");
 }

@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const videoAnalysisSchema = z.object({
   schemaVersion: z.literal("1.0"), summary: z.string(), hook: z.string(), setup: z.string(), conflict: z.string(), escalation: z.string(), twist: z.string(), payoff: z.string(), theGag: z.string(), cameraPattern: z.string(), editingRhythm: z.string(), characterInteractions: z.array(z.string()), soundPattern: z.string(), retentionMechanism: z.string(), whyItWorks: z.array(z.string()),
+  analysisEvidence: z.object({ sourceVideoAttached: z.boolean(), observationMethod: z.string(), observedDurationSec: z.number().finite().positive().optional() }).optional(),
 });
 
 const modelingDirectionSchema = z.object({ title: z.string(), coreConcept: z.string(), script: z.string(), characterDesign: z.string(), setting: z.string(), artStyle: z.string(), sourceMechanism: z.string(), whatIsPreserved: z.array(z.string()), whatIsChanged: z.array(z.string()), targetMarketAdaptation: z.string(), similarityRisk: z.enum(["low", "medium", "high"]), whyWorthDeveloping: z.string(), postText: z.string().min(1).max(500) });

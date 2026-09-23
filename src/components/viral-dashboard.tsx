@@ -229,7 +229,7 @@ export function ViralDashboard() {
     if (typeof window === "undefined") return { runId: "", modelingIdeaId: "", stopAfterStage: null as number | null };
     const params = new URLSearchParams(window.location.search);
     const stopAfterStage = params.get("validationStopAfterStage");
-    return { runId: params.get("runId")?.trim() ?? "", modelingIdeaId: params.get("modelingIdeaId")?.trim() ?? "", stopAfterStage: stopAfterStage === "2" ? 2 : stopAfterStage === "3" ? 3 : null };
+    return { runId: params.get("runId")?.trim() ?? "", modelingIdeaId: params.get("modelingIdeaId")?.trim() ?? "", stopAfterStage: stopAfterStage === "1" ? 1 : stopAfterStage === "2" ? 2 : stopAfterStage === "3" ? 3 : stopAfterStage === "4" ? 4 : null };
   });
   useEffect(() => {
     const controller = new AbortController();
@@ -550,12 +550,13 @@ export function ViralDashboard() {
     try {
       const video = dashboard?.videos.find((item) => item.id === videoId);
       const desktopGemini = (window as Window & { desktopGemini?: DesktopGemini }).desktopGemini;
-      const response = desktopGemini && video
-        ? await (async () => {
+      if (!desktopGemini || !video) {
+        throw new Error("SOURCE_VIDEO_BROWSER_REQUIRED: Phân tích chỉ được phép khi cầu nối CDP/Desktop có thể tải và đính kèm video gốc thật.");
+      }
+      const response = await (async () => {
           const analysis = await desktopGemini.analyzeSource({ id: video.id, url: video.url, caption: video.url, thumbnailUrl: video.thumbnailUrl, publishedAt: video.publishedAt }, { channel: dashboard?.channel });
           return fetch(`/api/v1/videos/${videoId}/analysis`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: "gemini-browser", analysis }) });
-        })()
-        : await fetch(`/api/v1/videos/${videoId}/analysis`, { method: "POST" });
+        })();
       const body = await response.json() as { data?: VideoAnalysisResult; error?: { message?: string } };
       if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể phân tích video.");
       setAnalysisResult(body.data);
@@ -709,10 +710,11 @@ export function ViralDashboard() {
     if (!identityPack?.active || !identityPack.referenceImages.some((reference) => reference.active)) throw new Error("MAIN_CHARACTER_IDENTITY_MISSING: Hãy lưu Character Identity Pack cho Channel trước khi tạo ảnh/video.");
     const identityDesign = identityPack.lockedTraits;
     const identityPrompt = `PRESERVE IDENTITY: use the approved Channel Character Identity Pack ${identityPack.name}. Locked traits: ${JSON.stringify(identityDesign)}. Never invent or replace the main character. Apply only the scene appearance explicitly stated below.`;
+    const castPrompt = `CAST AND ROLE CONTINUITY (authoritative): ${JSON.stringify(project.characterDesign)}. Keep every recurring character's gender, face, hair, clothing, and role consistent across shots. The protagonist must not replace another character as the patient, doctor, or action target. Match the approved storyboard's subject and object for this scene.`;
     const backgroundPrompt = toFlowSafePrompt(`${identityPrompt}\n${compileStrictModelingConstraints(strictSpec)}\nCreate one single full-frame vertical background reference image for this project. Use the approved background design below as the source of truth. Establish one recognizable, coherent world/location that can be reused across every scene. Preserve the requested overall space, mood, color palette, camera language, and key landmarks, while applying only the explicitly allowed environment/style transformations. Do not include any character, person, animal, prop held by a character, text, caption, logo, collage, storyboard, character sheet, contact sheet, split panel, or multiple variations. The result must be a clean empty environment that can later receive the fixed character and scene appearance. Approved background design: ${JSON.stringify(project.backgroundDesign)}. Use an original visual treatment. Aspect ratio: ${aspectRatio}. Generate exactly one final image.`);
     const sceneSlots = [...project.scenes].sort((left, right) => left.sceneNumber - right.sceneNumber).map((scene) => {
       const startFramePrompt = scene.startFramePrompt?.trim() || `Create one single full-frame vertical 9:16 still image showing the exact starting state of scene ${scene.sceneNumber}. Preserve the approved main character, background, composition, lighting, and initial pose. Do not show motion, a collage, a storyboard, text, or multiple variations.`;
-      const sceneAppearance = `SCENE APPEARANCE STATE (authoritative for this scene): Use only the wardrobe, accessories, temporary condition, and required props explicitly described by this scene. Do not inherit a global outfit when this scene specifies a different appearance. ${scene.visualBlock} Start-frame state: ${startFramePrompt}`;
+      const sceneAppearance = `SCENE APPEARANCE STATE (authoritative for this scene): Use only the wardrobe, accessories, temporary condition, and required props explicitly described by this scene. Do not inherit a global outfit when this scene specifies a different appearance. Visual: ${scene.visualBlock}. Action roles: ${scene.actionBlock}. Start-frame state: ${startFramePrompt}`;
       const sceneTextPolicy = buildSceneTextPolicy(scene.visualBlock, startFramePrompt);
       const strictConstraints = compileStrictModelingConstraints(strictSpec, scene.sourceSceneId ?? undefined);
       return {
@@ -720,7 +722,7 @@ export function ViralDashboard() {
         sceneNumber: scene.sceneNumber,
         label: `Ảnh bắt đầu cảnh ${scene.sceneNumber}`,
         aspectRatio: "9:16",
-        prompt: toFlowSafePrompt(`${identityPrompt}\n${strictConstraints}\nPRESERVE IDENTITY\n${sceneAppearance}\n${sceneTextPolicy}\nSCENE ACTION / FROZEN INITIAL STATE: Show only the exact state before motion begins; do not depict later action beats.\nBACKGROUND / CAMERA / COMPOSITION: Use the approved background design as one natural full-frame environment with the identity and scene appearance above. Do not create a collage, storyboard, character sheet, contact sheet, split panel, multiple variations. Aspect ratio: ${aspectRatio}. Generate exactly one final image.`),
+        prompt: toFlowSafePrompt(`${identityPrompt}\n${castPrompt}\n${strictConstraints}\nPRESERVE IDENTITY\n${sceneAppearance}\n${sceneTextPolicy}\nSCENE ACTION / FROZEN INITIAL STATE: Show only the exact state before motion begins; do not depict later action beats.\nBACKGROUND / CAMERA / COMPOSITION: Use the approved background design as one natural full-frame environment with the identity and scene appearance above. Do not create a collage, storyboard, character sheet, contact sheet, split panel, multiple variations. Aspect ratio: ${aspectRatio}. Generate exactly one final image.`),
       };
     });
     return [
@@ -764,7 +766,7 @@ export function ViralDashboard() {
     const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
     const identityPack = channels.find((channel) => channel.id === selectedChannelId)?.characterIdentityPack;
     if (!identityPack?.active || !identityPack.referenceImages.some((reference) => reference.active)) throw new Error("MAIN_CHARACTER_IDENTITY_MISSING: Hãy lưu Character Identity Pack cho Channel trước khi tạo video.");
-    const identityPrompt = `PRESERVE IDENTITY: use the approved Character Identity Pack ${identityPack.name}. LOCKED TRAITS: ${JSON.stringify(identityPack.lockedTraits)}. PRESERVE IDENTITY: face identity, facial structure, skin tone, base hairstyle, body proportions, body build, age appearance, distinctive traits and core character design language. APPLY SCENE APPEARANCE: use only the outfit, shoes, accessories, props, emotion, pose and temporary condition explicitly required by this scene.`;
+    const identityPrompt = `PRESERVE IDENTITY: use the approved Character Identity Pack ${identityPack.name}. LOCKED TRAITS: ${JSON.stringify(identityPack.lockedTraits)}. CAST AND ROLE CONTINUITY: ${JSON.stringify(project.characterDesign)}. Preserve every character's identity, gender, wardrobe, and scene role; never substitute the protagonist for the specified patient or doctor. PRESERVE IDENTITY: face identity, facial structure, skin tone, base hairstyle, body proportions, body build, age appearance, distinctive traits and core character design language. APPLY SCENE APPEARANCE: use only the outfit, shoes, accessories, props, emotion, pose and temporary condition explicitly required by this scene.`;
     const videoAspectRatioDirective = aspectRatio === "16:9" ? "OUTPUT REQUIREMENT: Create the video in a 16:9 landscape aspect ratio." : "OUTPUT REQUIREMENT: Create the video in a vertical 9:16 aspect ratio.";
     const selected = onlySceneNumbers?.length ? new Set(onlySceneNumbers) : null;
     const sceneSlots: VideoSlot[] = project.scenes.filter((scene) => (!selected || selected.has(scene.sceneNumber)) && !existingVideos[`scene-${scene.sceneNumber}`]).map((scene) => ({
@@ -781,9 +783,28 @@ export function ViralDashboard() {
       setGeneratedVideos(existingVideos);
       return existingVideos;
     }
-    if (!images["background-0"] || sceneSlots.some((scene) => !images[`scene-${scene.sceneNumber}`])) {
-      setContentProjectError("Hãy tạo bối cảnh đồng nhất và đầy đủ ảnh phân cảnh trước khi tạo video.");
-      return null;
+    const missingImages = [
+      ...(!images["background-0"] ? ["background-0"] : []),
+      ...sceneSlots.filter((scene) => !images[`scene-${scene.sceneNumber}`]).map((scene) => `scene-${scene.sceneNumber}`),
+    ];
+    if (missingImages.length) {
+      throw new Error(`STAGE4_REFERENCE_IMAGES_MISSING: thiếu ${missingImages.join(", ")}. Kiểm tra thư mục dữ liệu ảnh của phiên chạy trước khi gửi Gemini.`);
+    }
+    if (!onlySceneNumbers?.length) {
+      const imageHashes = new Map<string, string>();
+      for (const scene of project.scenes.sort((left, right) => left.sceneNumber - right.sceneNumber)) {
+        const imageUrl = images[`scene-${scene.sceneNumber}`];
+        if (!imageUrl) throw new Error(`IMAGE_CONTINUITY_GATE: thiếu ảnh cảnh ${scene.sceneNumber}.`);
+        const response = await fetch(imageUrl, { cache: "no-store" });
+        if (!response.ok) throw new Error(`IMAGE_CONTINUITY_GATE: không đọc được ảnh cảnh ${scene.sceneNumber}.`);
+        const digest = await crypto.subtle.digest("SHA-256", await response.arrayBuffer());
+        const hash = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+        const previousScene = imageHashes.get(hash);
+        if (previousScene) {
+          throw new Error(`IMAGE_CONTINUITY_GATE: ảnh cảnh ${scene.sceneNumber} trùng hoàn toàn ảnh cảnh ${previousScene}; chưa được phép chạy Stage 4.`);
+        }
+        imageHashes.set(hash, String(scene.sceneNumber));
+      }
     }
     setIsGeneratingVideos(true);
     setContentProjectError("");
@@ -1037,8 +1058,10 @@ export function ViralDashboard() {
     setError("");
     try {
       if (!selectedChannelId) throw new Error("NEEDS_REVIEW: Chưa xác định được Channel cho checkpoint.");
-      let decision = resumableDecision;
-      if (decision.status === "NONE") {
+      // A Stage-1 validation explicitly starts a new run, leaving an older
+      // checkpoint for the same source untouched.
+      let decision: ResumeDecision = resumeSelection.stopAfterStage === 1 ? { status: "NONE" } : resumableDecision;
+      if (decision.status === "NONE" && resumeSelection.stopAfterStage !== 1) {
         const response = await fetch(`/api/v1/automations?sourceVideoId=${encodeURIComponent(analysisVideoId)}&channelId=${encodeURIComponent(selectedChannelId)}`);
         const body = await response.json() as { data?: AutomationRunResult[]; error?: { message?: string } };
         if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể kiểm tra checkpoint tự động.");
@@ -1133,6 +1156,21 @@ export function ViralDashboard() {
           incidentHistory,
           checkpoint: { version: 1, runId, lastCompletedStage: 1, failedStage: null, resumeTarget: null, modelingIdeaId: currentIdea.id, sourceVideoId: analysisVideoId, channelId: selectedChannelId, attemptCount: runAttemptCount, incidentHistory, failureFingerprint: null },
         });
+        if (resumeSelection.stopAfterStage === 1) {
+          await updateAutomationRun(runId, currentSteps, {
+            status: "PAUSED",
+            ideaId: currentIdea.id,
+            modelingIdeaId: currentIdea.id,
+            channelId: selectedChannelId,
+            error: null,
+            lastCompletedStage: 1,
+            failedStage: null,
+            resumeTarget: null,
+            checkpoint: { version: 1, runId, lastCompletedStage: 1, failedStage: null, resumeTarget: null, modelingIdeaId: currentIdea.id, sourceVideoId: analysisVideoId, channelId: selectedChannelId, attemptCount: runAttemptCount, incidentHistory, failureFingerprint: null },
+          });
+          setMessage("Đã dừng sau Stage 1 để kiểm tra Modeling Idea.");
+          return;
+        }
       }
 
       if (!resumedFromCheckpoint || (resumeStage ?? 2) <= 2) {
@@ -1182,7 +1220,14 @@ export function ViralDashboard() {
         images = generated;
         await changeStep(activeStep, "completed", `Đã tạo ${Object.keys(images).length} ảnh và lưu vào app.`);
         if (resumeSelection.stopAfterStage === 3) {
-          await updateAutomationRun(runId, currentSteps, { status: "PAUSED", projectId: project.id, ideaId: currentIdea.id, modelingIdeaId: currentIdea.id, channelId: selectedChannelId, error: null, lastCompletedStage: 3, failedStage: null, resumeTarget: null, failureFingerprint: null, attemptCount: runAttemptCount, incidentHistory, sourceModelingSpecVersion: project.sourceModelingSpecVersion ?? null, checkpoint: { version: 1, runId, lastCompletedStage: 3, failedStage: null, resumeTarget: null, modelingIdeaId: currentIdea.id, sourceVideoId: analysisVideoId, channelId: selectedChannelId, attemptCount: runAttemptCount, incidentHistory, failureFingerprint: null, contentProjectId: project.id, sourceModelingSpecVersion: project.sourceModelingSpecVersion ?? null } });
+          // Stop the heartbeat before the terminal persistence write so an
+          // in-flight RUNNING heartbeat cannot restore the execution lease.
+          if (heartbeatTimer) {
+            window.clearInterval(heartbeatTimer);
+            heartbeatTimer = undefined;
+          }
+          if (automaticExecutionRef.current?.runId === runId) automaticExecutionRef.current = null;
+          await updateAutomationRun(runId, currentSteps, { status: "PAUSED", projectId: project.id, ideaId: currentIdea.id, modelingIdeaId: currentIdea.id, channelId: selectedChannelId, error: null, lastCompletedStage: 3, failedStage: null, resumeTarget: null, failureFingerprint: null, attemptCount: runAttemptCount, incidentHistory, sourceModelingSpecVersion: project.sourceModelingSpecVersion ?? null, checkpoint: { version: 1, runId, lastCompletedStage: 3, failedStage: null, resumeTarget: null, modelingIdeaId: currentIdea.id, sourceVideoId: analysisVideoId, channelId: selectedChannelId, attemptCount: runAttemptCount, incidentHistory, failureFingerprint: null, contentProjectId: project.id, sourceModelingSpecVersion: project.sourceModelingSpecVersion ?? null, executionLease: null } });
           setMessage("Validation đã dừng sau Stage 3.");
           return;
         }
@@ -1203,6 +1248,16 @@ export function ViralDashboard() {
         if (!generated) throw new Error(videoProvider === "flow" ? "Không tạo đủ video bằng Flow qua CDP." : "Không tạo đủ video bằng Gemini qua CDP.");
         videos = generated;
         await changeStep(activeStep, "completed", `Đã tạo ${Object.keys(videos).length} video phân cảnh.`);
+        if (resumeSelection.stopAfterStage === 4) {
+          if (heartbeatTimer) {
+            window.clearInterval(heartbeatTimer);
+            heartbeatTimer = undefined;
+          }
+          if (automaticExecutionRef.current?.runId === runId) automaticExecutionRef.current = null;
+          await updateAutomationRun(runId, currentSteps, { status: "PAUSED", projectId: project.id, ideaId: currentIdea.id, modelingIdeaId: currentIdea.id, channelId: selectedChannelId, error: null, lastCompletedStage: 4, failedStage: null, resumeTarget: null, failureFingerprint: null, attemptCount: runAttemptCount, incidentHistory, sourceModelingSpecVersion: project.sourceModelingSpecVersion ?? null, checkpoint: { version: 1, runId, lastCompletedStage: 4, failedStage: null, resumeTarget: null, modelingIdeaId: currentIdea.id, sourceVideoId: analysisVideoId, channelId: selectedChannelId, attemptCount: runAttemptCount, incidentHistory, failureFingerprint: null, contentProjectId: project.id, sourceModelingSpecVersion: project.sourceModelingSpecVersion ?? null, executionLease: null } });
+          setMessage("Validation đã dừng sau Stage 4.");
+          return;
+        }
       } else {
         videos = await loadPersistedProjectVideos(project.id, project.scenes);
         setGeneratedVideos(videos);
@@ -1226,6 +1281,11 @@ export function ViralDashboard() {
       if (resumedFromCheckpoint && !activeStep) return;
       if (runId) {
         try {
+          if (heartbeatTimer) {
+            window.clearInterval(heartbeatTimer);
+            heartbeatTimer = undefined;
+          }
+          if (automaticExecutionRef.current?.runId === runId) automaticExecutionRef.current = null;
           const timestamp = new Date().toISOString();
           currentSteps = currentSteps.map((step) => step.key === activeStep && step.status !== "completed" ? { ...step, status: "failed", error: message, completedAt: timestamp } : step);
           setAutomationSteps(currentSteps);
@@ -1241,7 +1301,7 @@ export function ViralDashboard() {
             attemptCount: runAttemptCount,
             incidentHistory,
             failureFingerprint: failedStage === 2 ? "content_project_scene_creation_failed_after_modeling_idea_success" : null,
-            checkpoint: { version: 1, runId, lastCompletedStage: Math.max(0, failedStage - 1), failedStage, resumeTarget: resumeTargetForStage(failedStage), modelingIdeaId: currentIdea?.id ?? null, sourceVideoId: analysisVideoId, channelId: selectedChannelId, attemptCount: runAttemptCount, incidentHistory, contentProjectId: createdProject?.id ?? null, sourceModelingSpecVersion: createdProject?.sourceModelingSpecVersion ?? null, failureFingerprint: failedStage === 2 ? "content_project_scene_creation_failed_after_modeling_idea_success" : null },
+            checkpoint: { version: 1, runId, lastCompletedStage: Math.max(0, failedStage - 1), failedStage, resumeTarget: resumeTargetForStage(failedStage), modelingIdeaId: currentIdea?.id ?? null, sourceVideoId: analysisVideoId, channelId: selectedChannelId, attemptCount: runAttemptCount, incidentHistory, contentProjectId: createdProject?.id ?? null, sourceModelingSpecVersion: createdProject?.sourceModelingSpecVersion ?? null, failureFingerprint: failedStage === 2 ? "content_project_scene_creation_failed_after_modeling_idea_success" : null, executionLease: null },
           });
         } catch {
           setError(`${message} Không thể lưu đầy đủ lịch sử hoạt động.`);
@@ -1609,7 +1669,7 @@ export function ViralDashboard() {
       )}
       <section className="mt-7 rounded-2xl border border-[#d8e3f1] bg-white p-4 shadow-sm">
         <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_auto]">
-          <label className="block"><span className="mb-2 block text-sm text-[#6883aa]">Khoảng thời gian</span><select value={periodHours} onChange={(event) => setPeriodHours(event.target.value)} className="w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]"><option value="24">24 giờ gần nhất</option><option value="72">3 ngày gần nhất</option><option value="168">7 ngày gần nhất</option></select></label>
+          <label className="block"><span className="mb-2 block text-sm text-[#6883aa]">Khoảng thời gian</span><select value={periodHours} onChange={(event) => setPeriodHours(event.target.value)} className="w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]"><option value="24">24 giờ gần nhất</option><option value="72">3 ngày gần nhất</option><option value="168">7 ngày gần nhất</option><option value="336">14 ngày gần nhất</option></select></label>
           <label className="block"><span className="mb-2 block text-sm text-[#6883aa]">Kênh</span><select value={channelId} onChange={(event) => setChannelId(event.target.value)} className="w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]"><option value="">Kênh mặc định</option>{channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}</select></label>
           <label className="block"><span className="mb-2 block text-sm text-[#6883aa]">Mức tín hiệu</span><select value={minimumViews} onChange={(event) => setMinimumViews(event.target.value)} className="w-full rounded-lg border border-[#cbd9ea] bg-white px-3 py-3 text-sm font-semibold text-[#0b3262]"><option value="20000">Từ 20.000 lượt xem</option><option value="50000">Từ 50.000 lượt xem</option><option value="100000">Từ 100.000 lượt xem</option></select></label>
           <button onClick={() => { setMessage(""); setAppliedFilters({ periodHours, channelId, minimumViews }); }} disabled={isLoading} className="self-end rounded-lg bg-[#07865f] px-6 py-3 text-sm font-bold text-white disabled:cursor-wait disabled:opacity-60">
@@ -1718,7 +1778,7 @@ export function ViralDashboard() {
             </p>
           </div>
           <span className="rounded-full bg-[#e8f7f2] px-3 py-1 text-xs font-bold text-[#07865f]">
-            {appliedFilters.periodHours === "24" ? "24 giờ gần nhất" : `${appliedFilters.periodHours === "72" ? "3" : "7"} ngày gần nhất`}
+            {appliedFilters.periodHours === "24" ? "24 giờ gần nhất" : `${appliedFilters.periodHours === "72" ? "3" : appliedFilters.periodHours === "336" ? "14" : "7"} ngày gần nhất`}
           </span>
           <select value={analysisFilter} onChange={(event) => setAnalysisFilter(event.target.value as typeof analysisFilter)} className="rounded-lg border border-[#cbd9ea] px-3 py-2 text-sm font-semibold text-[#0b5799]">
             <option value="all">Tất cả video</option>
@@ -1876,5 +1936,5 @@ function formatAge(value: string) {
   return hours < 1 ? "vừa xong" : `${hours}h trước`;
 }
 function periodLabel(value: string) {
-  return value === "24" ? "24 giờ" : value === "72" ? "3 ngày" : "7 ngày";
+  return value === "24" ? "24 giờ" : value === "72" ? "3 ngày" : value === "336" ? "14 ngày" : "7 ngày";
 }

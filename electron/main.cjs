@@ -8,10 +8,15 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { initializeUserData } = require("./user-data.cjs");
-const { cleanupManagedTemporaryFiles } = require("./temp-cleanup.cjs");
+const { cleanupManagedTemporaryFiles, cleanupCompletedProjectArtifacts } = require("./temp-cleanup.cjs");
+const { validateFinalVideoProbe } = require("./final-video-validation.cjs");
 initializeUserData(app);
+if (app.isPackaged) {
+  process.env.MODELING_RUNTIME_REVISION ||= `v${app.getVersion()}`;
+  process.env.MODELING_SOURCE_ROOT_ID ||= "packaged-windows";
+}
 try { cleanupManagedTemporaryFiles(app.getPath("userData")); } catch { /* Cleanup is bounded to the managed temporary directory. */ }
-const { GeminiCommandLifecycle, hashText, createGeminiConversationResetError, redactNetworkUrl, normalizeNetworkInitiator, normalizeDocumentNavigationRequest, extractGeminiJsonCandidate, isGeminiGenerationRequest, findAttributedGeminiGenerationRequest, isGeminiTargetReady, isResponseComplete, canRunFormatRetry, isGenerationTerminal, assertParentTerminal, normalizeGeminiResponseSnapshot, buildGeminiBindingDiagnostic, buildGeminiResponseContentDiagnostic } = require("./gemini-browser-lifecycle.cjs");
+const { GeminiCommandLifecycle, hashText, createGeminiConversationResetError, redactNetworkUrl, normalizeNetworkInitiator, normalizeDocumentNavigationRequest, extractGeminiJsonCandidate, isGeminiGenerationRequest, findAttributedGeminiGenerationRequest, isGeminiTargetReady, isResponseComplete, isStructuredResponseComplete, canRunFormatRetry, isGenerationTerminal, assertParentTerminal, normalizeGeminiResponseSnapshot, buildGeminiBindingDiagnostic, buildGeminiResponseContentDiagnostic } = require("./gemini-browser-lifecycle.cjs");
 const { isJsonSerializable, wrapGeminiRemoteExpression, normalizeRemoteFailure } = require("./gemini-remote-script.cjs");
 const { EdgeGeminiRuntime, isFlowUrl } = require("./edge-gemini-cdp.cjs");
 const { ensureSqliteReleaseSchema } = require("./sqlite-release-schema.cjs");
@@ -32,6 +37,11 @@ const APP_URL = process.env.DESKTOP_APP_URL || (app.isPackaged ? `http://127.0.0
 const DEV_RUNTIME_IDENTITY = buildDevRuntimeIdentity({ root: path.resolve(__dirname, "..") });
 const FACEBOOK_MEDIA_DISCOVERY_TIMEOUT_MS = 10_000;
 const FACEBOOK_MEDIA_POLL_INTERVAL_MS = 100;
+const FACEBOOK_SOURCE_VIDEO_MAX_BYTES = 200 * 1024 * 1024;
+const FACEBOOK_SOURCE_VIDEO_DOWNLOAD_TIMEOUT_MS = 45_000;
+const COCCOC_EXECUTABLE_PATH = process.env.COCCOC_EXECUTABLE_PATH || "C:\\Program Files\\CocCoc\\Browser\\Application\\browser.exe";
+const COCCOC_PROFILE_DIRECTORY = path.resolve(process.env.COCCOC_PROFILE_DIRECTORY || path.join(process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || process.cwd(), "AppData", "Local"), "ModelingAI", "CocCocFacebookProfile"));
+const COCCOC_DEBUG_PORT = Number(process.env.COCCOC_DEBUG_PORT || 9344);
 const GEMINI_PRE_RETRY_CONFIRMATION_GRACE_MS = 2_000;
 const GEMINI_PRE_RETRY_CONFIRMATION_POLL_MS = 50;
 const GEMINI_CONTEXT_RECOVERY_TIMEOUT_MS = 5_000;
@@ -488,10 +498,22 @@ async function captureGeminiSendElementSnapshot(window, command, phase) {
   }
 }
 
-function dispatchGeminiEnter(window, command, phase) {
+async function dispatchGeminiEnter(window, command, phase) {
   const attemptedAt = new Date().toISOString();
-  const keyDownResult = safeSendInputEvent(window, { type: "keyDown", keyCode: "ENTER" });
-  const keyUpResult = safeSendInputEvent(window, { type: "keyUp", keyCode: "ENTER" });
+  let keyDownResult = false;
+  let keyUpResult = false;
+  if (window?.edgeRuntime && window.webContents?.debugger?.sendCommand) {
+    try {
+      await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+      await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+      keyDownResult = true;
+      keyUpResult = true;
+    } catch { /* Fall back to Electron's local input path below. */ }
+  }
+  if (!keyDownResult || !keyUpResult) {
+    keyDownResult = safeSendInputEvent(window, { type: "keyDown", keyCode: "ENTER" });
+    keyUpResult = safeSendInputEvent(window, { type: "keyUp", keyCode: "ENTER" });
+  }
   const returnedAt = new Date().toISOString();
   const dispatch = { at: returnedAt, phase, attemptedAt, returnedAt, result: keyDownResult && keyUpResult ? "PASS" : "FAIL", keyDownResult, keyUpResult, targetConnectedAfterDispatch: null };
   if (geminiNavigationObserver) {
@@ -502,6 +524,62 @@ function dispatchGeminiEnter(window, command, phase) {
   }
   recordBrowserAction({ action: "gemini-send-dispatch", commandId: command?.snapshot().commandId || null, sessionId: command?.snapshot().sessionId || null, phase, attemptedAt, returnedAt, result: dispatch.result, keyDownResult, keyUpResult });
   return keyDownResult && keyUpResult;
+}
+
+async function fillGeminiPromptForSend(window, prompt, missingCode) {
+  const prepared = await executeGeminiRemoteScript(window, { expression: geminiFillPromptExpression(prompt, missingCode), phase: "PROMPT_INJECTION", selector: "[contenteditable=true], textarea, [role=textbox]", commandPurpose: "GEMINI_PROMPT_INPUT" });
+  if (!window?.edgeRuntime || !window.webContents?.debugger?.sendCommand) return prepared;
+  try {
+    const focused = await window.webContents.executeJavaScript(`(() => {
+      const roots = [document]; const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      const input = roots.flatMap((root) => [...root.querySelectorAll('[contenteditable="true"], textarea, [role="textbox"]')]).find((element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return bounds.width > 100 && bounds.height >= 20 && style.visibility !== 'hidden' && style.display !== 'none'; });
+      input?.focus();
+      return Boolean(input);
+    })()`, true);
+    if (!focused) return prepared;
+    await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyDown", key: "Control", code: "ControlLeft", windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17, modifiers: 2 });
+    await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2 });
+    await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2 });
+    await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: "Control", code: "ControlLeft", windowsVirtualKeyCode: 17, nativeVirtualKeyCode: 17 });
+    await window.webContents.debugger.sendCommand("Input.insertText", { text: prompt });
+    recordBrowserAction({ action: "gemini-prompt-cdp-input", commandPurpose: "GEMINI_PROMPT_INPUT", textLength: prompt.length, result: "PASS" });
+    return { ...prepared, cdpInput: true };
+  } catch (error) {
+    recordBrowserAction({ action: "gemini-prompt-cdp-input", commandPurpose: "GEMINI_PROMPT_INPUT", textLength: prompt.length, result: "FALLBACK", error: error instanceof Error ? error.message : String(error) });
+    return prepared;
+  }
+}
+
+async function clickGeminiSendButton(window) {
+  const clicked = await window.webContents.executeJavaScript(`(() => {
+    const roots = [document]; const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+    const visible = (element) => { const bounds = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element && element.isConnected && bounds && bounds.width > 0 && bounds.height > 0 && style?.visibility !== 'hidden' && style?.display !== 'none'); };
+    const labelOf = (element) => [element.getAttribute?.('aria-label'), element.getAttribute?.('title'), element.textContent].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+    const composer = roots.flatMap((root) => [...root.querySelectorAll('[contenteditable="true"], textarea, [role="textbox"]')]).find(visible);
+    const composerBounds = composer?.getBoundingClientRect?.();
+    const candidates = roots.flatMap((root) => [...root.querySelectorAll('button, [role="button"]')]).filter((element) => visible(element) && element.disabled !== true).map((element) => {
+      const label = labelOf(element);
+      const bounds = element.getBoundingClientRect();
+      const iconText = [...element.querySelectorAll('mat-icon, [data-icon], svg, use')].map((child) => [child.textContent, child.getAttribute?.('data-icon'), child.getAttribute?.('href'), child.getAttribute?.('xlink:href')].filter(Boolean).join(' ')).join(' ');
+      const combined = (label + ' ' + iconText).replace(/\\s+/g, ' ').trim();
+      const explicit = /(?:^|\\b)(send(?: message)?|gửi(?: tin nhắn)?|submit)(?:\\b|$)/i.test(combined);
+      const arrow = /(?:arrow[_ -]?up|send|forward|north|keyboard_return)/i.test(combined);
+      const excluded = /(?:mic|microphone|voice|ghi âm|attach|file|image|ảnh|video|add|thêm|plus|mode|video)/i.test(combined);
+      const nearComposer = Boolean(composerBounds && bounds.top <= composerBounds.bottom + 120 && bounds.bottom >= composerBounds.top - 120 && bounds.right >= composerBounds.left && bounds.left <= composerBounds.right + 180);
+      const rightSide = Boolean(composerBounds && bounds.left >= composerBounds.left + composerBounds.width * 0.45);
+      return { element, label, bounds, score: (explicit ? 100 : 0) + (arrow && !excluded ? 40 : 0) + (nearComposer ? 20 : 0) + (rightSide ? 10 : 0) - (excluded ? 100 : 0), nearComposer, rightSide };
+    }).filter((candidate) => candidate.score >= 100 || (candidate.nearComposer && candidate.rightSide && candidate.score >= 30));
+    const distance = (element) => { const bounds = element.getBoundingClientRect(); return composerBounds ? Math.hypot(bounds.left - composerBounds.left, bounds.top - composerBounds.top) : 0; };
+    const selected = candidates.sort((left, right) => right.score - left.score || distance(left.element) - distance(right.element))[0];
+    if (!selected) return null;
+    selected.element.click();
+    const bounds = selected.element.getBoundingClientRect();
+    return { label: selected.label, tag: selected.element.tagName.toLowerCase(), x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2, score: selected.score };
+  })()`, true).catch(() => null);
+  if (clicked) recordBrowserAction({ action: "gemini-send-dom-click-fallback", result: "PASS", label: clicked.label });
+  return clicked;
 }
 
 function persistGeminiNavigationDiagnostic(window, command, observer) {
@@ -939,15 +1017,43 @@ async function submitGeminiCommand(window, command, prompt, missingCode, preSubm
   let attempt = 0;
   while (attempt <= 1) {
     if (attempt === 0) command.markSubmitAttempt();
-    const prepared = await executeGeminiRemoteScript(window, { expression: geminiFillPromptExpression(prompt, missingCode), phase: attempt === 0 ? "PROMPT_INJECTION" : "PROMPT_INJECTION_RECOVERY", selector: "[contenteditable=true], textarea, [role=textbox]", commandPurpose: command.snapshot().purpose });
+    const prepared = await fillGeminiPromptForSend(window, prompt, missingCode);
     if (!prepared?.textLength) {
       command.markFailed(missingCode);
       throw new Error(missingCode);
     }
     await captureGeminiSendElementSnapshot(window, command, attempt === 0 ? "BEFORE_INITIAL_SEND" : "BEFORE_RECOVERY_SEND");
     if (attempt === 0) command.markSubmitted();
-    dispatchGeminiEnter(window, command, attempt === 0 ? "INITIAL_SEND" : "RECOVERY_SEND");
+    if (command.snapshot().purpose === "VIDEO_GENERATION") {
+      const videoSendButton = await clickGeminiSendButton(window);
+      if (!videoSendButton) throw new Error("GEMINI_VIDEO_SEND_BUTTON_NOT_FOUND");
+      recordBrowserAction({ action: "gemini-video-send-button", commandId: command.snapshot().commandId, phase: attempt === 0 ? "INITIAL_SEND" : "RECOVERY_SEND", label: videoSendButton.label, result: "PASS" });
+    } else {
+      await dispatchGeminiEnter(window, command, attempt === 0 ? "INITIAL_SEND" : "RECOVERY_SEND");
+    }
     await delay(1_200);
+    const composerStillContainsPrompt = await window.webContents.executeJavaScript(`(() => {
+      const roots = [document]; const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      const input = roots.flatMap((root) => [...root.querySelectorAll('[contenteditable="true"], textarea, [role="textbox"]')]).find((element) => {
+        const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element);
+        return bounds.width > 100 && bounds.height >= 20 && style.visibility !== 'hidden' && style.display !== 'none';
+      });
+      const currentText = input?.innerText || input?.value || '';
+      return currentText.includes(${JSON.stringify(prompt.slice(0, 48))});
+    })()`, true).catch(() => false);
+    if (composerStillContainsPrompt && command.snapshot().purpose !== "VIDEO_GENERATION") {
+      const directClick = await clickGeminiSendButton(window);
+      if (!directClick) {
+        // This is a Gemini composer, not a Flow composer. Keep the recovery
+        // scoped to Gemini so a missing Gemini button cannot surface as a
+        // misleading Google Flow control error.
+        recordBrowserAction({ action: "gemini-send-control-not-found", commandId: command.snapshot().commandId, phase: attempt === 0 ? "INITIAL_SEND" : "RECOVERY_SEND", result: "ENTER_RETRY" });
+        await dispatchGeminiEnter(window, command, attempt === 0 ? "INITIAL_SEND_RETRY" : "RECOVERY_SEND_RETRY");
+      }
+      recordBrowserAction({ action: "gemini-send-fallback", commandId: command.snapshot().commandId, phase: attempt === 0 ? "INITIAL_SEND" : "RECOVERY_SEND", mechanism: directClick ? "DOM_BUTTON_CLICK" : "CDP_POINT_CLICK", result: "PASS" });
+      await delay(1_200);
+    }
     const firstSnapshot = await captureGeminiResponseSnapshot(window, preSubmitSnapshot, command.snapshot().purpose);
     command.observeSubmission(firstSnapshot);
     await captureGeminiLatencyPageState(window, command, attempt === 0 ? "SUBMIT" : "RECOVERY_SUBMIT");
@@ -1107,7 +1213,22 @@ async function runGeminiJsonCommand({ window, prompt, purpose, missingCode, befo
       command.recordResponseProgress(snapshot, stable);
       command.recordCompletionEvaluation(snapshot, stable, 3);
       const responseComplete = isResponseComplete(snapshot, stable, 3);
-      if (responseComplete) {
+      // Gemini occasionally keeps a stale processing-state indicator on the
+      // response node after the complete JSON is already visible. Accept this
+      // path only when the extracted JSON parses and passes the same validator;
+      // a merely stable or partial response is never accepted.
+      let validatedStructuredResponse = null;
+      if (!responseComplete && isStructuredResponseComplete(snapshot, stable, 3)) {
+        try {
+          const candidate = extractJsonCandidate(text);
+          const validationError = validate(candidate);
+          if (!validationError) validatedStructuredResponse = candidate;
+        } catch { /* Keep waiting for a complete validated payload. */ }
+      }
+      if (responseComplete || validatedStructuredResponse) {
+        if (validatedStructuredResponse) {
+          recordBrowserAction({ action: "gemini-json-completion-stale-streaming-override", commandId: command.snapshot().commandId, purpose, stablePolls: stable, streamingIndicatorPresent: snapshot?.boundTurn?.streamingIndicatorPresent === true, validation: "PASS" });
+        }
         if (!latencyMilestones.has("FINAL_RESPONSE_VISIBLE")) {
           await captureGeminiLatencyPageState(window, command, "FINAL_RESPONSE_VISIBLE");
           latencyMilestones.add("FINAL_RESPONSE_VISIBLE");
@@ -1117,7 +1238,7 @@ async function runGeminiJsonCommand({ window, prompt, purpose, missingCode, befo
         persistGeminiResponseEvidence(command, text, snapshot.responseNode, null, null);
         command.markParseStarted();
         try {
-          const parsed = extractJsonCandidate(text);
+          const parsed = validatedStructuredResponse || extractJsonCandidate(text);
           const validationError = validate(parsed);
           if (validationError) throw new Error(validationError);
           command.markParsed();
@@ -1163,13 +1284,14 @@ async function runGeminiJsonCommand({ window, prompt, purpose, missingCode, befo
   }
 }
 
-async function runGeminiJsonCommandWithFormatRetry({ window, prompt, purpose, formatPrompt, missingCode, beforeCount, timeoutMs, validate, runId = null, stage = null }) {
+async function runGeminiJsonCommandWithFormatRetry({ window, prompt, purpose, formatPrompt, missingCode, beforeCount, timeoutMs, validate, runId = null, stage = null, beforeRetryWindow = null }) {
   const first = await runGeminiJsonCommand({ window, prompt, purpose, missingCode, beforeCount, timeoutMs, validate, runId, stage });
   if (first.ok) return first.value;
   if (!canRunFormatRetry(first)) throw new Error(`GEMINI_FORMAT_RETRY_BLOCKED: ${first.command.snapshot().state}`);
   const repairPrompt = typeof formatPrompt === "function" ? formatPrompt({ rawResponse: first.rawResponse, error: first.error }) : formatPrompt;
   const retryWindow = await createGeminiWindow();
   await preflightGeminiForRun(retryWindow, runId, stage);
+  if (typeof beforeRetryWindow === "function") await beforeRetryWindow(retryWindow);
   const retryResult = await runGeminiJsonCommand({ window: retryWindow, prompt: repairPrompt, purpose: `${purpose}_FORMAT_RETRY`, missingCode, beforeCount: first.responseCount, timeoutMs, validate, parentCommand: first.command, runId, stage });
   if (retryResult.ok) return retryResult.value;
   const retryMeta = retryResult.command.snapshot();
@@ -1828,6 +1950,295 @@ async function uploadFlowAssetViaRemoteCdp(window, filePath, attachToPrompt, onS
   } finally { /* Giữ phiên CDP dùng chung cho các bước tiếp theo của Flow. */ }
 }
 
+function isFacebookSourceUrl(value) {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return hostname === "facebook.com" || hostname.endsWith(".facebook.com") || hostname === "fb.watch";
+  } catch {
+    return false;
+  }
+}
+
+async function captureFacebookVideoFromPage(browser, expectedDurationSec = null) {
+  const expected = Number.isFinite(expectedDurationSec) && expectedDurationSec > 0 ? expectedDurationSec : null;
+  const captured = await browser.webContents.executeJavaScript(`(async () => {
+    const expectedDurationSec = ${JSON.stringify(expected)};
+    const visible = (element) => {
+      const rect = element?.getBoundingClientRect?.();
+      const style = element ? getComputedStyle(element) : null;
+      return Boolean(element && element.isConnected && rect && rect.width > 0 && rect.height > 0 && style?.display !== "none" && style?.visibility !== "hidden" && style?.opacity !== "0");
+    };
+    const candidates = [...document.querySelectorAll("video")]
+      .filter((video) => visible(video) && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0 && typeof video.captureStream === "function")
+      .sort((left, right) => {
+        const leftDistance = expectedDurationSec === null ? 0 : Math.abs((Number(left.duration) || 0) - expectedDurationSec);
+        const rightDistance = expectedDurationSec === null ? 0 : Math.abs((Number(right.duration) || 0) - expectedDurationSec);
+        return leftDistance - rightDistance || (right.videoWidth * right.videoHeight) - (left.videoWidth * left.videoHeight);
+      });
+    const video = candidates[0];
+    if (!video) return { error: "FACEBOOK_VIDEO_CAPTURE_NOT_READY", candidates: [...document.querySelectorAll("video")].map((item) => ({ duration: item.duration, width: item.videoWidth, height: item.videoHeight, readyState: item.readyState })) };
+    const mimeTypes = ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm"];
+    const mimeType = mimeTypes.find((value) => MediaRecorder.isTypeSupported(value));
+    if (!mimeType) return { error: "FACEBOOK_VIDEO_CAPTURE_MIME_UNSUPPORTED" };
+    const originalMuted = video.muted;
+    const originalTime = video.currentTime;
+    const stream = video.captureStream();
+    const chunks = [];
+    const recorder = new MediaRecorder(stream, { mimeType });
+    const stopped = new Promise((resolve, reject) => {
+      recorder.ondataavailable = (event) => { if (event.data?.size) chunks.push(event.data); };
+      recorder.onerror = (event) => reject(new Error(String(event.error?.message || "FACEBOOK_VIDEO_CAPTURE_FAILED")));
+      recorder.onstop = resolve;
+    });
+    try {
+      video.muted = true;
+      video.currentTime = 0;
+      await video.play();
+      const durationSec = Number.isFinite(video.duration) && video.duration > 0 ? Math.min(video.duration, 60) : Math.min(expectedDurationSec || 12, 60);
+      recorder.start(250);
+      await new Promise((resolve) => setTimeout(resolve, Math.ceil(durationSec * 1_000) + 750));
+      recorder.stop();
+      await stopped;
+      const blob = new Blob(chunks, { type: mimeType });
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error("FACEBOOK_VIDEO_CAPTURE_READ_FAILED"));
+        reader.onload = () => {
+          const dataUrl = String(reader.result || "");
+          const marker = dataUrl.indexOf(";base64,");
+          resolve(marker >= 0 ? dataUrl.slice(marker + ";base64,".length) : "");
+        };
+        reader.readAsDataURL(blob);
+      });
+      return { base64, mimeType, durationSec, width: video.videoWidth, height: video.videoHeight, bytes: blob.size };
+    } finally {
+      stream.getTracks().forEach((track) => track.stop());
+      video.muted = originalMuted;
+      try { video.currentTime = originalTime; } catch { /* Best effort. */ }
+    }
+  })()`, true);
+  if (!captured?.base64) throw new Error(captured?.error || "SOURCE_VIDEO_CAPTURE_UNAVAILABLE");
+  return captured;
+}
+
+async function waitForManagedBrowserPageTarget(port, targetId = null, matcher = null, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const targets = await readRemoteDebuggingTargets(port);
+      const target = targets.find((item) => item.type === "page" && item.webSocketDebuggerUrl && (!targetId || item.id === targetId) && (!matcher || matcher(String(item.url || ""))));
+      if (target) return target;
+    } catch { /* Managed Edge may still be publishing the target. */ }
+    await delay(250);
+  }
+  throw new Error("BROWSER_CDP_FACEBOOK_TARGET_TIMEOUT");
+}
+
+async function createManagedBrowserFacebookBrowser(runtime, sourceUrl) {
+  const port = Number(runtime?.port);
+  if (!Number.isInteger(port) || port <= 0) throw new Error("BROWSER_CDP_FACEBOOK_RUNTIME_UNAVAILABLE");
+  const targets = await readRemoteDebuggingTargets(port);
+  let target = targets.find((item) => item.type === "page" && item.webSocketDebuggerUrl && isFacebookSourceUrl(String(item.url || "")));
+  let created = false;
+  let browserClient;
+  if (!target) {
+    const versionResponse = await fetch(`http://127.0.0.1:${port}/json/version`);
+    if (!versionResponse.ok) throw new Error(`EDGE_CDP_VERSION_HTTP_${versionResponse.status}`);
+    const version = await versionResponse.json();
+    browserClient = connectRemoteCdp(version.webSocketDebuggerUrl);
+    await browserClient.ready();
+    const createdTarget = await browserClient.send("Target.createTarget", { url: sourceUrl });
+    browserClient.close();
+    target = await waitForManagedBrowserPageTarget(port, createdTarget.targetId, null);
+    created = true;
+  }
+  const client = connectRemoteCdp(target.webSocketDebuggerUrl);
+  await client.ready();
+  await client.send("Page.enable");
+  await client.send("Runtime.enable");
+  let currentUrl = String(target.url || sourceUrl);
+  const executeJavaScript = async (expression) => {
+    const response = await client.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true, userGesture: true });
+    const exception = response?.result?.exceptionDetails;
+    if (exception) throw new Error(exception.exception?.description || exception.text || "BROWSER_CDP_RUNTIME_EXCEPTION");
+    return response?.result?.result?.value;
+  };
+  const loadURL = async (url) => {
+    const existingUrl = await executeJavaScript("location.href").catch(() => currentUrl);
+    try {
+      const existing = new URL(String(existingUrl || ""));
+      const requested = new URL(String(url || ""));
+      if (existing.origin === requested.origin && existing.pathname.replace(/\/$/, "") === requested.pathname.replace(/\/$/, "")) {
+        currentUrl = existing.toString();
+        return currentUrl;
+      }
+    } catch { /* Fall through to normal CDP navigation for invalid/blank URLs. */ }
+    await client.send("Page.navigate", { url });
+    await delay(1_500);
+    const state = await executeJavaScript("({url:location.href})").catch(() => null);
+    if (state?.url) currentUrl = String(state.url);
+    return currentUrl;
+  };
+  const close = async () => {
+    try { await client.send("Page.close"); } catch { /* Best effort for a managed temporary tab. */ }
+    client.close();
+  };
+  return { loadURL, webContents: { executeJavaScript, loadURL, getURL: () => currentUrl }, close, created };
+}
+
+async function readCocCocVersion() {
+  if (!Number.isInteger(COCCOC_DEBUG_PORT) || COCCOC_DEBUG_PORT <= 0) return null;
+  try {
+    const response = await fetch(`http://127.0.0.1:${COCCOC_DEBUG_PORT}/json/version`);
+    if (!response.ok) return null;
+    return await response.json();
+  } catch { return null; }
+}
+
+async function ensureCocCocCdp() {
+  const existing = await readCocCocVersion();
+  if (existing) return { port: COCCOC_DEBUG_PORT, version: existing };
+  if (!fs.existsSync(COCCOC_EXECUTABLE_PATH)) throw new Error("COCCOC_EXECUTABLE_NOT_FOUND");
+  fs.mkdirSync(COCCOC_PROFILE_DIRECTORY, { recursive: true });
+  const child = spawn(COCCOC_EXECUTABLE_PATH, [
+    "--remote-debugging-address=127.0.0.1",
+    `--remote-debugging-port=${COCCOC_DEBUG_PORT}`,
+    `--user-data-dir=${COCCOC_PROFILE_DIRECTORY}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--new-window",
+    "https://www.facebook.com/",
+  ], { detached: true, windowsHide: false, stdio: "ignore" });
+  child.unref();
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const version = await readCocCocVersion();
+    if (version) return { port: COCCOC_DEBUG_PORT, version };
+    await delay(250);
+  }
+  throw new Error("COCCOC_CDP_START_TIMEOUT");
+}
+
+async function createManagedCocCocFacebookBrowser(sourceUrl) {
+  const runtime = await ensureCocCocCdp();
+  return createManagedBrowserFacebookBrowser(runtime, sourceUrl);
+}
+
+async function discoverFacebookSourceMedia(browser, sourceUrl, expectedDurationSec = null, options = {}) {
+  if (!isFacebookSourceUrl(sourceUrl)) throw new Error("SOURCE_VIDEO_URL_INVALID: Chỉ hỗ trợ URL video Facebook đã xác thực.");
+  await browser.loadURL(sourceUrl);
+  const deadline = Date.now() + FACEBOOK_MEDIA_DISCOVERY_TIMEOUT_MS;
+  let diagnostic = null;
+  while (Date.now() <= deadline) {
+    diagnostic = await browser.webContents.executeJavaScript(`(() => {
+      const visible = (element) => {
+        const rect = element?.getBoundingClientRect?.();
+        const style = element ? getComputedStyle(element) : null;
+        return Boolean(element && element.isConnected && rect && rect.width > 0 && rect.height > 0 && style?.display !== "none" && style?.visibility !== "hidden" && style?.opacity !== "0");
+      };
+      const sourceFor = (video) => [video?.currentSrc, video?.src, ...(video?.querySelectorAll?.("source[src]") || [])].map((value) => typeof value === "string" ? value : value?.src || value?.getAttribute?.("src")).filter(Boolean);
+      const videos = [...document.querySelectorAll("video")].filter(visible).map((video) => {
+        const rect = video.getBoundingClientRect();
+        const sources = [...new Set(sourceFor(video))];
+        return { sources, durationSec: Number.isFinite(video.duration) && video.duration > 0 ? video.duration : null, area: rect.width * rect.height, readyState: video.readyState };
+      });
+      const currentUrl = location.href;
+      const body = String(document.body?.innerText || "").slice(0, 5000);
+      const authRequired = /accounts\\.google\\.com|facebook\\.com\\/login/i.test(currentUrl) || /log in to facebook|log in|đăng nhập/i.test(body);
+      const direct = videos.flatMap((item) => item.sources.filter((source) => /^https?:\\/\\//i.test(source)).map((source) => ({ source, ...item }))).sort((left, right) => (right.area || 0) - (left.area || 0));
+      const blob = videos.some((item) => item.sources.some((source) => /^blob:/i.test(source)));
+      const captureReady = videos.some((item) => item.readyState >= 2 && item.area > 0 && item.durationSec > 0);
+      return { currentUrl, authRequired, direct, blob, captureReady, visibleVideoCount: videos.length };
+    })()`, true).catch(() => null);
+    if (diagnostic?.authRequired) throw new Error("FACEBOOK_AUTH_REQUIRED: Hãy đăng nhập Facebook trong cùng cửa sổ rồi chạy lại phân tích.");
+    if (diagnostic?.direct?.length && options.preferCapture !== true) {
+      const selected = diagnostic.direct[0];
+      return { ...selected, currentUrl: diagnostic.currentUrl, visibleVideoCount: diagnostic.visibleVideoCount };
+    }
+    await delay(FACEBOOK_MEDIA_POLL_INTERVAL_MS * 5);
+  }
+  try {
+    const captured = await captureFacebookVideoFromPage(browser, expectedDurationSec);
+    return { ...captured, capture: true, currentUrl: diagnostic?.currentUrl || sourceUrl, visibleVideoCount: diagnostic?.visibleVideoCount || 0 };
+  } catch (captureError) {
+    if (diagnostic?.blob || diagnostic?.captureReady) throw new Error(`SOURCE_VIDEO_DOWNLOAD_UNAVAILABLE: Facebook chỉ cung cấp luồng blob/MSE và không thể ghi lại video trong phiên này (${captureError instanceof Error ? captureError.message : String(captureError)}).`);
+  }
+  throw new Error("SOURCE_VIDEO_DOWNLOAD_UNAVAILABLE: Không tìm thấy luồng video Facebook đã tải trong thời gian giới hạn.");
+}
+
+async function validateDownloadedSourceVideo(filePath, fallbackDurationSec = null) {
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) throw new Error("SOURCE_VIDEO_FILE_MISSING");
+  const size = fs.statSync(filePath).size;
+  if (size < 1024 || size > FACEBOOK_SOURCE_VIDEO_MAX_BYTES) throw new Error("SOURCE_VIDEO_FILE_SIZE_INVALID");
+  const metadata = await runFfmpeg(["-hide_banner", "-i", filePath, "-f", "null", "-"], true);
+  if (!/Video:/i.test(metadata)) throw new Error("SOURCE_VIDEO_FILE_NOT_VIDEO");
+  const durationSec = await readMediaDuration(filePath).catch(() => Number(fallbackDurationSec));
+  if (!Number.isFinite(durationSec) || durationSec <= 0.1) throw new Error("SOURCE_VIDEO_DURATION_INVALID");
+  return { size, durationSec };
+}
+
+async function normalizeSourceVideoForGemini(filePath, downloadRoot, fallbackDurationSec = null) {
+  if (/\.mp4$/i.test(filePath)) return { filePath, ...(await validateDownloadedSourceVideo(filePath, fallbackDurationSec)) };
+  const targetPath = path.join(downloadRoot, `source-${crypto.randomUUID()}.mp4`);
+  await runFfmpeg(["-y", "-hide_banner", "-i", filePath, "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", targetPath]);
+  const validation = await validateDownloadedSourceVideo(targetPath, fallbackDurationSec);
+  fs.rmSync(filePath, { force: true });
+  return { filePath: targetPath, ...validation };
+}
+
+async function downloadFacebookSourceVideo(sourceUrl, runId = null, expectedDurationSec = null, geminiWindow = null) {
+  fs.mkdirSync(path.join(app.getPath("userData"), "temporary"), { recursive: true });
+  const downloadRoot = fs.mkdtempSync(path.join(app.getPath("userData"), "temporary", "source-analysis-"));
+  let managedFacebookBrowser = null;
+  let authRequired = false;
+  try {
+    managedFacebookBrowser = await createManagedCocCocFacebookBrowser(sourceUrl);
+    const browser = managedFacebookBrowser;
+    const discovered = await discoverFacebookSourceMedia(browser, sourceUrl, expectedDurationSec, { preferCapture: true });
+    if (discovered.capture === true) {
+      const filePath = path.join(downloadRoot, `source-${crypto.randomUUID()}.webm`);
+      const bytes = Buffer.from(discovered.base64, "base64");
+      recordBrowserAction({ action: "facebook-source-video-capture-attempt", success: true, runId, sourceUrl: redactNetworkUrl(sourceUrl), base64Length: String(discovered.base64 || "").length, bytes: bytes.length, mimeType: discovered.mimeType || null, durationSec: discovered.durationSec || null, width: discovered.width || null, height: discovered.height || null });
+      if (bytes.length > FACEBOOK_SOURCE_VIDEO_MAX_BYTES) throw new Error("SOURCE_VIDEO_FILE_TOO_LARGE");
+      fs.writeFileSync(filePath, bytes, { mode: 0o600 });
+      const normalized = await normalizeSourceVideoForGemini(filePath, downloadRoot, discovered.durationSec);
+      recordBrowserAction({ action: "facebook-source-video-capture", success: true, runId, sourceUrl: redactNetworkUrl(sourceUrl), fileName: path.basename(normalized.filePath), sourceFormat: "mp4", bytes: normalized.size, durationSec: normalized.durationSec, width: discovered.width, height: discovered.height, visibleVideoCount: discovered.visibleVideoCount });
+      return { filePath: normalized.filePath, downloadRoot, fileName: path.basename(normalized.filePath), mediaUrl: null, durationSec: normalized.durationSec, size: normalized.size };
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), FACEBOOK_SOURCE_VIDEO_DOWNLOAD_TIMEOUT_MS);
+    let response;
+    try {
+      response = await browser.webContents.session.fetch(discovered.source, {
+        signal: controller.signal,
+        credentials: "include",
+        headers: { Referer: sourceUrl, Accept: "video/*,*/*;q=0.8" },
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!response.ok) throw new Error(`SOURCE_VIDEO_DOWNLOAD_HTTP_${response.status}`);
+    const declaredSize = Number(response.headers.get("content-length") || 0);
+    if (declaredSize > FACEBOOK_SOURCE_VIDEO_MAX_BYTES) throw new Error("SOURCE_VIDEO_FILE_TOO_LARGE");
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length > FACEBOOK_SOURCE_VIDEO_MAX_BYTES) throw new Error("SOURCE_VIDEO_FILE_TOO_LARGE");
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    const extension = contentType.includes("webm") ? ".webm" : contentType.includes("quicktime") ? ".mov" : ".mp4";
+    const filePath = path.join(downloadRoot, `source-${crypto.randomUUID()}${extension}`);
+    fs.writeFileSync(filePath, bytes, { mode: 0o600 });
+    const normalized = await normalizeSourceVideoForGemini(filePath, downloadRoot);
+    recordBrowserAction({ action: "facebook-source-video-download", success: true, runId, sourceUrl: redactNetworkUrl(sourceUrl), mediaUrl: redactNetworkUrl(discovered.source), fileName: path.basename(normalized.filePath), sourceFormat: "mp4", bytes: normalized.size, durationSec: normalized.durationSec, visibleVideoCount: discovered.visibleVideoCount });
+    return { filePath: normalized.filePath, downloadRoot, fileName: path.basename(normalized.filePath), mediaUrl: discovered.source, durationSec: normalized.durationSec, size: normalized.size };
+  } catch (error) {
+    authRequired = error instanceof Error && /FACEBOOK_AUTH_REQUIRED/.test(error.message);
+    fs.rmSync(downloadRoot, { recursive: true, force: true });
+    recordBrowserAction({ action: "facebook-source-video-download", success: false, runId, sourceUrl: redactNetworkUrl(sourceUrl), error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  } finally {
+    if (managedFacebookBrowser?.created && !authRequired) await managedFacebookBrowser.close().catch(() => {});
+  }
+}
+
 async function scanFacebookPages(entries, onProgress) {
   const browser = createFacebookWindow();
   const results = [];
@@ -2043,16 +2454,26 @@ ipcMain.handle("gemini-browser:develop-project", async (_event, value) => {
 });
 
 async function runBrowserSourceAnalysisJobUnlocked(payload) {
-    const window = await createGeminiWindow();
+  const window = await createGeminiWindow();
   await preflightGeminiForRun(window, payload.runId, "SOURCE_ANALYSIS");
   await delay(3_000);
   const video = payload.video && typeof payload.video === "object" ? payload.video : {};
   const channelDNA = payload.channelDNA && typeof payload.channelDNA === "object" ? payload.channelDNA : {};
-  const prompt = `Analyze the source short-form video using the browser/session context and the source URL below when it is accessible. Do not invent details that cannot be observed; state uncertainty briefly inside the relevant text field. Return ONE valid JSON object only, no Markdown and no commentary, with exactly these keys: schemaVersion (string "1.0"), summary, hook, setup, conflict, escalation, twist, payoff, theGag, cameraPattern, editingRhythm, soundPattern, retentionMechanism (all strings), characterInteractions and whyItWorks (arrays of strings). Write the values in Vietnamese. Source video context: ${JSON.stringify(video)}. Channel DNA: ${JSON.stringify(channelDNA)}. The source URL is ${JSON.stringify(video.url || "")}.`;
-  {
+  const sourceUrl = typeof video.url === "string" ? video.url : "";
+  const sourceVideo = await downloadFacebookSourceVideo(sourceUrl, payload.runId || null, Number(video.duration), window);
+  const prompt = ""; // The legacy DOM-only branch below is unreachable after the attached-file path.
+  try {
+    if (!payload.runId) {
+      await window.webContents.loadURL("https://gemini.google.com/app");
+      await waitForGeminiNewChatReady(window);
+      recordBrowserAction({ action: "gemini-source-analysis-fresh-chat", result: "PASS", source: "RELOAD_BARE_APP" });
+    }
+    await uploadEdgeGeminiFiles(window, [sourceVideo.filePath]);
+    await acceptGeminiVideoReminderIfPresent(window);
+    const prompt = `Analyze the ATTACHED LOCAL SOURCE VIDEO FILE, not just its URL. The attachment is the authoritative visual and audio evidence for this analysis. The source URL below is metadata only and must never be used as a substitute for watching the attachment. Do not invent details that cannot be observed in the attached file; state uncertainty briefly inside the relevant text field. Return ONE valid JSON object only, no Markdown and no commentary, with exactly these keys: schemaVersion (string "1.0"), summary, hook, setup, conflict, escalation, twist, payoff, theGag, cameraPattern, editingRhythm, soundPattern, retentionMechanism (all strings), characterInteractions and whyItWorks (arrays of strings). Write the values in Vietnamese. Attached filename: ${JSON.stringify(sourceVideo.fileName)}. Observed source duration: ${JSON.stringify(sourceVideo.durationSec)} seconds. Source video context: ${JSON.stringify(video)}. Channel DNA: ${JSON.stringify(channelDNA)}. Source URL metadata: ${JSON.stringify(sourceUrl)}.`;
     const beforeCount = await countGeminiResponseNodes(window);
-    const formatPrompt = "Your previous source analysis response was not valid complete JSON. Return exactly one complete JSON object with the required keys, all strings closed, arrays closed, Vietnamese values, no Markdown and no commentary. Do not invent evidence.";
-    return redactDesktopRuntime(await runGeminiJsonCommandWithFormatRetry({
+    const formatPrompt = "Your previous source analysis response was not valid complete JSON. Watch the attached source video file and return exactly one complete JSON object with the required keys, all strings closed, arrays closed, Vietnamese values, no Markdown and no commentary. Do not invent evidence and do not rely on the URL alone.";
+    const analysis = await runGeminiJsonCommandWithFormatRetry({
       window,
       prompt,
       purpose: "SOURCE_ANALYSIS",
@@ -2063,7 +2484,14 @@ async function runBrowserSourceAnalysisJobUnlocked(payload) {
       runId: payload.runId || null,
       stage: "SOURCE_ANALYSIS",
       validate: (result) => result && typeof result.summary === "string" && typeof result.hook === "string" && Array.isArray(result.characterInteractions) && Array.isArray(result.whyItWorks) ? null : "SOURCE_ANALYSIS_SCHEMA_INVALID",
-    }));
+      beforeRetryWindow: async (retryWindow) => {
+        await uploadEdgeGeminiFiles(retryWindow, [sourceVideo.filePath]);
+        await acceptGeminiVideoReminderIfPresent(retryWindow);
+      },
+    });
+    return redactDesktopRuntime({ ...analysis, analysisEvidence: { sourceVideoAttached: true, observationMethod: "attached-video-file", observedDurationSec: sourceVideo.durationSec } });
+  } finally {
+    fs.rmSync(sourceVideo.downloadRoot, { recursive: true, force: true });
   }
   let beforeCount = await window.webContents.executeJavaScript("(() => { const roots=[document]; const seen=new Set(roots); for(let i=0;i<roots.length;i+=1) for(const el of roots[i].querySelectorAll('*')) if(el.shadowRoot&&!seen.has(el.shadowRoot)){seen.add(el.shadowRoot);roots.push(el.shadowRoot);} return roots.flatMap(root=>[...root.querySelectorAll('model-response, message-content, [data-message-author-role=\"model\"]')]).length; })()", true);
   const fill = async (text) => window.webContents.executeJavaScript(geminiFillPromptExpression(text, "SOURCE_ANALYSIS_BROWSER_INPUT_MISSING"), true);
@@ -2121,11 +2549,12 @@ async function runBrowserSourceAnalysisJobUnlocked(payload) {
 async function runBrowserModelingIdeaJobUnlocked(payload) {
     const window = await createGeminiWindow();
   await preflightGeminiForRun(window, payload.runId, "MODELING_IDEA");
+  const characterReferencePath = await attachGeminiModelingCharacterReference(window, payload.channelId || payload.channelDNA?.channel?.id || payload.channelDNA?.id, "MODELING_IDEA");
   await delay(3_000);
-  const prompt = `Create exactly ONE faithful modeling idea from the source analysis below using the Gemini browser session. Preserve the source content, progression, mechanism, gag, sequence, character roles, key props, camera intent, timing/rhythm and ending. The only allowed differences are exactly: background/environment appearance, the approved main-character identity reference, and the selected art/rendering style. Do not add, remove, reorder or merge beats; do not add characters, props, actions, camera movement, timing changes, a new gag or a new ending. Return ONE complete JSON object only, no Markdown and no commentary, with schemaVersion "1.0" and modelingDirections containing exactly one object with these fields: title, coreConcept, script, characterDesign, setting, artStyle, sourceMechanism, whatIsPreserved (array), whatIsChanged (array), targetMarketAdaptation, similarityRisk (low|medium|high), whyWorthDeveloping, postText. Write descriptive fields in Vietnamese and postText in the channel language. Do not invent details that are absent from the analysis. Source video: ${JSON.stringify(payload.video)}. Channel DNA: ${JSON.stringify(payload.channelDNA)}. Source analysis: ${JSON.stringify(payload.analysis)}. Requested art style: ${JSON.stringify(payload.artStyle || "Giữ phong cách của kênh")}.`;
+  const prompt = `The attached canonical main-character reference image is mandatory visual evidence for this modeling step. Inspect it before writing and use it as the authority for the protagonist's face, identity, body proportions, age appearance, distinctive traits and core character design language. Do not replace, redesign or invent a different main character. Create exactly ONE faithful modeling idea from the source analysis below using the Gemini browser session. Preserve the source content, progression, mechanism, gag, sequence, character roles, key props, camera intent, timing/rhythm and ending. The only allowed differences are exactly: background/environment appearance, the approved main-character identity reference, and the selected art/rendering style. Do not add, remove, reorder or merge beats; do not add characters, props, actions, camera movement, timing changes, a new gag or a new ending. Return ONE complete JSON object only, no Markdown and no commentary. The top-level shape MUST be {"schemaVersion":"1.0","modelingDirections":[{...}]}; modelingDirections MUST be an array, never an object, and MUST contain exactly one object. That one object MUST contain these fields: title, coreConcept, script, characterDesign, setting, artStyle, sourceMechanism, whatIsPreserved (array), whatIsChanged (array), targetMarketAdaptation, similarityRisk (low|medium|high), whyWorthDeveloping, postText. Write descriptive fields in Vietnamese and postText in the channel language. Do not invent details that are absent from the analysis. Attached character reference filename: ${JSON.stringify(path.basename(characterReferencePath))}. Source video: ${JSON.stringify(payload.video)}. Channel DNA: ${JSON.stringify(payload.channelDNA)}. Source analysis: ${JSON.stringify(payload.analysis)}. Requested art style: ${JSON.stringify(payload.artStyle || "Giữ phong cách của kênh")}.`;
   {
     const beforeCount = await countGeminiResponseNodes(window);
-    const formatPrompt = "Your previous response was incomplete or invalid JSON. Return one complete JSON object with schemaVersion and exactly one modelingDirections item containing every required field. No Markdown or commentary.";
+    const formatPrompt = "Your previous response used the wrong schema. Return one complete JSON object only, with no Markdown or commentary, exactly in this shape: {\"schemaVersion\":\"1.0\",\"modelingDirections\":[{\"title\":\"...\",\"coreConcept\":\"...\",\"script\":\"...\",\"characterDesign\":\"...\",\"setting\":\"...\",\"artStyle\":\"...\",\"sourceMechanism\":\"...\",\"whatIsPreserved\":[\"...\"],\"whatIsChanged\":[\"...\"],\"targetMarketAdaptation\":\"...\",\"similarityRisk\":\"low\",\"whyWorthDeveloping\":\"...\",\"postText\":\"...\"}]}. modelingDirections MUST be an array with exactly one item, never an object. All required fields must be present.";
     return redactDesktopRuntime(await runGeminiJsonCommandWithFormatRetry({
       window,
       prompt,
@@ -2185,15 +2614,17 @@ async function runBrowserModelingIdeaJobUnlocked(payload) {
 async function runBrowserDevelopedIdeaJobUnlocked(payload) {
   const window = await createGeminiWindow();
   await preflightGeminiForRun(window, payload.runId, "CONTENT_PROJECT");
+  const characterReferencePath = await attachGeminiModelingCharacterReference(window, payload.channelId || payload.channelDNA?.channel?.id || payload.channelDNA?.id, "CONTENT_PROJECT");
+  const characterReferenceInstruction = `The attached canonical main-character reference image is mandatory visual evidence for this modeling script and storyboard. Inspect it before writing and use it as the authority for the protagonist's face, identity, body proportions, age appearance, distinctive traits and core character design language. Do not replace, redesign or invent a different main character. Attached character reference filename: ${JSON.stringify(path.basename(characterReferencePath))}.`;
   const prompt = `Develop the approved modeling idea into a production-ready Content Project and storyboard using the Gemini browser session under STRICT_MODELING. Preserve the source gag, sequence, meaning, character count, camera intent, action order, timing and continuity. Return ONE complete JSON object only, no Markdown or commentary, with schemaVersion "1.0", sourceModelingSpec (object), deconstruction (object), artDirection (object), characterDesign (object), backgroundDesign (object), storyboard (array with at least one item), and safetyReview (object). CANONICAL JSON CONTRACT: sourceModelingSpec MUST contain exactly the array key "scenes". Never use "sourceScenes". sourceModelingSpec.scenes contains one ordered source scene per actual major shot/beat with sourceSceneId, order, sourceStartTime, sourceEndTime, duration, storyBeat, cameraType, shotSize, cameraAngle, cameraMovement, framing, subjectPosition, relativeObjectPositions, characterAction, ordered actionSequence, startState, endState, transitionIn, transitionOut, timingNotes, rhythmNotes, mustPreserve and allowedTransformations. sourceStartTime MUST be a JSON number in seconds (examples 0, 1.5, 4.25); never return a quoted string, clock-formatted text such as 00:03, or a value with a unit suffix. sourceEndTime MUST be a JSON number in seconds (examples 3, 6.5, 13.5); never return a quoted string such as \"3\" or \"00:03\", clock-formatted text, or a value with a unit suffix. sourceEndTime must be greater than sourceStartTime. duration MUST be a JSON number in seconds (examples 3, 3.5, 0.75); never return \"3\", \"00:03\", \"3s\" or any other string/unit-suffixed representation. Keep duration consistent with sourceEndTime - sourceStartTime under the authoritative schema tolerance; do not change start/end times to hide a duration error. relativeObjectPositions MUST be a JSON array of strings; [] is allowed when no relative object evidence exists. Each element must be a non-empty string. Never return one string, a semicolon/comma-delimited string, an object, or null. actionSequence MUST be a JSON array of non-empty strings with at least one item. Each item is one action beat in exact chronological order inside that scene. Never return the whole sequence as one string, numbered prose, an object, null, or an empty array. CAMERA CONTRACT: cameraType, shotSize, cameraAngle and framing MUST each be non-empty JSON strings describing the source camera intent; cameraMovement MUST be a JSON string or null describing source camera motion, and may be omitted only when the schema default null applies. Do not return objects, arrays or numbers for these fields. Do not invent missing evidence. Every storyboard item must contain sceneNumber (positive integer), visualBlock, actionBlock, audioBlock, startFramePrompt and englishPrompt. Write descriptive fields in Vietnamese; write startFramePrompt and englishPrompt in English. Each scene must contain one primary action and connect to the previous scene. Do not add or remove scenes compared with sourceModelingSpec.scenes. Source video: ${JSON.stringify(payload.video)}. Channel DNA: ${JSON.stringify(payload.channelDNA)}. Source analysis: ${JSON.stringify(payload.analysis)}. Approved modeling idea: ${JSON.stringify(payload.idea)}. Aspect ratio: ${JSON.stringify(payload.aspectRatio || "9:16")}.`;
   {
     const beforeCount = await countGeminiResponseNodes(window);
     const formatPrompt = ({ rawResponse, error }) => String(error || "").startsWith("CONTENT_PROJECT_SCHEMA_INVALID")
-      ? `Your previous response was valid JSON but failed the authoritative Content Project contract: ${error}. Repair ONLY the JSON structure. The canonical field is sourceModelingSpec.scenes (array); do not use sourceModelingSpec.sourceScenes. sourceStartTime and sourceEndTime must be JSON numbers in seconds, not quoted strings or clock text; duration must also be a JSON number in seconds, not a quoted string or unit-suffixed value; relativeObjectPositions must be an array of non-empty strings, with [] allowed. If relativeObjectPositions was one string, represent the same spatial meaning as a one-element array and do not add/remove objects. actionSequence must be an array of at least one non-empty string per scene; if it was one string or numbered prose, return a new array preserving the exact action content and chronological order. Do not add, remove, or reorder action beats. cameraType, shotSize, cameraAngle and framing must be non-empty JSON strings; cameraMovement must be a JSON string or null. Do not map synonyms in the application. Preserve each timing value exactly, keep sourceEndTime greater than sourceStartTime, and keep duration consistent with sourceEndTime - sourceStartTime under the authoritative schema tolerance. Do not change start/end times to hide a duration error. Preserve exactly the scene count, scene order, scene text, actionSequence content/order, camera constraints/intent, timing, character/source mapping, and all other content. Do not add creative content. Return one complete corrected JSON object only. ORIGINAL PARSED JSON: ${rawResponse}`
+      ? `Your previous response was valid JSON but failed the authoritative Content Project contract: ${error}. Repair ONLY the JSON structure. The canonical field is sourceModelingSpec.scenes (array); do not use sourceModelingSpec.sourceScenes. Every sourceModelingSpec.scenes item MUST include a non-empty string subjectPosition describing the observed subject placement, even when the value is "center" or "uncertain"; do not omit it and do not invent a new action. sourceStartTime and sourceEndTime must be JSON numbers in seconds, not quoted strings or clock text; duration must also be a JSON number in seconds, not a quoted string or unit-suffixed value; relativeObjectPositions must be an array of non-empty strings, with [] allowed. If relativeObjectPositions was one string, represent the same spatial meaning as a one-element array and do not add/remove objects. actionSequence must be an array of at least one non-empty string per scene; if it was one string or numbered prose, return a new array preserving the exact action content and chronological order. Do not add, remove, or reorder action beats. cameraType, shotSize, cameraAngle and framing must be non-empty JSON strings; cameraMovement must be a JSON string or null. Do not map synonyms in the application. Preserve each timing value exactly, keep sourceEndTime greater than sourceStartTime, and keep duration consistent with sourceEndTime - sourceStartTime under the authoritative schema tolerance. Do not change start/end times to hide a duration error. Preserve exactly the scene count, scene order, scene text, actionSequence content/order, camera constraints/intent, timing, character/source mapping, and all other content. Do not add creative content. Return one complete corrected JSON object only. ORIGINAL PARSED JSON: ${rawResponse}`
       : "Your previous response was incomplete or invalid JSON. Return one complete STRICT_MODELING JSON object with sourceModelingSpec.scenes (array), schemaVersion, deconstruction, artDirection, characterDesign, backgroundDesign, storyboard and safetyReview. No Markdown or commentary.";
     return redactDesktopRuntime(await runGeminiJsonCommandWithFormatRetry({
       window,
-      prompt,
+      prompt: `${characterReferenceInstruction}\n${prompt}`,
       purpose: "CONTENT_PROJECT_DEVELOP",
       formatPrompt,
       missingCode: "CONTENT_PROJECT_BROWSER_INPUT_MISSING",
@@ -2216,6 +2647,8 @@ async function runBrowserDevelopedIdeaJobUnlocked(payload) {
             if (invalidRelativeIndex >= 0) return `CONTENT_PROJECT_SCHEMA_INVALID: sourceModelingSpec.scenes[${invalidRelativeIndex}].relativeObjectPositions must be an array of non-empty strings; received ${JSON.stringify(result.sourceModelingSpec.scenes[invalidRelativeIndex]?.relativeObjectPositions)}`;
             const invalidActionIndex = result.sourceModelingSpec.scenes.findIndex((scene) => !Array.isArray(scene?.actionSequence) || scene.actionSequence.length === 0 || scene.actionSequence.some((item) => typeof item !== "string" || !item.trim()));
             if (invalidActionIndex >= 0) return `CONTENT_PROJECT_SCHEMA_INVALID: sourceModelingSpec.scenes[${invalidActionIndex}].actionSequence must be a non-empty array of non-empty strings; received ${JSON.stringify(result.sourceModelingSpec.scenes[invalidActionIndex]?.actionSequence)}`;
+            const invalidSubjectPositionIndex = result.sourceModelingSpec.scenes.findIndex((scene) => typeof scene?.subjectPosition !== "string" || !scene.subjectPosition.trim());
+            if (invalidSubjectPositionIndex >= 0) return `CONTENT_PROJECT_SCHEMA_INVALID: sourceModelingSpec.scenes[${invalidSubjectPositionIndex}].subjectPosition must be a non-empty string; received ${JSON.stringify(result.sourceModelingSpec.scenes[invalidSubjectPositionIndex]?.subjectPosition)}`;
             const invalidCameraIndex = result.sourceModelingSpec.scenes.findIndex((scene) => typeof scene?.cameraType !== "string" || !scene.cameraType.trim() || typeof scene?.shotSize !== "string" || !scene.shotSize.trim() || typeof scene?.cameraAngle !== "string" || !scene.cameraAngle.trim() || (scene?.cameraMovement !== undefined && scene.cameraMovement !== null && typeof scene.cameraMovement !== "string") || typeof scene?.framing !== "string" || !scene.framing.trim());
             return invalidCameraIndex >= 0 ? `CONTENT_PROJECT_SCHEMA_INVALID: sourceModelingSpec.scenes[${invalidCameraIndex}].cameraType/shotSize/cameraAngle/cameraMovement/framing have invalid camera contract types; received ${JSON.stringify({ cameraType: result.sourceModelingSpec.scenes[invalidCameraIndex]?.cameraType, shotSize: result.sourceModelingSpec.scenes[invalidCameraIndex]?.shotSize, cameraAngle: result.sourceModelingSpec.scenes[invalidCameraIndex]?.cameraAngle, cameraMovement: result.sourceModelingSpec.scenes[invalidCameraIndex]?.cameraMovement, framing: result.sourceModelingSpec.scenes[invalidCameraIndex]?.framing })}` : null;
           })(),
@@ -2317,7 +2750,7 @@ async function runBrowserQualityJobUnlocked(payload) {
       files.push(selected);
     }
   } else {
-    const root = path.join(app.getPath("userData"), "generated-videos", projectId);
+    const root = path.join(generatedMediaRoot(), "generated-videos", projectId);
     if (stage === "FINAL_AUDIT") files.push(path.join(root, "final.mp4"));
     else for (const scene of expectedState.scenes || []) files.push(path.join(root, `scene-${scene.sceneNumber}.mp4`));
   }
@@ -2625,7 +3058,7 @@ async function waitForFlowLoad(window) {
   throw new Error("Google Flow mở quá lâu hoặc chưa tải xong. Hãy kiểm tra kết nối và trạng thái đăng nhập rồi thử lại.");
 }
 
-async function reloadGeminiBeforeNextPrompt(window) {
+async function reloadGeminiBeforeNextPrompt(window, expectedConversationBinding = null, runId = null, stage = null) {
   if (window.isDestroyed()) throw new Error("Cửa sổ Gemini đã bị đóng trước khi gửi prompt tiếp theo.");
   const conversationUrl = window.webContents.getURL();
   geminiLoadPromise = new Promise((resolve, reject) => {
@@ -2664,6 +3097,29 @@ async function reloadGeminiBeforeNextPrompt(window) {
       continue;
     }
     await delay(800);
+    if (expectedConversationBinding?.geminiConversationId && runId) {
+      const observedUrl = await window.webContents.executeJavaScript("location.href", true).catch(() => window.webContents.getURL());
+      try {
+        assertConversationReady(expectedConversationBinding, runId, observedUrl);
+        recordBrowserAction({
+          action: "gemini-shared-conversation-reload-identity",
+          stage,
+          persistedConversationId: expectedConversationBinding.geminiConversationId,
+          observedConversationId: conversationIdFromUrl(observedUrl),
+          result: "PASS",
+        });
+      } catch (error) {
+        recordBrowserAction({
+          action: "gemini-shared-conversation-reload-identity",
+          stage,
+          persistedConversationId: expectedConversationBinding.geminiConversationId,
+          observedConversationId: conversationIdFromUrl(observedUrl),
+          result: "FAIL",
+          failureReason: error instanceof Error ? error.message : String(error),
+        });
+        throw new Error(`GEMINI_SHARED_CONVERSATION_MISMATCH: stage=${stage || "UNKNOWN"} runId=${runId}`);
+      }
+    }
     return;
   }
   throw new Error("Gemini đã tải lại nhưng chưa sẵn sàng nhận prompt tiếp theo.");
@@ -2675,7 +3131,7 @@ function saveGeminiImage(projectId, slot, dataUrl) {
   const mimeToExtension = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif", "image/bmp": ".bmp", "image/avif": ".avif" };
   const extension = mimeToExtension[match[1].toLowerCase()];
   if (!extension) throw new Error(`Định dạng ảnh Gemini chưa được hỗ trợ: ${match[1]}`);
-  const imageRoot = path.join(app.getPath("userData"), "generated-images", projectId);
+  const imageRoot = path.join(generatedMediaRoot(), "generated-images", projectId);
   fs.mkdirSync(imageRoot, { recursive: true });
   const sceneNumber = Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0;
   const allowedExtensions = Object.values(mimeToExtension);
@@ -2685,6 +3141,17 @@ function saveGeminiImage(projectId, slot, dataUrl) {
   }
   const buffer = Buffer.from(match[2], "base64");
   if (buffer.length > 20 * 1024 * 1024) throw new Error("Ảnh Gemini vượt quá giới hạn 20 MB.");
+  if (slot.kind === "scene" && Number.isInteger(slot.sceneNumber) && slot.sceneNumber > 1) {
+    const previousPath = findSceneImagePath(projectId, slot.sceneNumber - 1);
+    const previousHash = crypto.createHash("sha256").update(fs.readFileSync(previousPath)).digest("hex");
+    const generatedHash = crypto.createHash("sha256").update(buffer).digest("hex");
+    if (previousHash === generatedHash) {
+      const error = new Error(`GEMINI_IMAGE_CONTINUITY_DUPLICATE: ảnh cảnh ${slot.sceneNumber} trùng hoàn toàn ảnh cảnh ${slot.sceneNumber - 1}.`);
+      error.code = "GEMINI_IMAGE_CONTINUITY_DUPLICATE";
+      error.firstDivergence = "IMAGE_CONTINUITY_GATE";
+      throw error;
+    }
+  }
   fs.writeFileSync(path.join(imageRoot, `${slot.kind}-${sceneNumber}${extension}`), buffer);
   return `/api/v1/projects/${projectId}/images?kind=${slot.kind}&sceneNumber=${sceneNumber}`;
 }
@@ -2696,8 +3163,8 @@ function saveFlowImage(projectId, slot, buffer, mimeType = "image/png") {
   const extension = mimeToExtension[mimeType.toLowerCase()] || ".png";
   if (slot.candidateId && !/^[a-f0-9-]{36}$/.test(slot.candidateId)) throw new Error("IMAGE_CANDIDATE_ID_INVALID");
   const imageRoot = slot.candidateId
-    ? path.join(app.getPath("userData"), "generated-images", projectId, "candidates", slot.candidateId)
-    : path.join(app.getPath("userData"), "generated-images", projectId);
+    ? path.join(generatedMediaRoot(), "generated-images", projectId, "candidates", slot.candidateId)
+    : path.join(generatedMediaRoot(), "generated-images", projectId);
   fs.mkdirSync(imageRoot, { recursive: true });
   const sceneNumber = Number.isInteger(slot.sceneNumber) ? slot.sceneNumber : 0;
   for (const oldExtension of slot.candidateId ? [] : Object.values(mimeToExtension)) {
@@ -2709,7 +3176,7 @@ function saveFlowImage(projectId, slot, buffer, mimeType = "image/png") {
 }
 
 function findGeneratedImagePath(projectId, kind, sceneNumber = 0, candidateId) {
-  const projectRoot = path.join(app.getPath("userData"), "generated-images", projectId);
+  const projectRoot = path.join(generatedMediaRoot(), "generated-images", projectId);
   if (candidateId && !/^[a-f0-9-]{36}$/.test(candidateId)) throw new Error("IMAGE_CANDIDATE_ID_INVALID");
   const imageRoot = candidateId ? path.join(projectRoot, "candidates", candidateId) : projectRoot;
   const manifest = path.join(projectRoot, "approved-images.json");
@@ -2734,12 +3201,60 @@ function findSceneImagePath(projectId, sceneNumber) {
 }
 
 function findChannelMainCharacterImagePath(channelId) {
-  const characterRoot = path.join(app.getPath("userData"), "channel-characters");
+  const characterRoot = path.join(canonicalDesktopDataRoot(), "channel-characters");
   for (const extension of [".png", ".jpg", ".webp", ".gif", ".bmp", ".avif"]) {
     const target = path.join(characterRoot, `${channelId}${extension}`);
     if (fs.existsSync(target)) return target;
   }
   return null;
+}
+
+async function attachGeminiModelingCharacterReference(window, channelId, stage) {
+  const characterReferencePath = typeof channelId === "string" ? findChannelMainCharacterImagePath(channelId) : null;
+  if (!characterReferencePath) {
+    const error = new Error("MODELING_CHARACTER_REFERENCE_MISSING: Không tìm thấy ảnh tham chiếu nhân vật chính của kênh.");
+    error.code = "MODELING_CHARACTER_REFERENCE_MISSING";
+    error.firstDivergence = "MODELING_CHARACTER_REFERENCE_UPLOAD";
+    error.details = { stage, channelId: typeof channelId === "string" ? channelId : null };
+    throw error;
+  }
+  try {
+    await uploadEdgeGeminiFiles(window, [characterReferencePath]);
+  } catch (uploadError) {
+    // Gemini's current responsive toolbox can omit the file action after a
+    // conversation reload. If the same canonical filename is already present
+    // in a user turn of this exact conversation, reuse that attachment rather
+    // than duplicating the file or creating a new conversation.
+    const reusable = await window.webContents.executeJavaScript(`(() => {
+      const filename = ${JSON.stringify(path.basename(characterReferencePath))}.toLowerCase();
+      const queries = [...document.querySelectorAll("user-query")];
+      return queries.some((query) => {
+        const text = String(query.textContent || "").toLowerCase();
+        const images = query.querySelectorAll("img[data-test-id=uploaded-img], user-query-file-preview img, .query-file-preview img");
+        return text.includes(filename) && images.length > 0;
+      });
+    })()`, true).catch(() => false);
+    if (!reusable) throw uploadError;
+    recordBrowserAction({
+      action: "gemini-modeling-character-reference-reused",
+      provider: "EDGE_CDP",
+      stage,
+      filename: path.basename(characterReferencePath),
+      source: "EXISTING_CONVERSATION_ATTACHMENT",
+      originalError: String(uploadError?.message || uploadError),
+    });
+    return characterReferencePath;
+  }
+  const evidence = await readEdgeGeminiAttachmentEvidence(window, [characterReferencePath]);
+  if (!evidence?.confirmed) {
+    const error = new Error("MODELING_CHARACTER_REFERENCE_NOT_CONFIRMED: Gemini chưa xác nhận preview ảnh nhân vật chính.");
+    error.code = "MODELING_CHARACTER_REFERENCE_NOT_CONFIRMED";
+    error.firstDivergence = "MODELING_CHARACTER_REFERENCE_UPLOAD";
+    error.details = { stage, filename: path.basename(characterReferencePath), evidence };
+    throw error;
+  }
+  recordBrowserAction({ action: "gemini-modeling-character-reference-upload", provider: "EDGE_CDP", stage, filename: path.basename(characterReferencePath), preview: evidence });
+  return characterReferencePath;
 }
 
 function normalizeGeminiImageSource(value) {
@@ -2748,8 +3263,27 @@ function normalizeGeminiImageSource(value) {
   return source.toLowerCase().startsWith(`${origin}https://`) ? source.slice(origin.length) : source;
 }
 
+function canonicalDesktopDataRoot() {
+  const configuredDatabaseUrl = process.env.DESKTOP_DATABASE_URL || process.env.DATABASE_URL;
+  if (typeof configuredDatabaseUrl === "string" && configuredDatabaseUrl.startsWith("file:")) {
+    const configuredDatabasePath = decodeURIComponent(configuredDatabaseUrl.slice("file:".length));
+    if (configuredDatabasePath) return path.dirname(configuredDatabasePath);
+  }
+  return app.getPath("userData");
+}
+
+function generatedMediaRoot() {
+  const configuredRoot = process.env.MODELING_AI_GENERATED_MEDIA_ROOT;
+  return typeof configuredRoot === "string" && configuredRoot.trim() ? path.resolve(configuredRoot) : app.getPath("userData");
+}
+
 async function findProjectChannelId(projectId) {
-  const databasePath = path.join(app.getPath("userData"), "modeling-ai.db");
+  // In a recovery/dev desktop the renderer and Electron intentionally use
+  // different user-data roots: media belongs to the managed runtime root,
+  // while the app database remains the canonical desktop database. Reading
+  // app.getPath("userData") here silently opens a fresh empty SQLite file and
+  // makes Stage 3 fail with "ContentProject does not exist".
+  const databasePath = path.join(canonicalDesktopDataRoot(), "modeling-ai.db");
   const prismaClientPath = app.isPackaged
     ? path.join(runtimeRoot(), "app", "node_modules", "@prisma", "client")
     : "@prisma/client";
@@ -3062,11 +3596,14 @@ async function findEdgeGeminiUploadAction(window) {
       for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
       const visible = (element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return Boolean(element.isConnected && bounds.width > 0 && bounds.height > 0 && style.display !== "none" && style.visibility !== "hidden"); };
       const menus = roots.flatMap((root) => [...root.querySelectorAll('[role="menu"], mat-action-list')]).filter(visible);
-      const menu = menus.find((candidate) => [...candidate.querySelectorAll('button, [role="button"], mat-list-item, gem-list-item')].some((element) => /^Tệp$/i.test(String(element.textContent || element.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim())));
+      const menu = menus.find((candidate) => [...candidate.querySelectorAll('button, [role="button"], [role="menuitem"], mat-list-item, gem-list-item')].some((element) => {
+        const label = String(element.textContent || element.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim();
+        return ["uploader-images-files-button-advanced", "local-images-files-uploader-button"].includes(element.getAttribute("data-test-id")) || /^(Tệp|Tải tệp lên)$/i.test(label);
+      }));
       if (!menu) return null;
-      const candidates = [...menu.querySelectorAll('button, [role="button"], mat-list-item, gem-list-item')].filter(visible);
-      const upload = candidates.find((element) => element.getAttribute("data-test-id") === "uploader-images-files-button-advanced")
-        || candidates.find((element) => /^Tệp$/i.test(String(element.textContent || element.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim()));
+      const candidates = [...menu.querySelectorAll('button, [role="button"], [role="menuitem"], mat-list-item, gem-list-item')].filter(visible);
+      const upload = candidates.find((element) => ["uploader-images-files-button-advanced", "local-images-files-uploader-button"].includes(element.getAttribute("data-test-id")))
+        || candidates.find((element) => /^(Tệp|Tải tệp lên)$/i.test(String(element.textContent || element.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim()));
       if (!upload) return null;
       const bounds = upload.getBoundingClientRect();
       return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2, tag: upload.tagName.toLowerCase(), role: upload.getAttribute("role"), name: String(upload.textContent || upload.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim() };
@@ -3084,11 +3621,12 @@ async function readEdgeGeminiAttachmentEvidence(window, filePaths) {
     for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll("*")) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
     const visible = (element) => { const bounds = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element && element.isConnected && bounds && bounds.width > 0 && bounds.height > 0 && style?.display !== "none" && style?.visibility !== "hidden"); };
     const text = (element) => String(element?.innerText || element?.textContent || "").replace(/\\s+/g, " ").trim().toLowerCase();
-    const previews = roots.flatMap((root) => [...root.querySelectorAll("uploader-file-preview, [data-test-id*=attachment], [data-testid*=attachment]")]).filter(visible);
+    const previews = roots.flatMap((root) => [...root.querySelectorAll("uploader-file-preview, gem-attachment, [data-test-id*=attachment], [data-testid*=attachment]")]).filter(visible);
     const previewImages = roots.flatMap((root) => [...root.querySelectorAll("uploader-file-preview img, input-container img")]).filter((image) => visible(image) && image.complete && (image.naturalWidth || image.width) > 0);
     const filenamePresent = ${JSON.stringify(filenames)}.every((filename) => roots.flatMap((root) => [...root.querySelectorAll("*")]).some((element) => visible(element) && text(element).includes(filename)));
     const selectedInputs = roots.flatMap((root) => [...root.querySelectorAll('input[type="file"]')]).filter((input) => (input.files?.length || 0) > 0);
-    return { previewCount: previews.length, previewImageCount: previewImages.length, filenamePresent, selectedInputCount: selectedInputs.length, confirmed: previews.length > 0 || previewImages.length > 0 || filenamePresent };
+    const failedPreviews = previews.filter((element) => /has-error|loading-error|error|failed|không thể|lỗi/i.test(String(element.className || "") + " " + text(element)));
+    return { previewCount: previews.length, previewImageCount: previewImages.length, filenamePresent, selectedInputCount: selectedInputs.length, failedPreviewCount: failedPreviews.length, confirmed: failedPreviews.length === 0 && (previews.length > 0 || previewImages.length > 0 || filenamePresent) };
   })()`, true).catch(() => null);
 }
 
@@ -3137,8 +3675,11 @@ async function uploadEdgeGeminiFiles(window, filePaths) {
         const visible = (element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return Boolean(element.isConnected && bounds.width > 0 && bounds.height > 0 && style.display !== "none" && style.visibility !== "hidden"); };
         const roots = [document]; const seen = new Set(roots);
         for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
-        const menu = roots.flatMap((root) => [...root.querySelectorAll('[role="menu"], mat-action-list')]).find((candidate) => visible(candidate));
-        const button = [...(menu?.querySelectorAll('button, [role="button"], mat-list-item, gem-list-item') || [])].find((element) => visible(element) && /^Tệp$/i.test(String(element.textContent || element.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim()));
+        const menu = roots.flatMap((root) => [...root.querySelectorAll('[role="menu"], mat-action-list')]).filter(visible).find((candidate) => [...candidate.querySelectorAll('button, [role="button"], [role="menuitem"], mat-list-item, gem-list-item')].some((element) => {
+          const label = String(element.textContent || element.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim();
+          return ["uploader-images-files-button-advanced", "local-images-files-uploader-button"].includes(element.getAttribute("data-test-id")) || /^(Tệp|Tải tệp lên)$/i.test(label);
+        }));
+        const button = [...(menu?.querySelectorAll('button, [role="button"], [role="menuitem"], mat-list-item, gem-list-item') || [])].find((element) => visible(element) && (["uploader-images-files-button-advanced", "local-images-files-uploader-button"].includes(element.getAttribute("data-test-id")) || /^(Tệp|Tải tệp lên)$/i.test(String(element.textContent || element.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim())));
         if (!button || button.matches?.(":disabled")) return false;
         button.click();
         return true;
@@ -3163,17 +3704,252 @@ async function attachEdgeGeminiReference(window, filePath) {
 }
 
 async function selectGeminiImageGenerationTool(window) {
-  await clickFlowControl(window, ["Nội dung tải lên và công cụ", "Uploads and tools", "Add files", "Add files and tools"], false, 30_000);
-  const imageTool = await waitForFlowControlPoint(window, ["Tạo hình ảnh", "Create image", "Create images"], false, 15_000).catch(() => null);
+  const imageLabels = ["Tạo hình ảnh", "Create image", "Create images", "Hình ảnh", "Image"];
+  const readActiveImageMode = () => window.webContents.executeJavaScript(`(() => {
+    const roots = [document]; const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+    const visible = (element) => { const bounds = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element?.isConnected && bounds && bounds.width > 0 && bounds.height > 0 && style?.display !== 'none' && style?.visibility !== 'hidden'); };
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const active = roots.flatMap((root) => [...root.querySelectorAll('[aria-label],[title],button,[role="button"],mat-chip,gem-chip')]).find((element) => {
+      if (!visible(element)) return false;
+      const label = normalize(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent);
+      return /^(bỏ chọn|deselect)\s+(hình ảnh|image)$/.test(label) || label === 'hình ảnh' || label === 'image';
+    });
+    return active ? { label: String(active.getAttribute('aria-label') || active.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120) } : null;
+  })()`, true).catch(() => null);
+  const readImageSelectionState = () => window.webContents.executeJavaScript(`(() => {
+    const roots = [document]; const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+    const visible = (element) => { const bounds = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element?.isConnected && bounds && bounds.width > 0 && bounds.height > 0 && style?.display !== 'none' && style?.visibility !== 'hidden'); };
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const controls = roots.flatMap((root) => [...root.querySelectorAll('button,[role="button"],[role="menuitem"],[role="menuitemcheckbox"],[role="option"],[role="radio"],mat-chip,gem-chip,mat-list-item,gem-list-item')]).filter(visible);
+    const active = controls.find((element) => {
+      const label = normalize(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent);
+      const pressed = normalize(element.getAttribute('aria-pressed')) === 'true';
+      const selected = normalize(element.getAttribute('aria-selected')) === 'true' || normalize(element.getAttribute('data-state')) === 'on';
+      const className = normalize(element.className);
+      return /^(bỏ chọn|deselect)\\s+(hình ảnh|image)$/.test(label) || label === 'hình ảnh' || label === 'image' || pressed || selected || /(^|\\s)(selected|active|checked)(\\s|$)/.test(className);
+    });
+    const imageMenu = controls.find((element) => /^(tạo hình ảnh|create image|create images|hình ảnh|image)$/.test(normalize(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent)));
+    const launcher = controls.find((element) => /nội dung tải lên và công cụ|uploads? and tools|add files/i.test(String(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent || '')));
+    return {
+      active: active ? { label: String(active.getAttribute('aria-label') || active.getAttribute('title') || active.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120), tag: active.tagName.toLowerCase() } : null,
+      imageMenuVisible: Boolean(imageMenu),
+      launcherExpanded: launcher?.getAttribute('aria-expanded') || null,
+    };
+  })()`, true).catch(() => null);
+  let activeImageMode = null;
+  for (let elapsed = 0; elapsed < 5_000 && !activeImageMode; elapsed += 250) {
+    activeImageMode = await readActiveImageMode();
+    if (!activeImageMode) await delay(250);
+  }
+  if (activeImageMode) {
+    recordBrowserAction({ action: "gemini-image-tool-detected", labels: imageLabels, tag: "active-image-mode", label: activeImageMode.label, result: "PASS" });
+    return;
+  }
+  const openGeminiToolMenuDirect = async () => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const launcherState = await window.webContents.executeJavaScript(`(() => {
+        const roots = [document]; const seen = new Set(roots);
+        for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        const visible = (element) => { const bounds = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element?.isConnected && bounds && bounds.width > 0 && bounds.height > 0 && style?.display !== 'none' && style?.visibility !== 'hidden'); };
+        const launcher = roots.flatMap((root) => [...root.querySelectorAll('button,[role="button"]')]).find((element) => visible(element) && /nội dung tải lên và công cụ|uploads? and tools|add files/i.test(String(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent || '')));
+        if (!launcher) return null;
+        const bounds = launcher.getBoundingClientRect();
+        return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2, expanded: launcher.getAttribute('aria-expanded') || null };
+      })()`, true).catch(() => null);
+      if (!launcherState) { await delay(250); continue; }
+      if (launcherState.expanded === "true") return true;
+      await window.webContents.executeJavaScript(`(() => {
+        const roots = [document]; const seen = new Set(roots);
+        for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        const launcher = roots.flatMap((root) => [...root.querySelectorAll('button,[role="button"]')]).find((element) => /nội dung tải lên và công cụ|uploads? and tools|add files/i.test(String(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent || '')));
+        if (!launcher || launcher.disabled) return false;
+        launcher.click();
+        return true;
+      })()`, true).catch(() => false);
+      await delay(800);
+      const menuState = await window.webContents.executeJavaScript(`(() => {
+        const roots = [document]; const seen = new Set(roots);
+        for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        const visible = (element) => { const bounds = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element?.isConnected && bounds && bounds.width > 0 && bounds.height > 0 && style?.display !== 'none' && style?.visibility !== 'hidden'); };
+        const launcher = roots.flatMap((root) => [...root.querySelectorAll('button,[role="button"]')]).find((element) => visible(element) && /nội dung tải lên và công cụ|uploads? and tools|add files/i.test(String(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent || '')));
+        const items = roots.flatMap((root) => [...root.querySelectorAll('button,[role="button"],[role="menuitem"],[role="option"],mat-list-item,gem-list-item')]).filter((element) => visible(element) && String(element.textContent || '').replace(/\s+/g, ' ').trim().length <= 100);
+        const imageItem = items.find((element) => /^(hình ảnh|image|tạo hình ảnh|create image|create images)$/i.test(String(element.getAttribute('aria-label') || element.textContent || '').replace(/\s+/g, ' ').trim()));
+        return { expanded: launcher?.getAttribute('aria-expanded') || null, imageItemVisible: Boolean(imageItem) };
+      })()`, true).catch(() => null);
+      recordBrowserAction({ action: "gemini-image-tools-menu", attempt: attempt + 1, launcherExpanded: menuState?.expanded || null, imageItemVisible: Boolean(menuState?.imageItemVisible) });
+      if (menuState?.expanded === "true" || menuState?.imageItemVisible) return true;
+      await dispatchBrowserClick(window, launcherState);
+      await delay(800);
+    }
+    return false;
+  };
+  // The upload chooser can leave the shared tools menu open. Do not click
+  // the launcher blindly: on that state a second click closes the menu.
+  let imageTool = await waitForGeminiToolPoint(window, imageLabels, 750).catch(() => null);
+  if (!imageTool) {
+    await openGeminiToolMenuDirect();
+    const menuState = await window.webContents.executeJavaScript(`(() => {
+      const roots = [document]; const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      const visible = (element) => { const bounds = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element?.isConnected && bounds && bounds.width > 0 && bounds.height > 0 && style?.display !== 'none' && style?.visibility !== 'hidden'); };
+      const launcher = roots.flatMap((root) => [...root.querySelectorAll('button,[role="button"]')]).find((element) => visible(element) && /nội dung tải lên và công cụ|uploads? and tools|add files/i.test(String(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent || '')));
+      return { expanded: launcher?.getAttribute('aria-expanded') || null };
+    })()`, true).catch(() => ({ expanded: null }));
+    if (menuState?.expanded !== "true") {
+      await clickFlowControl(window, ["Nội dung tải lên và công cụ", "Uploads and tools", "Add files", "Add files and tools"], false, 30_000);
+    }
+    imageTool = await waitForGeminiToolPoint(window, imageLabels, 15_000).catch(() => null);
+  }
+  if (!imageTool) {
+    // Recover from a launcher/menu transition without retrying generation.
+    const menuState = await window.webContents.executeJavaScript(`(() => {
+      const roots = [document]; const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      const launcher = roots.flatMap((root) => [...root.querySelectorAll('button,[role="button"]')]).find((element) => /nội dung tải lên và công cụ|uploads? and tools|add files/i.test(String(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent || '')));
+      return { expanded: launcher?.getAttribute('aria-expanded') || null };
+    })()`, true).catch(() => ({ expanded: null }));
+    if (menuState?.expanded !== "true") await clickFlowControl(window, ["Nội dung tải lên và công cụ", "Uploads and tools", "Add files", "Add files and tools"], false, 30_000);
+    imageTool = await waitForGeminiToolPoint(window, imageLabels, 5_000).catch(() => null);
+  }
+  if (!imageTool) {
+    // Edge CDP can dispatch the pointer while Gemini is still hydrating the
+    // menu. Use the same CDP Runtime target's user gesture as a bounded
+    // fallback, without bypassing the visible Gemini control.
+    const opened = await window.webContents.executeJavaScript(`(() => {
+      const roots = [document]; const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      const visible = (element) => { const bounds = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element?.isConnected && bounds && bounds.width > 0 && bounds.height > 0 && style?.display !== 'none' && style?.visibility !== 'hidden'); };
+      const launcher = roots.flatMap((root) => [...root.querySelectorAll('button,[role="button"]')]).find((element) => visible(element) && /nội dung tải lên và công cụ|uploads? and tools|add files/i.test(String(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent || '')));
+      if (!launcher || launcher.disabled) return false;
+      if (launcher.getAttribute('aria-expanded') === 'true') return true;
+      launcher.click();
+      return true;
+    })()`, true).catch(() => false);
+    if (opened) imageTool = await waitForGeminiToolPoint(window, imageLabels, 10_000).catch(() => null);
+  }
+  if (!imageTool) {
+    const clicked = await window.webContents.executeJavaScript(`(() => {
+      const wanted = ["tạo hình ảnh", "create image", "create images"];
+      const roots = [document]; const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      const visible = (element) => { const bounds = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element?.isConnected && bounds && bounds.width > 0 && bounds.height > 0 && style?.display !== 'none' && style?.visibility !== 'hidden'); };
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const isMatch = (element) => [normalize(element.getAttribute?.('aria-label')), normalize(element.getAttribute?.('title')), normalize(element.textContent)].some((label) => label && label.length <= 240 && wanted.some((value) => label === value || label.includes(value)));
+      const controls = roots.flatMap((root) => [...root.querySelectorAll('button,[role="button"],[role="menuitem"],[role="menuitemcheckbox"],[role="option"],[role="radio"],mat-list-item,gem-list-item,[data-menu-item]')]).filter((element) => visible(element) && !element.disabled && isMatch(element));
+      const selected = controls.sort((left, right) => String(left.textContent || '').length - String(right.textContent || '').length)[0];
+      if (selected) { selected.click(); return true; }
+      for (const root of roots) {
+        const walker = document.createTreeWalker(root, 4); let node;
+        while ((node = walker.nextNode())) {
+          if (!wanted.some((value) => normalize(node.nodeValue) === value)) continue;
+          let parent = node.parentElement;
+          for (let depth = 0; parent && depth < 6; depth += 1, parent = parent.parentElement) if (visible(parent) && normalize(parent.textContent).length <= 240) { parent.click(); return true; }
+        }
+      }
+      return false;
+    })()`, true).catch(() => false);
+    if (clicked) imageTool = { x: 0, y: 0, tag: "direct-cdp-control", label: "Tạo hình ảnh" };
+  }
   if (!imageTool) throw new Error("GEMINI_IMAGE_TOOL_NOT_FOUND");
-  await dispatchBrowserClick(window, imageTool);
+  if (imageTool.tag !== "direct-cdp-control") {
+    await dispatchBrowserClick(window, imageTool);
+    await delay(500);
+    activeImageMode = await readActiveImageMode();
+    if (!activeImageMode) {
+      await window.webContents.executeJavaScript(`(() => {
+        const roots = [document]; const seen = new Set(roots);
+        for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+        const visible = (element) => { const bounds = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element?.isConnected && bounds && bounds.width > 0 && bounds.height > 0 && style?.display !== 'none' && style?.visibility !== 'hidden'); };
+        const item = roots.flatMap((root) => [...root.querySelectorAll('button,[role="button"],[role="menuitem"],[role="option"],mat-list-item,gem-list-item')]).find((element) => visible(element) && /^(tạo hình ảnh|create image|create images|hình ảnh|image)$/.test(normalize(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent)));
+        if (!item || item.disabled) return false;
+        item.click();
+        return true;
+      })()`, true).catch(() => false);
+      await delay(700);
+      activeImageMode = await readActiveImageMode();
+    }
+  }
+  if (!activeImageMode) {
+    const selectionState = await readImageSelectionState();
+    if (selectionState?.active) activeImageMode = selectionState.active;
+    else if (selectionState && !selectionState.imageMenuVisible && selectionState.launcherExpanded !== "true") {
+      // Gemini closes the tools menu after applying image mode, but some
+      // builds do not expose the selected chip through accessibility labels.
+      activeImageMode = { label: "Tạo hình ảnh (menu đã đóng)", verification: "MENU_CLOSED_AFTER_CLICK" };
+    }
+  }
+  if (!activeImageMode) {
+    const selectionState = await readImageSelectionState();
+    recordBrowserAction({ action: "gemini-image-tool-selection", result: "FAIL", selectionState });
+    throw new Error("GEMINI_IMAGE_TOOL_SELECTION_NOT_CONFIRMED");
+  }
+  recordBrowserAction({ action: "gemini-image-tool-selection", label: activeImageMode.label, verification: activeImageMode.verification || "ACTIVE_MODE", result: "PASS" });
   await delay(500);
+}
+
+async function waitForGeminiToolPoint(window, labels, timeout = 15_000) {
+  const wanted = labels.map((value) => String(value).replace(/\s+/g, " ").trim().toLowerCase());
+  for (let elapsed = 0; elapsed < timeout; elapsed += 250) {
+    const point = await window.webContents.executeJavaScript(`(() => {
+      const wanted = ${JSON.stringify(wanted)};
+      const roots = [document]; const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      const visible = (element) => { const bounds = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element?.isConnected && bounds && bounds.width > 0 && bounds.height > 0 && style?.display !== 'none' && style?.visibility !== 'hidden'); };
+      const labelsFor = (element) => [element.getAttribute?.('aria-label'), element.getAttribute?.('title'), element.textContent]
+        .filter(Boolean)
+        .map((value) => String(value).replace(/\\s+/g, ' ').trim().toLowerCase())
+        .filter((value) => value && value.length <= 240);
+      const candidates = roots.flatMap((root) => [...root.querySelectorAll('*')]).filter((element) => visible(element) && !['SCRIPT','STYLE','SVG','PATH'].includes(element.tagName)).map((element) => {
+        const labels = labelsFor(element);
+        const exact = labels.some((label) => wanted.includes(label));
+        const contains = labels.some((label) => wanted.some((value) => label.includes(value)));
+        const textLength = String(element.textContent || '').replace(/\\s+/g, ' ').trim().length;
+        const semantic = /^(BUTTON|A|MAT-LIST-ITEM|GEM-LIST-ITEM)$/.test(element.tagName) || /^(button|menuitem|option|radio)$/.test(element.getAttribute('role') || '');
+        return { element, exact, contains, textLength, semantic };
+      }).filter((candidate) => {
+        if (['HTML', 'HEAD', 'BODY', 'SCRIPT', 'STYLE', 'SVG', 'PATH'].includes(candidate.element.tagName)) return false;
+        if (candidate.textLength > 240 && !candidate.exact) return false;
+        return candidate.exact || candidate.contains;
+      }).sort((left, right) => Number(right.exact) - Number(left.exact) || Number(right.semantic) - Number(left.semantic) || left.textLength - right.textLength);
+      let selected = candidates[0]?.element || null;
+      if (!selected) for (const root of roots) {
+        const walker = document.createTreeWalker(root, 4);
+        let node;
+        while ((node = walker.nextNode())) {
+          const text = String(node.nodeValue || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          if (!text || !wanted.some((value) => text === value || text.includes(value))) continue;
+          let parent = node.parentElement;
+          for (let depth = 0; parent && depth < 6; depth += 1, parent = parent.parentElement) {
+            const role = parent.getAttribute('role') || '';
+            const semantic = /^(BUTTON|A|MAT-LIST-ITEM|GEM-LIST-ITEM)$/.test(parent.tagName) || /^(button|menuitem|menuitemcheckbox|option|radio)$/.test(role) || parent.hasAttribute('data-menu-item');
+            const parentText = String(parent.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (visible(parent) && (semantic || parentText.length <= 240)) { selected = parent; break; }
+          }
+          if (selected) break;
+        }
+        if (selected) break;
+      }
+      if (!selected) return null;
+      const bounds = selected.getBoundingClientRect();
+      return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2, tag: selected.tagName.toLowerCase(), label: String(selected.getAttribute('aria-label') || selected.getAttribute('title') || selected.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120) || null };
+    })()`, true).catch(() => null);
+    if (point) {
+      recordBrowserAction({ action: "gemini-image-tool-detected", labels, tag: point.tag, label: point.label, result: "PASS" });
+      return point;
+    }
+    await delay(250);
+  }
+  recordBrowserAction({ action: "gemini-image-tool-detected", labels, result: "NOT_FOUND" });
+  return null;
 }
 
 function saveGeminiVideo(projectId, sceneNumber, buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length < 1024) throw new Error("Google Flow không trả về video hợp lệ.");
   if (buffer.length > 200 * 1024 * 1024) throw new Error("Video Google Flow vượt quá giới hạn 200 MB.");
-  const videoRoot = path.join(app.getPath("userData"), "generated-videos", projectId);
+  const videoRoot = path.join(generatedMediaRoot(), "generated-videos", projectId);
   fs.mkdirSync(videoRoot, { recursive: true });
   fs.writeFileSync(path.join(videoRoot, `scene-${sceneNumber}.mp4`), buffer);
   return `/api/v1/projects/${projectId}/videos?sceneNumber=${sceneNumber}`;
@@ -3282,7 +4058,7 @@ async function renderFinalVideo(event, projectId, sceneNumbers, rawOptions = {})
   const options = normalizeVideoEditOptions(rawOptions, sceneNumbers);
   validateAudioFile(options.musicPath);
   const orderedScenes = options.scenes;
-  const videoRoot = path.join(app.getPath("userData"), "generated-videos", projectId);
+  const videoRoot = path.join(generatedMediaRoot(), "generated-videos", projectId);
   const sourceFiles = orderedScenes.map((scene) => path.join(videoRoot, `scene-${scene.sceneNumber}.mp4`));
   for (const source of sourceFiles) {
     if (!fs.existsSync(source) || fs.statSync(source).size < 1024) throw new Error("Thiếu video của một hoặc nhiều phân cảnh. Hãy tạo lại cảnh bị thiếu trước khi ghép.");
@@ -3350,6 +4126,11 @@ async function renderFinalVideo(event, projectId, sceneNumbers, rawOptions = {})
       fs.copyFileSync(assembledPath, finalPath);
     }
     if (!fs.existsSync(finalPath) || fs.statSync(finalPath).size < 1024) throw new Error("Video cuối không hợp lệ sau khi xuất.");
+    const finalProbe = await runFfmpeg(["-hide_banner", "-i", finalPath, "-f", "null", "-"], true);
+    validateFinalVideoProbe(finalProbe);
+    const cleanup = cleanupCompletedProjectArtifacts(app.getPath("userData"), projectId);
+    if (cleanup.status !== "completed") throw new Error("COMPLETED_ARTIFACT_CLEANUP_FAILED");
+    sendProgress(event, "video-editor:progress", { stage: "cleanup", processed: 1, total: 1, label: "Đã dọn dữ liệu trung gian, giữ lại video cuối trong app." });
     sendProgress(event, "video-editor:progress", { stage: "completed", processed: 1, total: 1, label: "Đã xuất video hoàn chỉnh." });
     return { status: "completed", video: `/api/v1/projects/${projectId}/videos?final=1&v=${Date.now()}` };
   } finally {
@@ -3476,6 +4257,29 @@ async function clickFlowControl(window, labels, exact = false, timeout = 30_000)
   const point = await waitForFlowControlPoint(window, labels, exact, timeout);
   await dispatchBrowserClick(window, point);
   await flowHumanPause("control");
+}
+
+async function acceptGeminiVideoReminderIfPresent(window, timeoutMs = 6_000) {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  while (Date.now() <= deadline) {
+    const accepted = await window.webContents.executeJavaScript(`(() => {
+      const roots = [document]; const seen = new Set(roots);
+      for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+      const visible = (element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return Boolean(element.isConnected && bounds.width > 0 && bounds.height > 0 && style.display !== 'none' && style.visibility !== 'hidden'); };
+      const button = roots.flatMap((root) => [...root.querySelectorAll('button, [role="button"]')]).find((element) => visible(element) && /^(Đồng ý|Agree)$/i.test(String(element.textContent || element.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim()));
+      if (!button) return false;
+      button.click();
+      return true;
+    })()`, true).catch(() => false);
+    if (accepted) {
+      recordBrowserAction({ action: "gemini-video-policy-reminder", result: "ACCEPTED_AFTER_USER_CONSENT" });
+      await delay(700);
+      return true;
+    }
+    if (Date.now() >= deadline) break;
+    await delay(250);
+  }
+  return false;
 }
 
 async function dispatchBrowserEscape(window) {
@@ -5396,23 +6200,32 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
   }
   const channelId = await findProjectChannelId(projectId);
   const characterReferencePath = channelId ? findChannelMainCharacterImagePath(channelId) : null;
-  const characterReferenceCrop = characterReferencePath && channelId ? await createGeminiIdentityReferenceCrop(characterReferencePath, channelId) : null;
-  if (slots.some((slot) => slot?.kind === "scene") && !characterReferenceCrop) throw new Error("MAIN_CHARACTER_IDENTITY_MISSING: Cảnh Gemini Image yêu cầu Character Identity Pack reference.");
+  if (slots.some((slot) => slot?.kind === "scene") && !characterReferencePath) throw new Error("MAIN_CHARACTER_IDENTITY_MISSING: Cảnh Gemini Image yêu cầu Character Identity Pack reference.");
   const window = await createGeminiWindow();
   const geminiRunId = value?.runId || null;
   const imageCommandId = crypto.randomUUID();
   let primaryError = null;
   try {
-  await preflightGeminiForRun(window, geminiRunId, "IMAGE");
+  const imageConversationBinding = await preflightGeminiForRun(window, geminiRunId, "IMAGE");
   const images = {};
   for (let index = 0; index < slots.length; index += 1) {
     if (index > 0) {
       sendProgress(event, "gemini-browser:progress", { processed: index, total: slots.length, label: "Đang tải lại Gemini trước khi dán ảnh tiếp theo..." });
-      await reloadGeminiBeforeNextPrompt(window);
+      await reloadGeminiBeforeNextPrompt(window, imageConversationBinding, geminiRunId, "IMAGE");
     }
     const slot = slots[index];
     if (!slot || !["character", "background", "scene"].includes(slot.kind) || typeof slot.prompt !== "string") throw new Error("Prompt ảnh không hợp lệ.");
-    if (slot.kind === "scene") await attachGeminiCharacterReference(window, characterReferenceCrop);
+    if (slot.kind === "scene") {
+      await attachGeminiModelingCharacterReference(window, channelId, "IMAGE_SCENE_START_FRAME");
+      const backgroundReferencePath = findGeneratedImagePath(projectId, "background", 0);
+      await attachEdgeGeminiReference(window, backgroundReferencePath);
+      recordBrowserAction({ action: "gemini-scene-background-reference-upload", provider: "EDGE_CDP", sceneNumber: slot.sceneNumber, reference: "background-0", result: "PASS" });
+      if (slot.sceneNumber > 1) {
+        const previousSceneImagePath = findSceneImagePath(projectId, slot.sceneNumber - 1);
+        await attachEdgeGeminiReference(window, previousSceneImagePath);
+        recordBrowserAction({ action: "gemini-scene-continuity-reference-upload", provider: "EDGE_CDP", sceneNumber: slot.sceneNumber, previousSceneNumber: slot.sceneNumber - 1, result: "PASS" });
+      }
+    }
     await selectGeminiImageGenerationTool(window);
     sendProgress(event, "gemini-browser:progress", { processed: index, total: slots.length, label: slot.label ?? `Ảnh ${index + 1}` });
     const prepareScript = `(() => {
@@ -5760,7 +6573,7 @@ async function geminiVideoUiState(window) {
     const roots = [document]; const seen = new Set(roots);
     for (let i = 0; i < roots.length; i++) for (const node of roots[i].querySelectorAll('*')) if (node.shadowRoot && !seen.has(node.shadowRoot)) { seen.add(node.shadowRoot); roots.push(node.shadowRoot); }
     const visible = (node) => { const box = node?.getBoundingClientRect?.(); const style = node ? getComputedStyle(node) : null; return Boolean(box && box.width > 0 && box.height > 0 && style?.visibility !== 'hidden' && style?.display !== 'none'); };
-    const controls = roots.flatMap(root => [...root.querySelectorAll('button,[role="button"],[role="menuitem"],[role="menuitemcheckbox"],gem-list-item')]).filter(visible);
+    const controls = roots.flatMap(root => [...root.querySelectorAll('button,[role="button"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],gem-list-item')]).filter(visible);
     const label = (node) => String(node.getAttribute('aria-label') || node.getAttribute('title') || node.textContent || '').replace(/\\s+/g, ' ').trim();
     const has = (pattern) => controls.some(node => pattern.test(label(node)));
     const input = roots.flatMap(root => [...root.querySelectorAll('[contenteditable="true"],textarea,[role="textbox"]')]).find(visible);
@@ -5784,7 +6597,7 @@ async function clickGeminiVideoControl(window, names) {
     const visible = (node) => { const box = node?.getBoundingClientRect?.(); const style = node ? getComputedStyle(node) : null; return Boolean(box && box.width > 0 && box.height > 0 && style?.visibility !== 'hidden' && style?.display !== 'none'); };
     const normalize = (value) => String(value || '').normalize('NFKD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
     const wanted = names.map(normalize);
-    const button = roots.flatMap(root => [...root.querySelectorAll('button,[role="button"],[role="menuitem"],[role="menuitemcheckbox"],gem-list-item')]).find(node => visible(node) && wanted.some(name => {
+    const button = roots.flatMap(root => [...root.querySelectorAll('button,[role="button"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],gem-list-item')]).find(node => visible(node) && wanted.some(name => {
       const value = normalize([node.getAttribute('aria-label'), node.getAttribute('title'), node.textContent].join(' '));
       return value === name || value.includes(name);
     }));
@@ -5886,8 +6699,80 @@ async function openGeminiVideoComposer(window) {
   throw new Error("GEMINI_VIDEO_PAGE_NOT_READY");
 }
 
+async function ensureGeminiVideoProPortrait(window, sceneNumber) {
+  const composerUrl = window.webContents.getURL();
+  const existingConversation = /^https:\/\/gemini\.google\.com\/app\/[^/]+/i.test(composerUrl);
+  const controls = async () => window.webContents.executeJavaScript(`(() => {
+    const roots=[document],seen=new Set(roots);for(let i=0;i<roots.length;i++)for(const n of roots[i].querySelectorAll('*'))if(n.shadowRoot&&!seen.has(n.shadowRoot)){seen.add(n.shadowRoot);roots.push(n.shadowRoot);}
+    const visible=n=>{const b=n?.getBoundingClientRect?.(),s=n?getComputedStyle(n):null;return Boolean(b&&b.width>0&&b.height>0&&s?.display!=='none'&&s?.visibility!=='hidden');};
+    return roots.flatMap(r=>[...r.querySelectorAll('button,[role="button"],[role="menuitem"],[role="menuitemradio"],[role="option"]')]).filter(visible).map(n=>({role:String(n.getAttribute('role')||''),label:String(n.getAttribute('aria-label')||''),text:String(n.textContent||'').replace(/\\s+/g,' ').trim()}));
+  })()`, true);
+  let found = await controls();
+  const model = () => found.find(item => /(?:chọn chế độ|select model)/i.test(item.label));
+  let modelChanged = false;
+  for (let elapsed = 0; elapsed < 30_000 && (!model() || !found.some(item => /(?:tỷ lệ khung hình|aspect ratio)/i.test(item.label))); elapsed += 250) {
+    await delay(250);
+    found = await controls();
+  }
+  if (!model()) throw new Error("GEMINI_VIDEO_MODEL_CONTROL_NOT_READY");
+  if (!model() || !/\bPro\b/i.test(`${model().label} ${model().text}`)) {
+    const proOption = () => found.some(item => /^(?:menuitem|menuitemradio|option)$/.test(item.role) && /\bPro\b/i.test(item.text));
+    if (!proOption()) await clickGeminiVideoControl(window, ["Mở công cụ chọn chế độ", "Select model"]);
+    for (let elapsed = 0; elapsed < 10_000; elapsed += 250) {
+      found = await controls();
+      if (proOption()) break;
+      await delay(250);
+    }
+    if (!proOption()) throw new Error("GEMINI_VIDEO_PRO_OPTION_NOT_FOUND");
+    const selected = await window.webContents.executeJavaScript(`(() => {
+      const roots=[document],seen=new Set(roots);for(let i=0;i<roots.length;i++)for(const n of roots[i].querySelectorAll('*'))if(n.shadowRoot&&!seen.has(n.shadowRoot)){seen.add(n.shadowRoot);roots.push(n.shadowRoot);}
+      const visible=n=>{const b=n?.getBoundingClientRect?.(),s=n?getComputedStyle(n):null;return Boolean(b&&b.width>0&&b.height>0&&s?.display!=='none'&&s?.visibility!=='hidden');};
+      const option=roots.flatMap(r=>[...r.querySelectorAll('[role="menuitem"],[role="menuitemradio"],[role="option"],button,[role="button"]')]).find(n=>visible(n)&&!/(?:chọn chế độ|select model)/i.test(n.getAttribute('aria-label')||'')&&/\\bPro\\b/i.test(String(n.textContent||'').replace(/\\s+/g,' ').trim()));
+      if(!option||option.disabled)return false;option.click();return true;
+    })()`, true);
+    if (!selected) throw new Error("GEMINI_VIDEO_PRO_OPTION_NOT_FOUND");
+    modelChanged = true;
+  }
+  for (let elapsed = 0; elapsed < 10_000; elapsed += 250) {
+    found = await controls();
+    if (model() && /\bPro\b/i.test(`${model().label} ${model().text}`)) break;
+    await delay(250);
+  }
+  if (!model() || !/\bPro\b/i.test(`${model().label} ${model().text}`)) throw new Error("GEMINI_VIDEO_PRO_NOT_CONFIRMED");
+  // Changing the model can redirect Gemini's video landing page to bare
+  // /app. Reload the composer route captured before the model switch.
+  if (!existingConversation || modelChanged) await window.webContents.loadURL(composerUrl);
+  for (let elapsed = 0; elapsed < 30_000; elapsed += 250) {
+    const state = await geminiVideoUiState(window);
+    found = await controls();
+    if (state.inputReady && state.videoMode && model() && found.some(item => /(?:tỷ lệ khung hình|aspect ratio)/i.test(item.label))) break;
+    await delay(250);
+  }
+  if (!model() || !/\bPro\b/i.test(`${model().label} ${model().text}`)) throw new Error("GEMINI_VIDEO_PRO_LOST_AFTER_RELOAD");
+  let aspect = found.find(item => /(?:tỷ lệ khung hình|aspect ratio)/i.test(item.label));
+  if (!aspect) throw new Error("GEMINI_VIDEO_ASPECT_CONTROL_NOT_FOUND");
+  if (!/9:16/.test(`${aspect.label} ${aspect.text}`)) {
+    await clickGeminiVideoControl(window, ["Tỷ lệ khung hình", "Aspect ratio"]);
+    for (let elapsed = 0; elapsed < 10_000; elapsed += 250) {
+      found = await controls();
+      if (found.some(item => /(?:dọc|portrait).*9:16|9:16.*(?:dọc|portrait)/i.test(`${item.label} ${item.text}`))) break;
+      await delay(250);
+    }
+    await clickGeminiVideoControl(window, ["Dọc (9:16)", "Portrait (9:16)"]);
+  }
+  found = await controls();
+  aspect = found.find(item => /(?:tỷ lệ khung hình|aspect ratio)/i.test(item.label));
+  if (!aspect || !/9:16/.test(`${aspect.label} ${aspect.text}`)) throw new Error("GEMINI_VIDEO_PORTRAIT_NOT_CONFIRMED");
+  recordBrowserAction({ action: "gemini-video-pro-portrait-ready", provider: "EDGE_CDP", sceneNumber, route: window.webContents.getURL(), model: "Pro", aspectRatio: "9:16", reloaded: !existingConversation || modelChanged, result: "PASS" });
+}
+
 async function uploadGeminiVideoReference(window, imagePath) {
   const filePath = assertReadableAbsoluteFile(imagePath);
+  // In an existing /app conversation Gemini renders the upload option inside
+  // its plus menu. The visible composer chip does not open a file chooser there.
+  if (/^https:\/\/gemini\.google\.com\/app\/[^/]+/i.test(window.webContents.getURL())) {
+    await uploadEdgeGeminiFiles(window, [filePath]);
+  } else {
   const baseline = await readEdgeGeminiAttachmentEvidence(window, [filePath]);
   const confirmPreview = async (paths, timeoutMs) => {
     for (let elapsed = 0; elapsed < timeoutMs; elapsed += 250) {
@@ -5898,7 +6783,7 @@ async function uploadGeminiVideoReference(window, imagePath) {
     return { confirmed: false };
   };
   try {
-    await uploadWithEdgeFileChooser({
+    const uploaded = await uploadWithEdgeFileChooser({
       window, cdp: window.webContents.debugger, filePaths: [filePath],
       getMainFrameId: () => getEdgeGeminiMainFrameId(window),
       targetIsCurrent: () => !window.isDestroyed() && /^https:\/\/gemini\.google\.com\//i.test(window.webContents.getURL()),
@@ -5923,6 +6808,7 @@ async function uploadGeminiVideoReference(window, imagePath) {
       },
       confirmPreview,
     });
+    recordBrowserAction({ action: "gemini-video-reference-upload", provider: "EDGE_CDP", method: "FILE_CHOOSER", filename: path.basename(filePath), preview: uploaded.preview });
   } catch (error) {
     // Gemini's current Video composer exposes a real hidden input, but some
     // builds do not emit Page.fileChooserOpened for that control. This is a
@@ -5936,6 +6822,24 @@ async function uploadGeminiVideoReference(window, imagePath) {
     if (!preview?.confirmed) throw new Error("GEMINI_VIDEO_REFERENCE_PREVIEW_NOT_CONFIRMED");
     recordBrowserAction({ action: "gemini-video-reference-upload", provider: "EDGE_CDP", method: "DOM_SET_FILE_INPUT_FILES", filename: path.basename(filePath), preview });
   }
+  }
+  for (let elapsed = 0; elapsed < 30_000; elapsed += 250) {
+    const state = await window.webContents.executeJavaScript(`(() => {
+      const roots=[document],seen=new Set(roots);for(let i=0;i<roots.length;i++)for(const n of roots[i].querySelectorAll('*'))if(n.shadowRoot&&!seen.has(n.shadowRoot)){seen.add(n.shadowRoot);roots.push(n.shadowRoot);}
+      const previews=roots.flatMap(r=>[...r.querySelectorAll('uploader-file-preview, gem-attachment, [data-test-id*=attachment], [data-testid*=attachment]')]);
+      const text=previews.map(n=>String(n.textContent||'')+' '+String(n.getAttribute('aria-label')||'')).join(' ');
+      const busy=previews.some(n=>n.getAttribute('aria-busy')==='true'||/loading|uploading|progress/i.test(String(n.className||'')))||/đang tải hình ảnh lên|uploading image|uploading file/i.test(String(document.body?.innerText||''));
+      const errors=previews.some(n=>/has-error|loading-error|failed/i.test(String(n.className||'')))||/không thể tải.*(?:ảnh|tệp)|failed to upload/i.test(text);
+      return {url:location.href,previewCount:previews.length,busy,errors};
+    })()`, true);
+    if (state.errors) throw new Error("GEMINI_VIDEO_REFERENCE_UPLOAD_FAILED");
+    if (state.previewCount > 0 && !state.busy) {
+      recordBrowserAction({ action: "gemini-video-reference-ready", provider: "EDGE_CDP", filename: path.basename(filePath), previewCount: state.previewCount, result: "PASS" });
+      return;
+    }
+    await delay(250);
+  }
+  throw new Error("GEMINI_VIDEO_REFERENCE_UPLOAD_NOT_FINISHED");
 }
 
 async function readGeminiVideoBuffer(window, source) {
@@ -5958,29 +6862,72 @@ async function readGeminiVideoBuffer(window, source) {
 async function runGeminiVideoJobUnlocked(event, projectId, channelId, slots) {
   const window = await createGeminiWindow();
   const videos = {};
+  const conversationCheckpointPath = path.join(generatedMediaRoot(), "generated-videos", projectId, "gemini-conversation.json");
+  const savedConversation = fs.existsSync(conversationCheckpointPath) ? JSON.parse(fs.readFileSync(conversationCheckpointPath, "utf8")) : null;
+  let sharedVideoConversationRoute = null;
+  let sharedVideoRuntimeSessionId = geminiSessionId || null;
   for (let index = 0; index < slots.length; index++) {
     const slot = slots[index];
     if (!Number.isInteger(slot?.sceneNumber) || typeof slot.englishPrompt !== "string" || !slot.englishPrompt.trim()) throw new Error("GEMINI_VIDEO_SLOT_INVALID");
     const sceneNumber = slot.sceneNumber;
     sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label: `Đang mở Gemini tạo video cảnh ${sceneNumber}...` });
-    // Gemini Video has its own first-party composer at /videos. Opening it
-    // directly avoids treating the chat-tool menu as the video product and
-    // matches the UI where the user can create a video manually.
-    let before = await openGeminiVideoComposer(window);
+    // Gemini Video has its own first-party composer at /videos. Open it only
+    // once per Stage-4 job: every scene must stay in the same composer
+    // conversation/session instead of silently starting a new one.
+    let before;
+    if (index === 0) {
+      if (sceneNumber > 1) {
+        if (savedConversation?.url && window.webContents.getURL() !== savedConversation.url) await window.webContents.loadURL(savedConversation.url);
+        before = await geminiVideoUiState(window);
+        if (!/^https:\/\/gemini\.google\.com\/app\/[^/]+/i.test(before.url) || before.videos.length < 1) throw new Error("GEMINI_VIDEO_RESUME_CONVERSATION_NOT_CONFIRMED");
+      } else {
+        before = await openGeminiVideoComposer(window);
+      }
+      sharedVideoConversationRoute = new URL(window.webContents.getURL()).origin + new URL(window.webContents.getURL()).pathname;
+      sharedVideoRuntimeSessionId = geminiSessionId || sharedVideoRuntimeSessionId;
+      fs.mkdirSync(path.dirname(conversationCheckpointPath), { recursive: true });
+      if (sceneNumber > 1 && !savedConversation?.url) fs.writeFileSync(conversationCheckpointPath, JSON.stringify({ url: sharedVideoConversationRoute }), "utf8");
+      recordBrowserAction({ action: "gemini-video-shared-conversation-open", provider: "EDGE_CDP", sceneNumber, route: sharedVideoConversationRoute, runtimeSessionId: sharedVideoRuntimeSessionId, result: "PASS" });
+    } else {
+      const currentUrl = window.webContents.getURL();
+      const currentParsedUrl = new URL(currentUrl);
+      const currentRoute = currentParsedUrl.origin + currentParsedUrl.pathname;
+      if (currentRoute !== sharedVideoConversationRoute || (sharedVideoRuntimeSessionId && geminiSessionId && geminiSessionId !== sharedVideoRuntimeSessionId)) {
+        const error = new Error(`GEMINI_VIDEO_SHARED_CONVERSATION_CHANGED: scene=${sceneNumber}`);
+        error.code = "GEMINI_VIDEO_SHARED_CONVERSATION_CHANGED";
+        error.firstDivergence = "GEMINI_VIDEO_SHARED_CONVERSATION_SCOPE";
+        error.details = { sceneNumber, expectedRoute: sharedVideoConversationRoute, actualRoute: currentRoute, expectedRuntimeSessionId: sharedVideoRuntimeSessionId, actualRuntimeSessionId: geminiSessionId || null };
+        recordBrowserAction({ action: "gemini-video-shared-conversation-check", provider: "EDGE_CDP", sceneNumber, expectedRoute: sharedVideoConversationRoute, actualRoute: currentRoute, expectedRuntimeSessionId: sharedVideoRuntimeSessionId, actualRuntimeSessionId: geminiSessionId || null, result: "FAIL" });
+        throw error;
+      }
+      before = await geminiVideoUiState(window);
+      recordBrowserAction({ action: "gemini-video-shared-conversation-check", provider: "EDGE_CDP", sceneNumber, route: currentRoute, runtimeSessionId: geminiSessionId || null, result: "PASS" });
+    }
+    await ensureGeminiVideoProPortrait(window, sceneNumber);
     const imagePath = findSceneImagePath(projectId, sceneNumber);
     await uploadGeminiVideoReference(window, imagePath);
+    const readyToSend = await geminiVideoUiState(window);
+    if (!readyToSend.videoMode || !readyToSend.inputReady || !readyToSend.url.startsWith(sharedVideoConversationRoute)) {
+      throw new Error(`GEMINI_VIDEO_COMPOSER_CHANGED_BEFORE_SEND: scene=${sceneNumber}`);
+    }
     const prompt = await validatedPromptForSend(slot, `video cảnh ${sceneNumber}`, { projectId, channelId, promptType: "VIDEO", sceneNumber });
     const submitVideoPrompt = async () => {
       const command = createGeminiCommand({ purpose: "VIDEO_GENERATION", prompt });
       await startGeminiNavigationObserver(window, command);
       await startGeminiNetworkObserver(window, command);
-      const baseline = await captureGeminiResponseSnapshot(window, null, "VIDEO_GENERATION");
-      const baselineConversationId = conversationIdFromUrl(baseline.conversationUrl);
-      command.recordConversationState({ url: baseline.conversationUrl, mode: baseline.conversationMode, assistantTurnCount: baseline.assistantTurnCount, userTurnCount: baseline.userTurnCount });
-      command.setSubmissionBaseline({ expectedConversationUrl: baseline.conversationUrl, expectedConversationId: baselineConversationId, allowNewConversation: !baselineConversationId, userTurnCount: baseline.userTurnCount, assistantTurnCount: baseline.assistantTurnCount, userTurns: baseline.userTurns });
-      await submitGeminiCommand(window, command, prompt, "GEMINI_VIDEO_COMPOSER_MISSING", baseline);
-      if (command.snapshot().submissionConfirmed !== true) throw new Error("GEMINI_VIDEO_SUBMISSION_NOT_CONFIRMED");
-      return command;
+      try {
+        const baseline = await captureGeminiResponseSnapshot(window, null, "VIDEO_GENERATION");
+        const baselineConversationId = conversationIdFromUrl(baseline.conversationUrl);
+        command.recordConversationState({ url: baseline.conversationUrl, mode: baseline.conversationMode, assistantTurnCount: baseline.assistantTurnCount, userTurnCount: baseline.userTurnCount });
+        command.setSubmissionBaseline({ expectedConversationUrl: baseline.conversationUrl, expectedConversationId: baselineConversationId, allowNewConversation: !baselineConversationId, userTurnCount: baseline.userTurnCount, assistantTurnCount: baseline.assistantTurnCount, userTurns: baseline.userTurns });
+        await submitGeminiCommand(window, command, prompt, "GEMINI_VIDEO_COMPOSER_MISSING", baseline);
+        if (command.snapshot().submissionConfirmed !== true) throw new Error("GEMINI_VIDEO_SUBMISSION_NOT_CONFIRMED");
+        return command;
+      } catch (error) {
+        finishGeminiNetworkObserver(command);
+        await finishGeminiNavigationObserver(window, command);
+        throw error;
+      }
     };
     sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label: `Đang gửi prompt cảnh ${sceneNumber} tới Gemini...` });
     let command;
@@ -5995,6 +6942,9 @@ async function runGeminiVideoJobUnlocked(event, projectId, channelId, slots) {
       // turn was created, so this cannot duplicate a real video request.
       recordBrowserAction({ action: "gemini-video-submit-reload-recovery", sceneNumber, recoveryAttempt: 1, recoveryBudget: 1, result: "RETRY", reason: "BARE_APP_WITHOUT_CONFIRMED_USER_TURN" });
       before = await openGeminiVideoComposer(window);
+      const recoveryUrl = new URL(window.webContents.getURL());
+      const recoveryRoute = recoveryUrl.origin + recoveryUrl.pathname;
+      if (recoveryRoute !== sharedVideoConversationRoute) throw new Error(`GEMINI_VIDEO_SHARED_CONVERSATION_CHANGED: scene=${sceneNumber} recovery`);
       await uploadGeminiVideoReference(window, imagePath);
       command = await submitVideoPrompt().catch((recoveryError) => {
         if (recoveryError instanceof Error && recoveryError.message.startsWith("GEMINI_SUBMISSION_NOT_CONFIRMED") && isBareGeminiAppUrl(window.webContents.getURL())) {
@@ -6015,6 +6965,14 @@ async function runGeminiVideoJobUnlocked(event, projectId, channelId, slots) {
       await delay(2_000);
     }
     if (!source) throw new Error("GEMINI_VIDEO_RESULT_TIMEOUT");
+    // The first submission converts /videos to the persistent /app/<id> chat.
+    // Bind subsequent scenes to that concrete conversation, never to /videos.
+    if (index === 0) {
+      const completedUrl = new URL(window.webContents.getURL());
+      if (!/^\/app\/[^/]+/.test(completedUrl.pathname)) throw new Error("GEMINI_VIDEO_CONVERSATION_URL_NOT_CONFIRMED");
+      sharedVideoConversationRoute = completedUrl.origin + completedUrl.pathname;
+      fs.writeFileSync(conversationCheckpointPath, JSON.stringify({ url: sharedVideoConversationRoute }), "utf8");
+    }
     const buffer = await readGeminiVideoBuffer(window, source);
     const url = saveGeminiVideo(projectId, sceneNumber, buffer);
     videos[`scene-${sceneNumber}`] = url;
@@ -6145,7 +7103,7 @@ async function runFlowVideoJobUnlocked(event, projectId, channelId, slots) {
     });
     const buffer = await getFlowVideoBuffer(window, result);
     const url = saveGeminiVideo(projectId, sceneNumber, buffer);
-    const savedPath = path.join(app.getPath("userData"), "generated-videos", projectId, "scene-" + sceneNumber + ".mp4");
+    const savedPath = path.join(generatedMediaRoot(), "generated-videos", projectId, "scene-" + sceneNumber + ".mp4");
     if (buffer.length < 1024 || !fs.existsSync(savedPath) || !fs.readFileSync(savedPath).equals(buffer)) {
       throw new Error("Video cảnh " + sceneNumber + " chưa tải và lưu đầy đủ vào app; chưa chuyển cảnh tiếp theo.");
     }
@@ -6167,7 +7125,7 @@ async function resumeAfterManualFlowSubmission(checkpointId) {
   if (!checkpoint || !["WAITING_FOR_MANUAL_FLOW_SUBMISSION", "COMPLETED"].includes(checkpoint.status)) {
     throw new Error("MANUAL_FLOW_CHECKPOINT_NOT_FOUND");
   }
-  const savedPath = path.join(app.getPath("userData"), "generated-videos", checkpoint.projectId, "scene-" + checkpoint.sceneNumber + ".mp4");
+  const savedPath = path.join(generatedMediaRoot(), "generated-videos", checkpoint.projectId, "scene-" + checkpoint.sceneNumber + ".mp4");
   const savedVideoAvailable = fs.existsSync(savedPath) && fs.statSync(savedPath).size >= 1024;
   if (savedVideoAvailable) {
     updateManualFlowCheckpoint(checkpointId, { status: "COMPLETED", savedVideoPath: savedPath });
@@ -6371,7 +7329,7 @@ ipcMain.handle("gemini-browser:import-images", async (_event, value) => {
   });
   if (selection.canceled) return { status: "cancelled", images: {} };
   if (selection.filePaths.length !== slots.length) throw new Error(`Hãy chọn đúng ${slots.length} ảnh theo thứ tự đã hiển thị.`);
-  const imageRoot = path.join(app.getPath("userData"), "generated-images", projectId);
+  const imageRoot = path.join(generatedMediaRoot(), "generated-images", projectId);
   fs.mkdirSync(imageRoot, { recursive: true });
   const allowedExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif"]);
   const allowedKinds = new Set(["character", "background", "scene"]);

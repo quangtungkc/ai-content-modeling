@@ -59,7 +59,8 @@ describe("Codex background executor", () => {
   });
 
   it("idea browser lưu đúng schema và không gọi provider", async () => {
-    const analysis = { schemaVersion: "1.0", summary: "source", hook: "hook", setup: "setup", conflict: "conflict", escalation: "escalation", twist: "twist", payoff: "payoff", theGag: "gag", cameraPattern: "camera", editingRhythm: "rhythm", soundPattern: "sound", retentionMechanism: "retention", characterInteractions: [], whyItWorks: [] };
+    const evidenceText = "Quan sát trực tiếp từ tệp video nguồn cho thấy diễn biến và nhịp hành động này.";
+    const analysis = { schemaVersion: "1.0", summary: evidenceText, hook: evidenceText, setup: evidenceText, conflict: evidenceText, escalation: evidenceText, twist: evidenceText, payoff: evidenceText, theGag: evidenceText, cameraPattern: evidenceText, editingRhythm: evidenceText, soundPattern: evidenceText, retentionMechanism: evidenceText, characterInteractions: [evidenceText], whyItWorks: [evidenceText], analysisEvidence: { sourceVideoAttached: true, observationMethod: "attached-video-file", observedDurationSec: 4 } };
     const direction = { title: "title", coreConcept: "concept", script: "script", characterDesign: "design", setting: "setting", artStyle: "3D", sourceMechanism: "mechanism", whatIsPreserved: ["order"], whatIsChanged: ["style"], targetMarketAdaptation: "market", similarityRisk: "low", whyWorthDeveloping: "reason", postText: "caption" };
     vi.spyOn(db.competitorVideo, "findFirst").mockResolvedValue({ id: "video", url: "https://example.com", analyses: [{ id: "analysis", version: 1, content: analysis }], competitor: { channel: { id: "channel" } } } as never);
     const request = vi.spyOn(browserBridge, "requestStage2GeminiBrowser").mockResolvedValue({ schemaVersion: "1.0", modelingDirections: [direction] });

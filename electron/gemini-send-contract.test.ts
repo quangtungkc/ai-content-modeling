@@ -11,6 +11,16 @@ const transport = require("./gemini-error-transport.cjs") as {
 };
 
 describe("ISSUE-002 send/response boundary", () => {
+  it("uses the canonical renderer database for Stage 3 project lookups", () => {
+    expect(mainSource).toContain("const configuredDatabaseUrl = process.env.DESKTOP_DATABASE_URL || process.env.DATABASE_URL;");
+    expect(mainSource).toContain("function canonicalDesktopDataRoot()");
+    expect(mainSource).toContain('path.join(canonicalDesktopDataRoot(), "channel-characters")');
+    expect(mainSource).toContain("function generatedMediaRoot()");
+    expect(mainSource).toContain('path.join(generatedMediaRoot(), "generated-images", projectId)');
+    expect(mainSource).toContain('path.join(generatedMediaRoot(), "generated-videos", projectId)');
+    expect(mainSource).toContain("ContentProject does not exist");
+  });
+
   it("removes composer-cleared as a production submission confirmation", () => {
     expect(mainSource).not.toContain("DOM_COMPOSER_CLEARED");
     expect(lifecycleSource).toContain("DOM_USER_TURN_EXACT");
@@ -171,6 +181,44 @@ describe("ISSUE-006 app-owned Gemini conversation replacement", () => {
     expect(mainSource).toContain("const candidate = candidates.find(isNewChat);");
     expect(mainSource).not.toContain("first conversation in history");
     expect(mainSource).not.toContain("280d4b6fd5590bf8");
+  });
+});
+
+describe("MODEL-CHARACTER reference binding", () => {
+  it("uploads and confirms the channel character reference before Stage-2 modeling prompts", () => {
+    expect(mainSource).toContain("async function attachGeminiModelingCharacterReference(window, channelId, stage)");
+    expect(mainSource).toContain('error.code = "MODELING_CHARACTER_REFERENCE_MISSING"');
+    expect(mainSource).toContain('error.code = "MODELING_CHARACTER_REFERENCE_NOT_CONFIRMED"');
+    expect(mainSource).toContain('recordBrowserAction({ action: "gemini-modeling-character-reference-upload"');
+    expect(mainSource).toMatch(/attachGeminiModelingCharacterReference\(window,\s*payload\.channelId\s*\|\|[^;]+?,\s*"MODELING_IDEA"\)/);
+    expect(mainSource).toMatch(/attachGeminiModelingCharacterReference\(window,\s*payload\.channelId\s*\|\|[^;]+?,\s*"CONTENT_PROJECT"\)/);
+    expect(mainSource).toContain("characterReferenceInstruction");
+  });
+
+  it("uploads the canonical character reference before every Gemini scene start-frame image", () => {
+    expect(mainSource).toContain('if (slots.some((slot) => slot?.kind === "scene") && !characterReferencePath)');
+    expect(mainSource).toMatch(/if \(slot\.kind === "scene"\) \{\s*await attachGeminiModelingCharacterReference\(window, channelId, "IMAGE_SCENE_START_FRAME"\);/);
+    expect(mainSource).toContain('stage, filename: path.basename(characterReferencePath), preview: evidence');
+  });
+});
+
+describe("shared Gemini conversation across automation Stages 1-3", () => {
+  it("keeps Modeling Idea, Content Project, and Image generation on the same run-bound conversation", () => {
+    expect(mainSource).toContain('await preflightGeminiForRun(window, payload.runId, "MODELING_IDEA")');
+    expect(mainSource).toContain('await preflightGeminiForRun(window, payload.runId, "CONTENT_PROJECT")');
+    expect(mainSource).toContain('const geminiRunId = value?.runId || null;');
+    expect(mainSource).toContain('const imageConversationBinding = await preflightGeminiForRun(window, geminiRunId, "IMAGE");');
+    expect(mainSource).toContain('await reloadGeminiBeforeNextPrompt(window, imageConversationBinding, geminiRunId, "IMAGE");');
+    expect(mainSource).toContain('GEMINI_SHARED_CONVERSATION_MISMATCH');
+  });
+
+  it("does not accept a different Gemini conversation after an Image-stage reload", () => {
+    const reloadStart = mainSource.indexOf("async function reloadGeminiBeforeNextPrompt");
+    const saveStart = mainSource.indexOf("function saveGeminiImage", reloadStart);
+    const reloadBlock = mainSource.slice(reloadStart, saveStart);
+    expect(reloadBlock).toContain("assertConversationReady(expectedConversationBinding, runId, observedUrl)");
+    expect(reloadBlock).toContain('result: "FAIL"');
+    expect(reloadBlock).toContain("GEMINI_SHARED_CONVERSATION_MISMATCH");
   });
 });
 

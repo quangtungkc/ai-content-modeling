@@ -6,7 +6,7 @@ import { AIService } from "@/services/ai/service";
 import { modelingIdeasSchema, videoAnalysisSchema } from "@/services/ai/schemas";
 import type { ChannelDNA, VideoContext } from "@/services/ai/types";
 import { readChannelMainCharacterImage } from "@/modules/channels/service";
-import { selectBestAnalysis } from "@/modules/videos/analysis-service";
+import { assertAttachedSourceVideoEvidence, selectBestAnalysis } from "@/modules/videos/analysis-service";
 import { requestStage2GeminiBrowser } from "@/modules/generation/browser-flow-bridge";
 
 export async function generateIdeasFromVideoBrowser(videoId: string, userId: string, artStyle: string, runId: string | null, execution?: { codexJobId: string; onProgress: (detail: string, payload?: Record<string, unknown>) => Promise<void> }) {
@@ -14,6 +14,7 @@ export async function generateIdeasFromVideoBrowser(videoId: string, userId: str
   if (!video) throw new AppError("VIDEO_NOT_FOUND", "Không tìm thấy competitor video.", 404);
   const analysis = selectBestAnalysis(video.analyses);
   if (!analysis) throw new AppError("ANALYSIS_REQUIRED", "Video cần được phân tích trước.", 409);
+  assertAttachedSourceVideoEvidence(analysis.content);
   const channel = video.competitor.channel;
   const result = await requestStage2GeminiBrowser({ userId, channelId: channel.id, runId, codexJobId: execution?.codexJobId, purpose: "MODELING_IDEA", video: { id: video.id, url: video.url, caption: video.caption, thumbnailUrl: video.thumbnailUrl, duration: video.duration, publishedAt: video.publishedAt?.toISOString() }, analysis: videoAnalysisSchema.parse(analysis.content), channelDNA: { channel }, artStyle }, execution?.onProgress);
   return storeModelingIdeasFromBrowser(videoId, userId, result, analysis.id);
@@ -24,6 +25,7 @@ export async function generateIdeasFromVideo(videoId: string, userId: string, ar
   if (!video) throw new AppError("VIDEO_NOT_FOUND", "Không tìm thấy competitor video.", 404);
   const analysisRecord = selectBestAnalysis(video.analyses);
   if (!analysisRecord) throw new AppError("ANALYSIS_REQUIRED", "Video cần được phân tích trước khi tạo modeling ideas.", 409);
+  assertAttachedSourceVideoEvidence(analysisRecord.content);
   const analysis = videoAnalysisSchema.parse(analysisRecord.content);
   const channel = video.competitor.channel;
   const mainCharacterImage = await readChannelMainCharacterImage(channel);
@@ -57,6 +59,7 @@ export async function storeModelingIdeasFromBrowser(videoId: string, userId: str
   if (!video) throw new AppError("VIDEO_NOT_FOUND", "Không tìm thấy competitor video.", 404);
   const analysisRecord = selectBestAnalysis(video.analyses, analysisId);
   if (!analysisRecord) throw new AppError("ANALYSIS_REQUIRED", "Video cần được phân tích trước khi tạo modeling ideas.", 409);
+  assertAttachedSourceVideoEvidence(analysisRecord.content);
   const parsed = modelingIdeasSchema.parse(value);
   if (parsed.modelingDirections.length !== 1) throw new AppError("INVALID_IDEA_COUNT", "Browser Gemini phải trả đúng 1 modeling idea.", 502);
   const ideas = await db.$transaction(parsed.modelingDirections.map((content) => db.modelingIdea.create({ data: { sourceVideoId: video.id, analysisId: analysisRecord.id, title: content.title, content, status: "DRAFT" } })));

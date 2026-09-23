@@ -21,4 +21,35 @@ function cleanupManagedTemporaryFiles(userData, options = {}) {
   return removed;
 }
 
-module.exports = { cleanupManagedTemporaryFiles };
+function assertSafeProjectId(projectId) {
+  if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId)) throw new Error("PROJECT_ID_INVALID");
+  return projectId;
+}
+
+function cleanupCompletedProjectArtifacts(userData, projectId) {
+  if (typeof userData !== "string" || !path.isAbsolute(userData)) throw new Error("USER_DATA_PATH_INVALID");
+  const root = path.resolve(userData);
+  const safeProjectId = assertSafeProjectId(projectId);
+  const removed = [];
+  const remove = (candidate, label) => {
+    const resolved = path.resolve(candidate);
+    const relative = path.relative(root, resolved);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("CLEANUP_PATH_OUTSIDE_USER_DATA");
+    if (!fs.existsSync(resolved)) return;
+    fs.rmSync(resolved, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    removed.push(label);
+  };
+
+  // These directories contain only app-owned generated/intermediate media.
+  remove(path.join(root, "generated-images", safeProjectId), `generated-images/${safeProjectId}`);
+  const videoDirectory = path.join(root, "generated-videos", safeProjectId);
+  if (fs.existsSync(videoDirectory)) {
+    for (const entry of fs.readdirSync(videoDirectory, { withFileTypes: true })) {
+      if (entry.name.toLowerCase() === "final.mp4") continue;
+      remove(path.join(videoDirectory, entry.name), `generated-videos/${safeProjectId}/${entry.name}`);
+    }
+  }
+  return { status: "completed", preserved: [path.join(root, "generated-videos", safeProjectId, "final.mp4")], removed };
+}
+
+module.exports = { cleanupManagedTemporaryFiles, cleanupCompletedProjectArtifacts };

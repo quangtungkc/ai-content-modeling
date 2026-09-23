@@ -326,6 +326,44 @@ function isMeaningfulResponseText(value) {
   return text.length > 0 && !isStatusOnlyText(text);
 }
 
+function extractStatusTextJsonFallback(turn) {
+  const statusText = String(turn?.statusText || "").trim();
+  if (!statusText) return null;
+  const start = statusText.search(/[\[{]/);
+  if (start < 0) return null;
+  const responseSuffix = statusText.slice(start).trim();
+  const balancedEnd = balancedJsonValueEnd(responseSuffix, 0);
+  const responseText = balancedEnd >= 0 ? responseSuffix.slice(0, balancedEnd + 1).trim() : responseSuffix;
+  if (!isMeaningfulResponseText(responseText)) return null;
+  try {
+    extractGeminiJsonCandidate(responseText);
+    return {
+      candidateId: `${turn?.turnId || turn?.candidateId || "assistant"}:status-text-json-fallback`,
+      selector: "status-text-json-fallback",
+      tag: "status",
+      role: turn?.role || "model",
+      visible: true,
+      attached: turn?.attached !== false,
+      detached: turn?.detached === true,
+      ariaHidden: false,
+      zeroSize: false,
+      text: responseText,
+      textLength: responseText.length,
+      textHash: hashText(responseText),
+      hasResponseData: true,
+      isMessageContent: false,
+      hasMarkdownClass: false,
+      hasMarkdownTestId: false,
+      statusLike: false,
+      accessibilityChrome: false,
+      contentDepth: 0,
+      statusTextFallback: true,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function scoreFinalResponseCandidate(candidate) {
   let score = 0;
   if (candidate?.isMessageContent) score += 10;
@@ -399,6 +437,34 @@ function extractFinalResponseContent(turn) {
   if (eligible.length) {
     const best = eligible[0];
     return { found: true, text: String(best.text || ""), candidate: candidateMetadata(best), selector: best.selector || best.domPath || best.candidateId, score: best.score, candidateCount: candidates.length, qualifiedCandidateCount: eligible.length, diagnostics };
+  }
+  // Gemini can briefly expose a complete JSON response only through the
+  // assistant turn's status text while its message-content node is hidden or
+  // has zero layout size. Accept this narrow, parse-checked fallback; plain
+  // status chrome and non-JSON text remain rejected.
+  const statusFallback = extractStatusTextJsonFallback(turn);
+  if (statusFallback) {
+    diagnostics.push({
+      candidateId: statusFallback.candidateId,
+      selector: statusFallback.selector,
+      tag: statusFallback.tag,
+      role: statusFallback.role,
+      className: null,
+      dataAttributeNames: [],
+      score: 1,
+      positiveSignals: ["STATUS_TEXT_JSON_FALLBACK"],
+      rejectionReasons: [],
+      isMessageContent: false,
+      isMarkdownContainer: false,
+      statusLike: false,
+      accessibilityChrome: false,
+      hidden: false,
+      detached: false,
+      textLength: statusFallback.textLength,
+      textSample: statusFallback.text.slice(0, 160),
+      qualifiedFinalResponse: true,
+    });
+    return { found: true, text: statusFallback.text, candidate: candidateMetadata(statusFallback), selector: statusFallback.selector, score: 1, candidateCount: candidates.length, qualifiedCandidateCount: 1, diagnostics };
   }
   return { found: false, text: "", candidate: null, selector: null, score: null, candidateCount: candidates.length, qualifiedCandidateCount: 0, diagnostics };
 }
@@ -505,6 +571,25 @@ function isResponseComplete(snapshot, stablePolls, requiredStablePolls = 3) {
     && stopButtonPresent === false
     && streamingIndicatorPresent === false
     && snapshot.composerReady === true
+    && attached;
+}
+
+// Gemini can leave a stale processing-state indicator attached to an otherwise
+// complete structured response. Callers must still parse and validate the JSON
+// before using this narrow completion path; this predicate only describes the
+// DOM evidence that is safe to accept once the payload itself is valid.
+function isStructuredResponseComplete(snapshot, stablePolls, requiredStablePolls = 3) {
+  const bound = snapshot?.boundTurn;
+  const responseText = bound?.finalResponseText ?? snapshot?.responseText;
+  const finalResponseBodyFound = bound ? bound.finalResponseBodyFound === true : true;
+  const stopButtonPresent = bound ? bound.stopButtonPresent === true : snapshot?.stopButtonPresent === true;
+  const attached = bound ? bound.attached !== false && bound.detached !== true : snapshot?.boundTurnAttached !== false;
+  return snapshot?.newResponseCount === 1
+    && Boolean(responseText)
+    && finalResponseBodyFound
+    && stablePolls >= requiredStablePolls
+    && stopButtonPresent === false
+    && snapshot?.composerReady === true
     && attached;
 }
 
@@ -838,6 +923,19 @@ class GeminiCommandLifecycle {
     this.command.generationStartedAt = this.command.generationStartedAt || at;
     this.command.generationRequestStartedAt = this.command.generationRequestStartedAt || at;
     this.command.generationRequestId = this.command.generationRequestId || request?.requestId || null;
+    const newUserTurnDeliveryConfirmed = this.command.conversationOwnershipConfirmed === true
+      && this.command.userTurnDelta === 1
+      && Boolean(this.command.composerClearedAt && this.command.userMessageRenderedAt);
+    if (!this.command.submissionConfirmed && newUserTurnDeliveryConfirmed) {
+      const source = "NETWORK_GENERATION_REQUEST_WITH_NEW_USER_TURN";
+      if (!this.command.submissionConfirmationSources.includes(source)) this.command.submissionConfirmationSources.push(source);
+      this.command.submissionConfirmed = true;
+      this.command.submissionConfirmedAt = at;
+      this.command.submissionConfirmationSource = source;
+      this.command.submissionState = "CONFIRMED";
+      if (this.command.retryConfirmationState === "RETRY_CONFIRMATION_PENDING") this.cancelRetry("SUBMISSION_CONFIRMED", source, at);
+      this.emit("SUBMISSION_CONFIRMED_BY_NETWORK_WITH_NEW_USER_TURN");
+    }
     if (this.command.submissionConfirmed && this.command.retryConfirmationState === "RETRY_CONFIRMATION_PENDING") this.cancelRetry("SUBMISSION_CONFIRMED", "NETWORK_GENERATION_REQUEST", at);
     this.emit("GENERATION_STARTED_BY_NETWORK");
     return this.snapshot();
@@ -1022,4 +1120,4 @@ class GeminiCommandLifecycle {
   }
 }
 
-module.exports = { GeminiCommandLifecycle, TERMINAL_STATES, FINAL_RESPONSE_SELECTORS, POSITIVE_FINAL_RESPONSE_SIGNALS, LATENCY_PAGE_MILESTONES, STATUS_NODE_SELECTORS, ACCESSIBILITY_CHROME_SELECTORS, hashText, normalizePromptIdentity, promptIdentityHash, createGeminiConversationResetError, canonicalGeminiConversationUrl, sameGeminiConversationUrl, isGeminiConversationUrl, evaluateGeminiSubmission, redactNetworkUrl, normalizeNetworkInitiator, normalizeDocumentNavigationRequest, extractGeminiJsonCandidate, isGeminiGenerationRequest, findAttributedGeminiGenerationRequest, submissionConfirmationSource, shouldRetryGeminiSend, authorizeGeminiSendRetry, isGeminiTargetReady, deriveLatencyBuckets, summarizeRendererHeartbeat, isResponseComplete, describeResponseCompletion, canRunFormatRetry, isGenerationTerminal, assertParentTerminal, normalizeGeminiResponseSnapshot, buildGeminiBindingDiagnostic, buildGeminiResponseContentDiagnostic, extractFinalResponseContent, positiveFinalResponseSignals, isStatusOnlyText };
+module.exports = { GeminiCommandLifecycle, TERMINAL_STATES, FINAL_RESPONSE_SELECTORS, POSITIVE_FINAL_RESPONSE_SIGNALS, LATENCY_PAGE_MILESTONES, STATUS_NODE_SELECTORS, ACCESSIBILITY_CHROME_SELECTORS, hashText, normalizePromptIdentity, promptIdentityHash, createGeminiConversationResetError, canonicalGeminiConversationUrl, sameGeminiConversationUrl, isGeminiConversationUrl, evaluateGeminiSubmission, redactNetworkUrl, normalizeNetworkInitiator, normalizeDocumentNavigationRequest, extractGeminiJsonCandidate, isGeminiGenerationRequest, findAttributedGeminiGenerationRequest, submissionConfirmationSource, shouldRetryGeminiSend, authorizeGeminiSendRetry, isGeminiTargetReady, deriveLatencyBuckets, summarizeRendererHeartbeat, isResponseComplete, isStructuredResponseComplete, describeResponseCompletion, canRunFormatRetry, isGenerationTerminal, assertParentTerminal, normalizeGeminiResponseSnapshot, buildGeminiBindingDiagnostic, buildGeminiResponseContentDiagnostic, extractFinalResponseContent, positiveFinalResponseSignals, isStatusOnlyText };

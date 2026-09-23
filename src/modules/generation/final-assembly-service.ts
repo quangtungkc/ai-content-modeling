@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { applicationDataDirectory } from "@/lib/app-data";
 import { AppError } from "@/lib/errors";
+import { cleanupCompletedProjectArtifacts } from "@/modules/generation/completed-artifact-cleanup";
 
 const appDataRoot = () => applicationDataDirectory(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd());
 
@@ -101,6 +102,7 @@ export async function assembleProjectVideo(projectId: string, sceneNumbers: numb
       await runFfmpeg(["-y", "-hide_banner", ...normalized.flatMap((file) => ["-i", file]), "-filter_complex", filters.join(";"), "-map", `[${videoLabel}]`, "-map", `[${audioLabel}]`, "-c:v", "h264_mf", "-b:v", "4500k", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", finalPath]);
     }
     const validation = await validateFinalOutput(finalPath);
+    await cleanupCompletedProjectArtifacts(projectId);
     await onProgress?.("Đã xuất video hoàn chỉnh.", sources.length, sources.length);
     return { finalPath, finalVideoUrl: `/api/v1/projects/${projectId}/videos?final=1&v=${Date.now()}`, sceneOrder: ordered, aspectRatio: "9:16", hasAudio: true, ...validation };
   } finally {

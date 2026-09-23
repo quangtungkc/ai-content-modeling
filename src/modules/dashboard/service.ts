@@ -5,7 +5,7 @@ import { selectBestAnalysis } from "@/modules/videos/analysis-service";
 
 export async function getViralDashboard(userId: string, channelId?: string, periodHours = 24) {
   const periodEnd = new Date();
-  const safePeriodHours = [24, 72, 168].includes(periodHours) ? periodHours : 24;
+  const safePeriodHours = [24, 72, 168, 336].includes(periodHours) ? periodHours : 24;
   const periodStart = new Date(periodEnd.getTime() - safePeriodHours * 60 * 60 * 1000);
   const channels = await db.channel.findMany({ where: { userId, status: "ACTIVE", ...(channelId ? { id: channelId } : {}) }, select: { id: true, name: true, timezone: true }, orderBy: { createdAt: "asc" } });
   const selectedChannel = channels[0];

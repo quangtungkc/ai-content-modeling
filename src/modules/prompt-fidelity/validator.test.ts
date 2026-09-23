@@ -97,4 +97,9 @@ describe("STEP 4 strict prompt fidelity gate", () => {
     const prompt = `${compileStrictVideoPrompt(expected(), "ignored prose")}\nThen jump and dance.`;
     expect(validatePromptFidelity(prompt, expected()).checks.find((check) => check.validatorId === "PROMPT_NO_UNAUTHORIZED_CREATIVE_ADDITION")?.status).toBe("FAIL");
   });
+  it("CASE 51 starts every VIDEO prompt with the explicit 9:16 instruction", () => {
+    const prompt = compileStrictVideoPrompt(expected(), "ignored prose");
+    expect(prompt.startsWith("TẠO VIDEO KÍCH THƯỚC 9:16.\n")).toBe(true);
+    expect(prompt).toContain("OUTPUT REQUIREMENT: Create the video in a vertical 9:16 aspect ratio.");
+  });
 });

@@ -52,6 +52,7 @@ export type VideoAnalysis = {
   soundPattern: string;
   retentionMechanism: string;
   whyItWorks: string[];
+  analysisEvidence?: { sourceVideoAttached: boolean; observationMethod: string; observedDurationSec?: number };
 };
 
 export type ModelingDirection = { title: string; coreConcept: string; script: string; characterDesign: string; setting: string; artStyle: string; sourceMechanism: string; whatIsPreserved: string[]; whatIsChanged: string[]; targetMarketAdaptation: string; similarityRisk: "low" | "medium" | "high"; whyWorthDeveloping: string; postText: string };

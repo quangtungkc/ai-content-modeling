@@ -36,7 +36,7 @@ export async function GET(request: Request, context: Context) {
     const sceneNumber = Number(searchParams.get("sceneNumber"));
     if (!Number.isInteger(sceneNumber) || sceneNumber < 1) throw new AppError("VALIDATION_ERROR", "Số phân cảnh không hợp lệ.", 400);
     const video = await readProjectVideo(id, session.userId, sceneNumber);
-    return new Response(video, { headers: { "Content-Type": "video/mp4", "Cache-Control": "private, max-age=3600", "Accept-Ranges": "bytes" } });
+    return new Response(video, { headers: { "Content-Type": "video/mp4", "Cache-Control": "private, no-store", "Accept-Ranges": "bytes" } });
   } catch (error) {
     return toErrorResponse(normalize(error), requestId);
   }

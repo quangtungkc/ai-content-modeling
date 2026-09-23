@@ -34,6 +34,35 @@ describe("automatic run checkpoint resume", () => {
     expect(resolveResumableRun([], { sourceVideoId: "video-1", channelId: "channel-1" })).toEqual({ status: "NONE" });
   });
 
+  it("allows a fresh run after Stage 1 failed before a Modeling Idea was created", () => {
+    const decision = resolveResumableRun([baseRun({
+      id: "stage-1-failed",
+      ideaId: null,
+      modelingIdeaId: null,
+      modelingIdea: null,
+      lastCompletedStage: 0,
+      failedStage: 1,
+      resumeTarget: "MODELING_IDEA_CREATION",
+      checkpoint: { version: 1, runId: "stage-1-failed", lastCompletedStage: 0, failedStage: 1, modelingIdeaId: null, sourceVideoId: "video-1", channelId: "channel-1" },
+    })], { sourceVideoId: "video-1", channelId: "channel-1" });
+    expect(decision).toEqual({ status: "NONE" });
+  });
+
+  it("ignores an obsolete no-idea Stage 1 failure when a downstream checkpoint is resumable", () => {
+    const stage3 = baseRun({
+      id: "stage-3-failed",
+      lastCompletedStage: 2,
+      failedStage: 3,
+      resumeTarget: "IMAGES",
+      projectId: "project-1",
+      checkpoint: { version: 1, runId: "stage-3-failed", lastCompletedStage: 2, failedStage: 3, resumeTarget: "IMAGES", modelingIdeaId: "idea-1", sourceVideoId: "video-1", channelId: "channel-1", contentProjectId: "project-1" },
+      steps: baseRun().steps!.map((step) => step.key === "modeling-idea" || step.key === "content-project" ? { ...step, status: "completed" } : step.key === "images" ? { ...step, status: "failed" } : { ...step, status: "pending" }),
+    });
+    const stage1 = baseRun({ id: "obsolete-stage-1", ideaId: null, modelingIdeaId: null, modelingIdea: null, lastCompletedStage: 0, failedStage: 1, resumeTarget: "MODELING_IDEA_CREATION", checkpoint: { version: 1, runId: "obsolete-stage-1", lastCompletedStage: 0, failedStage: 1, modelingIdeaId: null, sourceVideoId: "video-1", channelId: "channel-1" } });
+    const decision = resolveResumableRun([stage1, stage3], { sourceVideoId: "video-1", channelId: "channel-1" });
+    expect(decision).toMatchObject({ status: "RESUME", run: { id: "stage-3-failed" }, failedStage: 3 });
+  });
+
   it("resumes the same run at Content Project stage", () => {
     const decision = resolveResumableRun([baseRun()], { sourceVideoId: "video-1", channelId: "channel-1" });
     expect(decision.status).toBe("RESUME");

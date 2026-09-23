@@ -66,4 +66,17 @@ describe("video provider routing", () => {
     expect(geminiJob).toContain("expectedConversationId: baselineConversationId");
     expect(geminiJob).not.toContain("expectedConversationId: conversationId");
   });
+
+  it("keeps every Gemini Stage-4 scene in the same video conversation/session", () => {
+    const start = mainSource.indexOf("async function runGeminiVideoJobUnlocked");
+    const end = mainSource.indexOf("async function runGeminiVideoJob(event", start);
+    const geminiJob = mainSource.slice(start, end);
+    expect(geminiJob).toContain("let sharedVideoConversationRoute = null;");
+    expect(geminiJob).toContain("let sharedVideoRuntimeSessionId = geminiSessionId || null;");
+    expect(geminiJob).toContain("if (index === 0)");
+    expect(geminiJob).toContain("gemini-video-shared-conversation-open");
+    expect(geminiJob).toContain("GEMINI_VIDEO_SHARED_CONVERSATION_CHANGED");
+    expect(geminiJob).toContain("gemini-video-shared-conversation-check");
+    expect(geminiJob).toContain("const recoveryRoute = recoveryUrl.origin + recoveryUrl.pathname;");
+  });
 });

@@ -356,16 +356,25 @@ export function resolveResumableRun(runs: ResumableRunInput[], expected: { sourc
       return !modelingIdea.conflict && modelingIdea.value === expected.modelingIdeaId;
     }
     return true;
+  }).filter((run) => {
+    const raw = readCheckpoint(run);
+    const failedStage = run.failedStage ?? raw.failedStage;
+    const hasModelingIdea = Boolean(run.modelingIdea) || Boolean(run.modelingIdeaId) || Boolean(run.ideaId) || Boolean(raw.modelingIdeaId);
+    return !(failedStage === 1 && !hasModelingIdea);
   });
   if ((expected.runId || expected.modelingIdeaId) && !candidates.length) return { status: "NEEDS_REVIEW", reason: "TARGET_RUN_NOT_FOUND", runId: expected.runId ?? sourceCandidates[0]?.id ?? "unknown" };
   if (!candidates.length) return { status: "NONE" };
   if (candidates.length > 1) return { status: "NEEDS_REVIEW", reason: "MULTIPLE_RESUMABLE_RUNS", runId: candidates[0].id };
   const run = candidates[0];
   const checkpoint = checkpointForRun(run, expected);
-  const modelingIdea = run.modelingIdea;
   if (!checkpoint) return { status: "NEEDS_REVIEW", reason: "CHECKPOINT_AMBIGUOUS_OR_CONTEXT_MISMATCH", runId: run.id };
-  if (!modelingIdea || String((modelingIdea as { id?: unknown }).id ?? "") !== checkpoint.modelingIdeaId) return { status: "NEEDS_REVIEW", reason: "MODELING_IDEA_MISSING_OR_MISMATCH", runId: run.id };
   const resumeStage = checkpoint.failedStage ?? (checkpoint.lastCompletedStage < 5 ? (checkpoint.lastCompletedStage + 1) as ResumeStage : null);
+  // A Stage 1 failure can happen before Gemini returns a Modeling Idea. It is
+  // a failed attempt, not a resumable downstream checkpoint; allow the UI to
+  // start a fresh run while preserving the failed run in history.
+  const modelingIdea = run.modelingIdea;
+  if (resumeStage === 1 && !modelingIdea) return { status: "NONE" };
+  if (!modelingIdea || String((modelingIdea as { id?: unknown }).id ?? "") !== checkpoint.modelingIdeaId) return { status: "NEEDS_REVIEW", reason: "MODELING_IDEA_MISSING_OR_MISMATCH", runId: run.id };
   if (!resumeStage) return { status: "NEEDS_REVIEW", reason: "CHECKPOINT_COMPLETE_WITHOUT_TARGET", runId: run.id };
   return { status: "RESUME", run, checkpoint, failedStage: resumeStage, modelingIdeaId: checkpoint.modelingIdeaId, modelingIdea };
 }

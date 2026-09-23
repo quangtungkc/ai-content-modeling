@@ -1,6 +1,6 @@
 {
   "name": "ai-content-modeling",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "private": true,
   "main": "electron/main.cjs",
   "scripts": {
@@ -65,7 +65,7 @@
     "productName": "Modeling AI",
     "artifactName": "Modeling.AI.Setup.${version}.${ext}",
     "directories": {
-      "output": "release/1.0.8-production"
+      "output": "release/1.0.9-production"
     },
     "files": [
     "electron/main.cjs",
@@ -78,6 +78,7 @@
       "electron/gemini-remote-script.cjs",
       "electron/gemini-error-transport.cjs",
       "electron/temp-cleanup.cjs",
+      "electron/final-video-validation.cjs",
       "electron/ipc-contract.cjs",
       "electron/dev-runtime-identity.cjs",
       "electron/preload.cjs",
