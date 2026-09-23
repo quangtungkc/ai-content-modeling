@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { assembleSourceModelingSpec, buildSourceVideoModelingSpec, CANONICAL_DEFAULT_MODELING_FIDELITY_TARGET, CANONICAL_DEFAULT_MODELING_POLICY, CANONICAL_DEFAULT_TIMING_TOLERANCE, CANONICAL_SPEC_VERSION, canonicalizeSourceModelingSpec, compileStrictModelingConstraints, computeTimingFidelity, sourceModelingEvidenceSchema, sourceModelingSceneSchema, sourceModelingSpecSchema, StrictModelingError, validateGeneratedSceneMapping, validateStrictModelingSetup } from "./strict-source-modeling";
+import { assembleSourceModelingSpec, buildSourceVideoModelingSpec, CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS, CANONICAL_DEFAULT_MODELING_FIDELITY_TARGET, CANONICAL_DEFAULT_MODELING_POLICY, CANONICAL_DEFAULT_TIMING_TOLERANCE, CANONICAL_SPEC_VERSION, canonicalizeSourceModelingSpec, compileStrictModelingConstraints, computeTimingFidelity, sourceModelingEvidenceSchema, sourceModelingSceneSchema, sourceModelingSpecSchema, StrictModelingError, validateGeneratedSceneMapping, validateStrictModelingSetup } from "./strict-source-modeling";
 
 const sourceSpec = () => buildSourceVideoModelingSpec({
   specVersion: "1.0.0",
@@ -121,6 +121,15 @@ describe("STEP 2 strict source modeling", () => {
     const prompt = compileStrictModelingConstraints(sourceSpec(), "source-scene-2");
     expect(prompt).toContain("environment");
     expect(prompt).toContain("Nhân vật đặt hai tay lên bàn phím và gõ");
+  });
+
+  it("CASE 9A locks Modeling to exactly the three approved differences", () => {
+    const prompt = compileStrictModelingConstraints(sourceSpec(), "source-scene-2");
+    expect(prompt).toContain("CONTENT AND PROGRESSION LOCK");
+    for (const transformation of CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS) expect(prompt).toContain(transformation);
+    expect(prompt).toContain("FORBIDDEN MODELING CHANGES");
+    expect(prompt).toContain("do not use equivalent props");
+    expect(prompt).toContain("localization");
   });
 
   it("CASE 10 represents channel character replacement as an allowed surface transformation", () => {

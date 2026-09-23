@@ -12,10 +12,10 @@ function modelingIdeaInstruction(artStyle?: string) {
 BƯỚC 1 — PHÂN TÍCH VÀ BẮT MẠCH BẢN GỐC (DECONSTRUCTION):
 - Xác định rõ điểm gây cười cốt lõi (The Gag): tiếng cười đến từ sự ngớ ngẩn, tương tác vật lý lố bịch, biểu cảm vô tri, hay khoảng lặng chưng hửng.
 - Bảo tồn sự tối giản của nguyên tác. Giữ tinh thần góc máy, nhịp điệu, khoảng lặng và sự trần trụi cần thiết để gag tự phát huy; không tự ý thêm drama, giải thích dài, tình tiết điện ảnh hoặc tuyến phụ làm hỏng mạch hài.
-- Đây là modeling bám sát bản gốc: phải giữ cốt truyện, thứ tự hành động, số lượng nhân vật, đạo cụ chính, điểm gây cười, nhịp và logic kết thúc. Không được biến cơ chế gốc thành một câu chuyện khác.
-- Chỉ được thay đổi phong cách mỹ thuật, màu sắc và chi tiết bề mặt phù hợp với quốc gia/kênh khi thật sự cần; mọi thay đổi phải ghi rõ trong whatIsChanged và không được làm thay đổi ý nghĩa cảnh.
+- Đây là modeling bám sát bản gốc: phải giữ nội dung, diễn biến, cốt truyện, thứ tự hành động, số lượng và vai trò nhân vật, đạo cụ chính, điểm gây cười, nhịp, góc máy và logic kết thúc. Không được biến cơ chế gốc thành một câu chuyện khác.
+- Chỉ đúng ba khác biệt được phép thay đổi và phải ghi rõ trong whatIsChanged: (1) bối cảnh/môi trường; (2) nhận diện nhân vật chính theo ảnh tham chiếu hoặc Character Identity Pack đã duyệt; (3) phong cách mỹ thuật/rendering được chọn. Bối cảnh có thể được thiết kế lại về hình thức nhưng phải giữ quan hệ không gian, logic đạo cụ và điều kiện để hành động gốc diễn ra.
 - Nếu có ảnh nhân vật chính được đính kèm, phải quan sát ảnh đó trước khi viết và dùng đúng nhân vật làm trung tâm trong mọi cảnh. Không được thay bằng nhân vật mới, không được tự suy diễn một nhân vật khác.
-- Không thêm nhân vật, đạo cụ, bối cảnh, tuyến phụ hoặc hành động mới nếu không có trong bản gốc hay không được yêu cầu rõ ràng.
+- Không thêm nhân vật, đạo cụ, tuyến phụ, hành động, camera, nhịp, gag hoặc kết thúc mới. Không dùng thay đổi đạo cụ tương đương, bản địa hóa hay đổi setting ngoài policy như một quyền thay đổi bổ sung.
 
 BƯỚC 2 — NÂNG CẤP NGHỆ THUẬT (ART DIRECTION & PHYSICS):
 - Tạo hình từng nhân vật phải được mô tả cụ thể và có chủ đích gây cười ngay từ cái nhìn đầu tiên. Ưu tiên hình tượng dị biệt, bựa, vô tri, ngớ ngẩn hoặc tương phản bất thường; nét mặt, hình dáng, tỷ lệ, trang phục và đạo cụ phải hỗ trợ hài hình ảnh theo phong cách hài được ưa chuộng.
@@ -45,14 +45,14 @@ Phát triển Modeling Idea này thành gói sẵn sàng triển khai cho video 
 
 BƯỚC 1 — PHÂN TÍCH VÀ BẮT MẠCH BẢN GỐC (DECONSTRUCTION):
 - Trong deconstruction, chỉ ra điểm gây cười cốt lõi (The Gag), bằng chứng từ phân tích, góc máy, nhịp điệu, khoảng lặng và phần tối giản cần bảo tồn.
-- Đây là bản chuyển thể bám sát: giữ nguyên ý nghĩa, chuỗi sự kiện, thứ tự hành động, số lượng nhân vật, đạo cụ chính, góc máy và kết quả của bản gốc. Không được tự ý viết một tình huống khác.
-- Chỉ được thay đổi lớp mỹ thuật và chi tiết bề mặt khi không làm thay đổi hành động hoặc gag. Nếu thiếu dữ liệu, phải ghi rõ thiếu dữ liệu thay vì bịa thêm.
+- Đây là bản chuyển thể bám sát: giữ nguyên nội dung, ý nghĩa, chuỗi sự kiện, thứ tự hành động, số lượng và vai trò nhân vật, đạo cụ chính, góc máy, nhịp, gag và kết quả của bản gốc. Không được tự ý viết một tình huống khác.
+- Chỉ đúng ba lớp được phép thay đổi: bối cảnh/môi trường, nhận diện nhân vật chính theo ảnh tham chiếu/Character Identity Pack đã duyệt, và phong cách mỹ thuật/rendering. Nếu thiếu dữ liệu, phải ghi rõ thiếu dữ liệu thay vì bịa thêm.
 
 BƯỚC 2 — NÂNG CẤP NGHỆ THUẬT (ART DIRECTION & PHYSICS):
-- Trong artDirection, mô tả tổng thể không gian, bố cục, ánh sáng, màu sắc, cảm giác bối cảnh, phong cách hài thị giác và ngôn ngữ máy quay.
+- Trong artDirection, mô tả bối cảnh/môi trường mới, bố cục, ánh sáng, màu sắc, cảm giác bối cảnh, phong cách hài thị giác và ngôn ngữ máy quay; chỉ thay đổi diện mạo môi trường, không thay đổi quan hệ không gian hoặc logic hành động nguồn.
 - Áp dụng Squash & Stretch nhất quán cho nhân vật, đạo cụ và môi trường khi phù hợp: co giãn, phập phồng, nảy, méo, va đập và rơi xuống phải đồng bộ với gag.
 - Trong characterDesign, mô tả riêng từng nhân vật với silhouette, tỷ lệ, khuôn mặt, ánh mắt, trang phục, đạo cụ, tư thế và trạng thái. Nhân vật phải dị biệt, bựa, vô tri, ngớ ngẩn hoặc tương phản bất thường để bản thân tạo hình đã gây cười; không dùng nhân vật có bản quyền.
-- Trong backgroundDesign, mô tả rõ không gian và cảm giác bối cảnh, đồng thời nêu quy tắc giữ bối cảnh nhất quán giữa các cảnh.
+- Trong backgroundDesign, mô tả rõ bối cảnh/môi trường được phép thay đổi và quy tắc giữ quan hệ không gian, đạo cụ, continuity và điều kiện hành động của bản gốc nhất quán giữa các cảnh.
 
 BƯỚC 3 — STORYBOARD SCRIPT NỐI TIẾP CHẶT CHẼ:
 - storyboard phải gồm các cảnh nối tiếp hợp lý, không rời rạc. Cảnh sau bắt đầu từ trạng thái, vị trí, đạo cụ và hậu quả ở cuối cảnh trước; không tự ý đổi không gian hoặc reset nhân vật. Mỗi cảnh chỉ có một hành động chính, phù hợp video 4 giây.

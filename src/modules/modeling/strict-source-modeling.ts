@@ -3,6 +3,17 @@ import { z } from "zod";
 export const CANONICAL_DEFAULT_MODELING_POLICY = "STRICT_MODELING" as const;
 export const CANONICAL_DEFAULT_MODELING_FIDELITY_TARGET = 0.9 as const;
 export const CANONICAL_DEFAULT_TIMING_TOLERANCE: number = 0.1;
+export const CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS = [
+  "approved main character identity reference",
+  "background/environment",
+  "selected art/rendering style",
+] as const;
+export const CANONICAL_MODELING_DIFFERENCE_POLICY = [
+  "CONTENT AND PROGRESSION LOCK: preserve the source video's content, story meaning, scene count and order, major beats, action order, character roles, key props, camera intent, timing/rhythm, gag and ending.",
+  "ALLOWED DIFFERENCE 1 — MAIN CHARACTER: use only the approved main character identity reference/Character Identity Pack; preserve the protagonist's role, number, pose, action, continuity and spatial logic.",
+  "ALLOWED DIFFERENCE 2 — BACKGROUND/ENVIRONMENT: redesign the background or environment appearance only; preserve source spatial relationships, composition, prop logic and action affordances.",
+  "ALLOWED DIFFERENCE 3 — ART/RENDERING STYLE: apply the selected art or rendering style only; do not change the source meaning, action, camera, timing, gag or ending.",
+] as const;
 export const MODELING_POLICIES = [CANONICAL_DEFAULT_MODELING_POLICY, "BALANCED_MODELING", "LOOSE_ADAPTATION"] as const;
 export const modelingPolicySchema = z.enum(MODELING_POLICIES);
 export type ModelingPolicy = z.infer<typeof modelingPolicySchema>;
@@ -362,7 +373,9 @@ export function compileStrictModelingConstraints(spec: SourceVideoModelingSpec, 
     `SOURCE VIDEO: ${spec.sourceVideoId} (${spec.sourceVideoUrl})`,
     `TARGET SOURCE FIDELITY: ${Math.round(spec.modelingFidelityTarget * 100)}–100% for structure, motion, camera and rhythm`,
     "MUST PRESERVE: scene order, major beats, shot purpose, camera intent, framing, action order, spatial relationships, prop logic, start/end state, transition intent and source timing/rhythm.",
-    `ALLOWED TRANSFORMATIONS ONLY: ${scene?.allowedTransformations.join("; ") || "channel character identity, environment, visual rendering style, equivalent props and explicitly approved localization"}`,
+    `ALLOWED TRANSFORMATIONS ONLY: ${CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS.join("; ")}`,
+    ...CANONICAL_MODELING_DIFFERENCE_POLICY,
+    "FORBIDDEN MODELING CHANGES: do not change source content, progression, scene count/order, action order, character roles, key props, camera intent, timing/rhythm, gag or ending. Do not add, remove, reorder or merge beats; do not use equivalent props, localization or unrelated setting changes as extra permissions.",
     "DO NOT silently downgrade to BALANCED_MODELING or LOOSE_ADAPTATION. Do not invent, add, remove or reorder scenes/beats.",
   ];
   if (scene) lines.push(`SOURCE SCENE ${scene.order} (${scene.sourceSceneId}) ${scene.sourceStartTime}s–${scene.sourceEndTime}s: ${scene.storyBeat}`, `CAMERA: ${JSON.stringify(scene.cameraType)} / ${scene.shotSize} / ${scene.cameraAngle} / ${scene.cameraMovement ?? "none"}`, `FRAMING/SPATIAL: ${scene.framing}; subject=${scene.subjectPosition}; pose=${scene.poseOrientation ?? "not specified"}; gaze=${scene.gazeTarget ?? "not specified"}; objects=${scene.relativeObjectPositions.join("; ") || "none"}`, `ACTION SEQUENCE (authoritative): ${scene.actionSequence.map((action, index) => `${index + 1}. ${action}`).join(" ")}`, `START → END: ${scene.startState} → ${scene.endState}`, `TIMING/RHYTHM: ${scene.timingNotes}; ${scene.rhythmNotes}`);
@@ -372,5 +385,5 @@ export function compileStrictModelingConstraints(spec: SourceVideoModelingSpec, 
 export function buildStrictSceneExpectedState(spec: SourceVideoModelingSpec, sourceSceneId: string) {
   const scene = spec.scenes.find((item) => item.sourceSceneId === sourceSceneId);
   if (!scene) throw new StrictModelingError("SOURCE_SCENE_MAPPING_MISSING", `Không tìm thấy source scene ${sourceSceneId}.`);
-  return { sourceSceneId: scene.sourceSceneId, sourceSceneOrder: scene.order, storyBeat: scene.storyBeat, camera: { type: scene.cameraType, shotSize: scene.shotSize, angle: scene.cameraAngle, movement: scene.cameraMovement, framing: scene.framing, subjectPosition: scene.subjectPosition }, actionSequence: scene.actionSequence, spatial: { subjectPosition: scene.subjectPosition, poseOrientation: scene.poseOrientation, gazeTarget: scene.gazeTarget, relativeObjectPositions: scene.relativeObjectPositions }, startState: scene.startState, endState: scene.endState, transitionIn: scene.transitionIn, transitionOut: scene.transitionOut, timingNotes: scene.timingNotes, rhythmNotes: scene.rhythmNotes, mustPreserve: scene.mustPreserve, allowedTransformations: scene.allowedTransformations };
+  return { sourceSceneId: scene.sourceSceneId, sourceSceneOrder: scene.order, storyBeat: scene.storyBeat, camera: { type: scene.cameraType, shotSize: scene.shotSize, angle: scene.cameraAngle, movement: scene.cameraMovement, framing: scene.framing, subjectPosition: scene.subjectPosition }, actionSequence: scene.actionSequence, spatial: { subjectPosition: scene.subjectPosition, poseOrientation: scene.poseOrientation, gazeTarget: scene.gazeTarget, relativeObjectPositions: scene.relativeObjectPositions }, startState: scene.startState, endState: scene.endState, transitionIn: scene.transitionIn, transitionOut: scene.transitionOut, timingNotes: scene.timingNotes, rhythmNotes: scene.rhythmNotes, mustPreserve: scene.mustPreserve, allowedTransformations: [...CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS] };
 }

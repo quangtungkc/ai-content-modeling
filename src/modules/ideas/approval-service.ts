@@ -7,7 +7,7 @@ import type { ModelingDirection } from "@/services/ai/types";
 import { decryptSecret } from "@/lib/secrets";
 import { GeminiProvider } from "@/services/ai/gemini";
 import { readChannelMainCharacterImage } from "@/modules/channels/service";
-import { assembleSourceModelingSpec, CANONICAL_DEFAULT_MODELING_FIDELITY_TARGET, CANONICAL_DEFAULT_MODELING_POLICY, CANONICAL_DEFAULT_TIMING_TOLERANCE, sourceModelingSpecSchema, validateGeneratedSceneMapping, type GeneratedSceneMapping } from "@/modules/modeling/strict-source-modeling";
+import { assembleSourceModelingSpec, CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS, CANONICAL_DEFAULT_MODELING_FIDELITY_TARGET, CANONICAL_DEFAULT_MODELING_POLICY, CANONICAL_DEFAULT_TIMING_TOLERANCE, sourceModelingSpecSchema, validateGeneratedSceneMapping, type GeneratedSceneMapping } from "@/modules/modeling/strict-source-modeling";
 import { buildAuthoritativeStoryboardValidationPlans, validateStoryboardSource, type SourceValidationContext } from "@/modules/source-validation/multi-stage";
 
 function strictSourceFields(video: { id: string; url: string; caption?: string | null; thumbnailUrl?: string | null; publishedAt?: Date | null; duration?: number | null; competitor: { platform: string } }, result: { sourceModelingSpec?: unknown; storyboard: Array<{ sceneNumber: number; sourceSceneId?: string; sourceBeat?: string; actionSequence?: string[]; cameraSpec?: Record<string, unknown>; spatialSpec?: Record<string, unknown>; startState?: string; endState?: string; targetDuration?: number }> }, storyboard: Array<{ sceneNumber: number; sourceSceneId?: string; targetDuration?: number }>) {
@@ -22,7 +22,7 @@ function strictSourceFields(video: { id: string; url: string; caption?: string |
     mappings = validateGeneratedSceneMapping(sourceModelingSpec, storyboard.map((scene, index) => ({ ...scene, targetDuration: scene.targetDuration ?? sourceScenes[index]?.duration })));
   }
   if (sourceModelingSpec) {
-    const sourceContext: SourceValidationContext = { projectId: "pending-content-project", sourceVideoId: video.id, sourceVideoUrl: video.url, sourceModelingSpecVersion: sourceModelingSpec.specVersion, sourceSpec: sourceModelingSpec, mustPreserve: [...new Set(sourceModelingSpec.scenes.flatMap((scene) => scene.mustPreserve))], allowedTransformations: [...new Set(sourceModelingSpec.scenes.flatMap((scene) => scene.allowedTransformations))], validationStage: "STORYBOARD", sourceEvidence: sourceModelingSpec.sourceEvidence };
+    const sourceContext: SourceValidationContext = { projectId: "pending-content-project", sourceVideoId: video.id, sourceVideoUrl: video.url, sourceModelingSpecVersion: sourceModelingSpec.specVersion, sourceSpec: sourceModelingSpec, mustPreserve: [...new Set(sourceModelingSpec.scenes.flatMap((scene) => scene.mustPreserve))], allowedTransformations: [...CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS], validationStage: "STORYBOARD", sourceEvidence: sourceModelingSpec.sourceEvidence };
     const storyboardValidation = validateStoryboardSource(sourceContext, buildAuthoritativeStoryboardValidationPlans(sourceModelingSpec, mappings));
     if (storyboardValidation.status !== "PASS") throw new AppError(storyboardValidation.status === "FAIL" ? "SOURCE_STORYBOARD_MISMATCH" : "SOURCE_STORYBOARD_NOT_EVALUATED", "Storyboard chưa chứng minh đủ source scene/beat/action/camera/timing theo STRICT_MODELING.", 409, { validation: storyboardValidation });
   }

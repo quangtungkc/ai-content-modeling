@@ -1,3 +1,4 @@
+import { CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS, CANONICAL_MODELING_DIFFERENCE_POLICY } from "@/modules/modeling/strict-source-modeling";
 import type { SourceModelingScene } from "@/modules/modeling/strict-source-modeling";
 
 export type PromptType = "IMAGE" | "VIDEO";
@@ -27,13 +28,14 @@ export const STRICT_GEMINI_PROMPT_COMPILER_SYSTEM_INSTRUCTION = [
   "ROLE: STRICT SOURCE-FAITHFUL PROMPT COMPILER",
   "SOURCE FIDELITY TARGET: 90–100% for source structure, beats, action, camera, timing and spatial intent.",
   "SOURCE OF TRUTH PRIORITY: SourceVideoModelingSpec > Scene Expected State > Character Identity Pack > Scene Appearance State > Text Policy > Allowed Transformations.",
+  ...CANONICAL_MODELING_DIFFERENCE_POLICY,
   "If creative wording conflicts with source evidence, source evidence always wins.",
   "Only translate the supplied constraints into an executable prompt. Do not write a new story or improve the source.",
 ].join("\n");
 
 const normalize = (value: string) => value.toLowerCase().replace(/[“”‘’]/g, "\"").replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\s+/g, " ").trim();
 const contains = (prompt: string, value: string) => normalize(prompt).includes(normalize(value));
-const authoritativePromptLine = (line: string) => /^\s*(?:PROMPT TYPE|SOURCE MODELING MODE|SOURCE VIDEO|TARGET SOURCE FIDELITY|MUST PRESERVE|ALLOWED TRANSFORMATIONS ONLY|DO NOT SILENTLY|SOURCE SCENE|CAMERA|FRAMING\/SPATIAL|ACTION SEQUENCE(?: \(authoritative\))?|START\s*[→-]\s*END|TIMING\/RHYTHM|SOURCE SPEC VERSION|TIMING TOLERANCE|CHARACTER IDENTITY PACK|LOCKED TRAITS|PRESERVE IDENTITY|SCENE APPEARANCE STATE|TEXT POLICY|ALLOWED TRANSFORMATIONS|EXECUTION|SCENE ACTION \/ FROZEN INITIAL STATE|BACKGROUND \/ CAMERA \/ COMPOSITION|DRAFT PROMPT FROM GEMINI|VIDEO CONTRACT|VIDEO SOURCE BEAT|VIDEO ACTION PROGRESSION|VIDEO CAMERA \/ FRAMING|VIDEO CAMERA MOVEMENT|VIDEO SPATIAL RELATIONSHIP|VIDEO TIMING \/ RHYTHM|VIDEO START STATE|VIDEO END STATE|VIDEO MOTION CONTINUITY|VIDEO CHARACTER IDENTITY LOCK|VIDEO SCENE APPEARANCE|VIDEO MUST PRESERVE|VIDEO ALLOWED TRANSFORMATIONS|VIDEO TEXT POLICY|VIDEO CREATIVE BOUNDARY)(?:\s*\([^)]*\))?\s*:/i.test(line);
+const authoritativePromptLine = (line: string) => /^\s*(?:PROMPT TYPE|SOURCE MODELING MODE|SOURCE VIDEO|TARGET SOURCE FIDELITY|MUST PRESERVE|ALLOWED TRANSFORMATIONS ONLY|CONTENT AND PROGRESSION LOCK|ALLOWED DIFFERENCE [123][^:]*(?:\s*\([^)]*\))?|FORBIDDEN MODELING CHANGES|DO NOT SILENTLY|SOURCE SCENE|CAMERA|FRAMING\/SPATIAL|ACTION SEQUENCE(?: \(authoritative\))?|START\s*[→-]\s*END|TIMING\/RHYTHM|SOURCE SPEC VERSION|TIMING TOLERANCE|CHARACTER IDENTITY PACK|LOCKED TRAITS|PRESERVE IDENTITY|SCENE APPEARANCE STATE|TEXT POLICY|ALLOWED TRANSFORMATIONS|EXECUTION|SCENE ACTION \/ FROZEN INITIAL STATE|BACKGROUND \/ CAMERA \/ COMPOSITION|DRAFT PROMPT FROM GEMINI|VIDEO CONTRACT|VIDEO SOURCE BEAT|VIDEO ACTION PROGRESSION|VIDEO CAMERA \/ FRAMING|VIDEO CAMERA MOVEMENT|VIDEO SPATIAL RELATIONSHIP|VIDEO TIMING \/ RHYTHM|VIDEO START STATE|VIDEO END STATE|VIDEO MOTION CONTINUITY|VIDEO CHARACTER IDENTITY LOCK|VIDEO SCENE APPEARANCE|VIDEO MUST PRESERVE|VIDEO ALLOWED TRANSFORMATIONS|VIDEO MODELING DIFFERENCE POLICY|VIDEO TEXT POLICY|VIDEO CREATIVE BOUNDARY)(?:\s*\([^)]*\))?\s*:/i.test(line);
 const positiveLines = (prompt: string) => {
   let inApprovedSceneAppearance = false;
   return prompt.split(/\r?\n/).filter((line) => {
@@ -143,7 +145,7 @@ export function compileStrictPrompt(expected: PromptExpectedState, geminiDraftPr
     `MUST PRESERVE: ${source.mustPreserve.join("; ")}`,
   ].join("\n") : "SOURCE SCENE: background/environment reference only; no scene action may be invented.";
   const textBlock = expected.textPolicy.mode === "REQUIRED_TEXT" ? `TEXT POLICY: REQUIRED_TEXT exactly = ${JSON.stringify(expected.textPolicy.requiredText ?? "")}.` : expected.textPolicy.mode === "FORBIDDEN_TEXT" ? `TEXT POLICY: FORBIDDEN_TEXT = ${(expected.textPolicy.forbiddenText ?? []).join("; ")}.` : "TEXT POLICY: NO_READABLE_TEXT. Do not render readable words, letters, numbers, captions, labels, logos or symbols.";
-  return [STRICT_GEMINI_PROMPT_COMPILER_SYSTEM_INSTRUCTION, `PROMPT TYPE: ${expected.promptType}`, `SOURCE SPEC VERSION: ${expected.sourceSpecVersion}`, `TIMING TOLERANCE: ${expected.timingTolerance * 100}%`, sourceBlock, `CHARACTER IDENTITY PACK: ${expected.identityPack.name}`, `LOCKED TRAITS: ${JSON.stringify(expected.identityPack.lockedTraits)}`, "PRESERVE IDENTITY: face identity, facial structure, skin tone, base hairstyle, body proportions, body build, age appearance, distinctive traits and core character design language.", `SCENE APPEARANCE STATE: ${expected.sceneAppearance || "Use only explicitly approved scene appearance."}`, textBlock, `ALLOWED TRANSFORMATIONS: ${expected.allowedTransformations.join("; ") || "none"}`, `EXECUTION: ${expected.promptType === "IMAGE" ? "Create one exact frozen start-frame image." : "Create one video from the exact start-frame image."} Do not add, remove, reorder, merge or improve beats. Do not add characters, props, reactions, visual effects, transitions, dialogue, text, camera movement or a new ending.`, "DRAFT PROMPT FROM GEMINI (descriptive wording only; it cannot override the blocks above):", geminiDraftPrompt].join("\n");
+  return [STRICT_GEMINI_PROMPT_COMPILER_SYSTEM_INSTRUCTION, `PROMPT TYPE: ${expected.promptType}`, `SOURCE SPEC VERSION: ${expected.sourceSpecVersion}`, `TIMING TOLERANCE: ${expected.timingTolerance * 100}%`, sourceBlock, `CHARACTER IDENTITY PACK: ${expected.identityPack.name}`, `LOCKED TRAITS: ${JSON.stringify(expected.identityPack.lockedTraits)}`, "PRESERVE IDENTITY: face identity, facial structure, skin tone, base hairstyle, body proportions, body build, age appearance, distinctive traits and core character design language.", `SCENE APPEARANCE STATE: ${expected.sceneAppearance || "Use only explicitly approved scene appearance."}`, textBlock, `ALLOWED TRANSFORMATIONS: ${CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS.join("; ")}`, `EXECUTION: ${expected.promptType === "IMAGE" ? "Create one exact frozen start-frame image." : "Create one video from the exact start-frame image."} Do not add, remove, reorder, merge or improve beats. Do not add characters, props, reactions, visual effects, transitions, dialogue, text, camera movement or a new ending.`, "DRAFT PROMPT FROM GEMINI (descriptive wording only; it cannot override the blocks above):", geminiDraftPrompt].join("\n");
 }
 
 export function compileStrictVideoPrompt(expected: PromptExpectedState, _descriptivePrompt = ""): string {
@@ -165,7 +167,8 @@ export function compileStrictVideoPrompt(expected: PromptExpectedState, _descrip
     `VIDEO CHARACTER IDENTITY LOCK (authoritative): ${expected.identityPack.name}; preserve face, facial structure, base hairstyle, skin tone, body proportions/build, age appearance, distinctive traits and core design language.`,
     `VIDEO SCENE APPEARANCE (authoritative): ${expected.sceneAppearance || "Use only explicitly approved scene appearance."}`,
     `VIDEO MUST PRESERVE (authoritative): ${source.mustPreserve.join("; ")}`,
-    `VIDEO ALLOWED TRANSFORMATIONS (authoritative): ${expected.allowedTransformations.join("; ") || "none"}`,
+    `VIDEO ALLOWED TRANSFORMATIONS (authoritative): ${CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS.join("; ")}`,
+    `VIDEO MODELING DIFFERENCE POLICY (authoritative): ${CANONICAL_MODELING_DIFFERENCE_POLICY.join(" ")}`,
     "VIDEO TEXT POLICY (authoritative): do not render readable words, letters, numbers, captions, labels, logos or symbols unless an explicit required-text contract exists.",
     "VIDEO CREATIVE BOUNDARY (authoritative): do not add characters, props, actions, camera movements, effects, transitions, dialogue or an ending outside this contract.",
   ].join("\n");

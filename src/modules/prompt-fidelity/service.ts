@@ -4,7 +4,7 @@ import { AppError } from "@/lib/errors";
 import { db } from "@/lib/db";
 import { assertCharacterIdentityPackReady } from "@/modules/assets/character-identity";
 import { getCharacterIdentityPack } from "@/modules/channels/identity-pack";
-import { assertStrictModelingReady } from "@/modules/modeling/strict-source-modeling";
+import { assertStrictModelingReady, CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS } from "@/modules/modeling/strict-source-modeling";
 import { buildIncidentFingerprint } from "@/modules/troubleshooting/fingerprint";
 import { incidentSchema } from "@/modules/troubleshooting/incident-schema";
 import { TroubleshootingIncidentRepository } from "@/modules/troubleshooting/incident-repository";
@@ -63,7 +63,7 @@ async function loadExpectedState(input: { projectId: string; userId: string; sce
   const sourceScene = scene?.sourceSceneId ? spec.scenes.find((item) => item.sourceSceneId === scene.sourceSceneId) : undefined;
   if (input.sceneNumber !== undefined && !sourceScene) throw new AppError("SOURCE_SCENE_MAPPING_MISSING", "Scene chưa có sourceSceneId hợp lệ.", 409);
   const pack = assertCharacterIdentityPackReady(await getCharacterIdentityPack(project.channelId, input.userId));
-  const expected: PromptExpectedState = { projectId: project.id, sceneId: scene?.id ?? null, sourceSceneId: sourceScene?.sourceSceneId ?? null, sourceSpecVersion: project.sourceModelingSpecVersion ?? spec.specVersion, expectedStateVersion: `${project.sourceModelingSpecVersion ?? spec.specVersion}:${scene?.sourceSceneId ?? "background"}`, characterIdentityPackVersion: pack.characterId, timingTolerance: spec.timingTolerance, sourceScene, identityPack: { name: pack.name, lockedTraits: pack.lockedTraits, allowedVariations: pack.allowedVariations, negativeRules: pack.negativeRules }, sceneAppearance: scene ? [scene.visualBlock, scene.startFramePrompt ?? ""].filter(Boolean).join("\n") : "Apply only the approved environment/background transformation.", textPolicy: textPolicyFromInput(input.draftPrompt, input.textPolicy), allowedTransformations: sourceScene?.allowedTransformations ?? [], promptType: input.promptType };
+  const expected: PromptExpectedState = { projectId: project.id, sceneId: scene?.id ?? null, sourceSceneId: sourceScene?.sourceSceneId ?? null, sourceSpecVersion: project.sourceModelingSpecVersion ?? spec.specVersion, expectedStateVersion: `${project.sourceModelingSpecVersion ?? spec.specVersion}:${scene?.sourceSceneId ?? "background"}`, characterIdentityPackVersion: pack.characterId, timingTolerance: spec.timingTolerance, sourceScene, identityPack: { name: pack.name, lockedTraits: pack.lockedTraits, allowedVariations: pack.allowedVariations, negativeRules: pack.negativeRules }, sceneAppearance: scene ? [scene.visualBlock, scene.startFramePrompt ?? ""].filter(Boolean).join("\n") : "Apply only the approved environment/background transformation.", textPolicy: textPolicyFromInput(input.draftPrompt, input.textPolicy), allowedTransformations: [...CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS], promptType: input.promptType };
   return { expected, pack, project, scene };
 }
 

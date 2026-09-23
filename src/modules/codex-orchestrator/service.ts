@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { getEnv } from "@/lib/env";
 import { AppError } from "@/lib/errors";
-import { assertStrictModelingReady, buildStrictSceneExpectedState, sourceModelingSpecSchema } from "@/modules/modeling/strict-source-modeling";
+import { assertStrictModelingReady, buildStrictSceneExpectedState, CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS, sourceModelingSpecSchema } from "@/modules/modeling/strict-source-modeling";
 import { getCharacterIdentityPack } from "@/modules/channels/identity-pack";
 import type { FinalVideoObservation, SourceValidationContext } from "@/modules/source-validation/multi-stage";
 import { CodexReasoner } from "./reasoner";
@@ -190,7 +190,7 @@ async function buildExpectedStates(projectId: string, userId: string) {
   });
   const sceneNumbers = scenes.map((scene) => scene.sceneNumber);
   const aspectRatio = String(record(project.artDirection).aspectRatio ?? "9:16");
-  const sourceValidationBase = { projectId, sourceVideoId: project.sourceVideoId!, sourceVideoPath: project.sourceVideoUrl, sourceVideoUrl: project.sourceVideoUrl, sourceModelingSpecVersion: project.sourceModelingSpecVersion ?? strictSpec.specVersion, sourceSpec: strictSpec, sourceEvidence: strictSpec.sourceEvidence, mustPreserve: [...new Set(strictSpec.scenes.flatMap((scene) => scene.mustPreserve))], allowedTransformations: [...new Set(strictSpec.scenes.flatMap((scene) => scene.allowedTransformations))] };
+  const sourceValidationBase = { projectId, sourceVideoId: project.sourceVideoId!, sourceVideoPath: project.sourceVideoUrl, sourceVideoUrl: project.sourceVideoUrl, sourceModelingSpecVersion: project.sourceModelingSpecVersion ?? strictSpec.specVersion, sourceSpec: strictSpec, sourceEvidence: strictSpec.sourceEvidence, mustPreserve: [...new Set(strictSpec.scenes.flatMap((scene) => scene.mustPreserve))], allowedTransformations: [...CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS] };
   return {
     ASSETS: { stage: "ASSETS", projectId, requiredAssetKeys: ["background-0", ...sceneNumbers.map((number) => `scene-${number}`)], scenes, sourceValidation: { ...sourceValidationBase, validationStage: "START_FRAME" } } satisfies ExpectedState,
     SCENES: { stage: "SCENES", projectId, expectedSceneNumbers: sceneNumbers, expectedDurationPerScene: 4, scenes, sourceValidation: { ...sourceValidationBase, validationStage: "SCENE_VIDEO" } } satisfies ExpectedState,
@@ -213,7 +213,7 @@ async function buildFinalSourceValidationContext(projectId: string, userId: stri
   const expectedOrder = sourceScenes.map((scene) => scene.order);
   const sceneOrderMatches = sceneOrder ? sceneOrder.length === expectedOrder.length && sceneOrder.every((number, index) => number === expectedOrder[index]) : undefined;
   const sourceObservation = actual.sourceObservation && typeof actual.sourceObservation === "object" && !Array.isArray(actual.sourceObservation) ? actual.sourceObservation as Partial<FinalVideoObservation> : {};
-  return { projectId, sourceVideoId: project.sourceVideoId, sourceVideoPath: project.sourceVideoUrl, sourceVideoUrl: project.sourceVideoUrl, sourceModelingSpecVersion: project.sourceModelingSpecVersion, sourceSpec: spec, sourceEvidence: spec.sourceEvidence, mustPreserve: [...new Set(sourceScenes.flatMap((scene) => scene.mustPreserve))], allowedTransformations: [...new Set(sourceScenes.flatMap((scene) => scene.allowedTransformations))], characterIdentityPack: identityPack, generatedAssetPath: finalVideoPath, generatedAssetType: "FINAL_VIDEO", validationStage: "FINAL_VIDEO", generatedScenePlans: scenePlans, finalObservation: { ...sourceObservation, sceneOrder, generatedDuration: typeof actual.finalDurationSec === "number" ? actual.finalDurationSec : undefined, structureMatch: sourceObservation.structureMatch ?? sceneOrderMatches, technicalStatus: sourceObservation.technicalStatus ?? (actual.finalContainerValid === true && actual.finalVideoStreamValid === true) } };
+  return { projectId, sourceVideoId: project.sourceVideoId, sourceVideoPath: project.sourceVideoUrl, sourceVideoUrl: project.sourceVideoUrl, sourceModelingSpecVersion: project.sourceModelingSpecVersion, sourceSpec: spec, sourceEvidence: spec.sourceEvidence, mustPreserve: [...new Set(sourceScenes.flatMap((scene) => scene.mustPreserve))], allowedTransformations: [...CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS], characterIdentityPack: identityPack, generatedAssetPath: finalVideoPath, generatedAssetType: "FINAL_VIDEO", validationStage: "FINAL_VIDEO", generatedScenePlans: scenePlans, finalObservation: { ...sourceObservation, sceneOrder, generatedDuration: typeof actual.finalDurationSec === "number" ? actual.finalDurationSec : undefined, structureMatch: sourceObservation.structureMatch ?? sceneOrderMatches, technicalStatus: sourceObservation.technicalStatus ?? (actual.finalContainerValid === true && actual.finalVideoStreamValid === true) } };
 }
 
 async function syncAutomation(jobId: string) {

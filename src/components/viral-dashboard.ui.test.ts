@@ -128,6 +128,8 @@ describe("Video Modeling automatic-only UI", () => {
   it("CASE 19: exposes selectable Flow and Gemini video providers", () => {
     expect(source).toContain('type VideoProvider = "flow" | "gemini"');
     expect(source).toContain('name="video-provider"');
+    expect(source).toContain('aria-label="Luồng tạo video trước khi chạy tự động"');
+    expect(source).toContain('onChange={(event) => setVideoProvider(event.target.value as VideoProvider)}');
     expect(source).toContain("Luồng 1 · Google Flow");
     expect(source).toContain("Luồng 2 · Gemini qua CDP");
   });
