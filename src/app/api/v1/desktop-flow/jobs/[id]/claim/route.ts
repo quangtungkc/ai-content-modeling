@@ -13,7 +13,7 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     const session = await getRequiredSession();
     const { id } = await context.params;
     const job = await db.backgroundJob.findUnique({ where: { id }, select: { id: true, name: true, status: true, payload: true, idempotencyKey: true, attempts: true, maxAttempts: true } });
-    if (!job || !job.name.startsWith("desktop.flow.")) throw new AppError("DESKTOP_FLOW_JOB_NOT_FOUND", "Không tìm thấy job Google Flow.", 404);
+    if (!job || !(job.name.startsWith("desktop.flow.") || job.name.startsWith("desktop.gemini."))) throw new AppError("DESKTOP_FLOW_JOB_NOT_FOUND", "Không tìm thấy browser job.", 404);
     if (record(job.payload).userId !== session.userId) throw new AppError("DESKTOP_FLOW_JOB_FORBIDDEN", "Job Google Flow không thuộc phiên desktop hiện tại.", 403);
     const claimed = await db.backgroundJob.updateMany({ where: { id, status: { in: ["queued", "running"] } }, data: { status: "running", startedAt: new Date(), error: null } });
     if (!claimed.count) return Response.json({ data: null, requestId });

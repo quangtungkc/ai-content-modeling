@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.0.7 — 2026-09-23
+
+### Fixed
+
+- Completed the stabilization fixes recorded in `docs/live-debug/LIVE_DEBUG_LEDGER.md` for Gemini conversation ownership, strict send confirmation, structured error propagation, Electron/main-renderer worktree identity, Flow CDP routing, reference-frame validation, safe provider-block settlement, and final video assembly.
+- Gemini video selection now uses the Electron/CDP browser route instead of requiring a Veo API credential.
+- Packaged Electron builds resolve the bundled FFmpeg binary from the electron-builder `app.asar.unpacked` location.
+- Electron packaging now stages a configured FFmpeg source before cleaning and recreating `electron/dist`.
+- Post-assembly QA tests resolve the same repository-bundled FFmpeg runtime during development and release validation.
+- Background recovery excludes both Flow and Gemini browser jobs from generic stale-job requeueing.
+
+### Changed
+
+- Stage 3 image generation and Stage 4 browser video generation preserve the requested provider boundaries and checkpoint semantics.
+- Flow interactions use bounded human-paced waits, one bounded recovery, exact Start-frame confirmation, and structured non-retryable unusual-activity failures.
+- Stage 5 validates the final H.264/AAC MP4 before persisting a successful run checkpoint.
+
+### Added
+
+- `docs/live-debug/STABILIZATION_SUMMARY.md` with the issue families, repairs, validation evidence, and known limitations from the end-to-end stabilization run.
+- Regression coverage for packaged FFmpeg resolution, Gemini CDP video routing, provider-block settlement, structured errors, and runtime identity.
+
+### Migration notes
+
+- Existing AppData, database records, generated media, browser profiles, and `.env` are retained. No destructive migration or reset is required.
+- A release build on this Windows host must use the repository-bundled executable through `MODELING_AI_FFMPEG_PATH` because the local `ffmpeg-static` artifact is not executable on this host.
+
+### Known limitations
+
+- Google Flow anti-abuse/unusual-activity blocks remain external provider decisions. The app stops automatic retries and supports manual recovery; it does not bypass those controls.
+- The legacy Veo API route still requires an explicitly configured VEO/GEMINI connection; the Gemini UI option uses the CDP route and does not silently fall back to the API.
+
 ## 1.0.6 — 2026-09-22
 
 ### Fixed

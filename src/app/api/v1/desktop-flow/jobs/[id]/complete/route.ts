@@ -24,7 +24,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const { id } = await context.params;
     const input = schema.parse(await request.json());
     const job = await db.backgroundJob.findUnique({ where: { id }, select: { id: true, name: true, status: true, payload: true } });
-    if (!job || !job.name.startsWith("desktop.flow.")) throw new AppError("DESKTOP_FLOW_JOB_NOT_FOUND", "Không tìm thấy job Google Flow.", 404);
+    if (!job || !(job.name.startsWith("desktop.flow.") || job.name.startsWith("desktop.gemini."))) throw new AppError("DESKTOP_FLOW_JOB_NOT_FOUND", "Không tìm thấy browser job.", 404);
     if (record(job.payload).userId !== session.userId) throw new AppError("DESKTOP_FLOW_JOB_FORBIDDEN", "Job Google Flow không thuộc phiên desktop hiện tại.", 403);
     if (job.status !== "running" && job.status !== input.status) throw new AppError("DESKTOP_FLOW_JOB_STATE", "Job Google Flow không còn ở trạng thái đang chạy.", 409);
     const nextPayload = { ...record(job.payload), bridgeStatus: input.status === "succeeded" ? "SUCCEEDED" : "FAILED", bridgeResult: input.status === "succeeded" ? redactSecrets(input.result ?? {}) : null, bridgeFailure: input.status === "failed" ? redactSecrets(input.failure ?? {}) : null, bridgeCompletedAt: new Date().toISOString() };

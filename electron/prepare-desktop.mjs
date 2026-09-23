@@ -1,5 +1,7 @@
-import { access, cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import path from "node:path";
+import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { build } from "esbuild";
 
@@ -7,14 +9,23 @@ const execFileAsync = promisify(execFile);
 const output = "electron/dist";
 const configuredFfmpeg = process.env.MODELING_AI_FFMPEG_PATH?.trim();
 const defaultFfmpeg = "node_modules/ffmpeg-static/ffmpeg.exe";
-const ffmpegSource = configuredFfmpeg || defaultFfmpeg;
+const requestedFfmpegSource = configuredFfmpeg || defaultFfmpeg;
+let ffmpegSource = requestedFfmpegSource;
+let stagingDirectory = null;
 
 try {
-  await access(ffmpegSource);
-  await execFileAsync(ffmpegSource, ["-version"], { windowsHide: true, timeout: 15_000 });
+  await access(requestedFfmpegSource);
+  await execFileAsync(requestedFfmpegSource, ["-version"], { windowsHide: true, timeout: 15_000 });
+  const outputRoot = path.resolve(output);
+  const requestedRoot = path.resolve(requestedFfmpegSource);
+  if (requestedRoot === outputRoot || requestedRoot.startsWith(`${outputRoot}${path.sep}`)) {
+    stagingDirectory = await mkdtemp(path.join(tmpdir(), "modeling-ai-ffmpeg-"));
+    ffmpegSource = path.join(stagingDirectory, path.basename(requestedFfmpegSource));
+    await cp(requestedFfmpegSource, ffmpegSource);
+  }
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
-  throw new Error(`FFMPEG_RUNTIME_INVALID: ${ffmpegSource}\n${message}`);
+  throw new Error(`FFMPEG_RUNTIME_INVALID: ${requestedFfmpegSource}\n${message}`);
 }
 
 await rm(output, { recursive: true, force: true });
@@ -26,7 +37,7 @@ await cp("electron/assets/modeling-ai-template.db", `${output}/modeling-ai-templ
 await cp("prisma/schema.prisma", `${output}/schema.prisma`);
 await mkdir(`${output}/ffmpeg`, { recursive: true });
 await cp(ffmpegSource, `${output}/ffmpeg/ffmpeg.exe`);
-const configuredLicense = `${ffmpegSource}.LICENSE`;
+const configuredLicense = `${requestedFfmpegSource}.LICENSE`;
 const packageLicense = "node_modules/ffmpeg-static/ffmpeg.exe.LICENSE";
 try {
   await access(configuredLicense);
@@ -49,3 +60,5 @@ await build({
   sourcemap: false,
   external: ["@prisma/client", ".prisma/client"],
 });
+
+if (stagingDirectory) await rm(stagingDirectory, { recursive: true, force: true });

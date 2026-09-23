@@ -134,6 +134,6 @@ export async function enqueueProjectVideosWithVeoApi(projectId: string, userId: 
   try { await requireProviderApiKey(userId, ["VEO", "GEMINI"], "VIDEO_GENERATION", "Veo/Google Video"); }
   catch { throw providerUnavailable("Chưa kết nối Veo/Google Video API; có thể dùng Flow fallback."); }
   const batchId = randomUUID();
-  const queued = await new LocalJobQueue().enqueue("video.project.generate", { batchId, projectId, userId, channelId, slots }, `video-project:${batchId}`);
+  const queued = await new LocalJobQueue().enqueue("video.project.generate", { batchId, projectId, userId, channelId, provider: "veo-api", slots }, `video-project:${batchId}`);
   return { status: "queued", provider: "veo-api", queueJobId: queued.jobId, videos: {} };
 }

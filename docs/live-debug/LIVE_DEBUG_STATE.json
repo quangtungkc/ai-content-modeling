@@ -1,29 +1,32 @@
 {
-  "activeRunId": "cmu8ao66q004ak5jco5mgvf4w",
-  "activeProjectId": "cmuagw9cx0001k5806rv7o518",
-  "sourceVideoId": "cmu83lkni004hk5ek8uuibbnn",
-  "sourceVideoUrl": "https://www.facebook.com/reel/1799262621072828/",
-  "sourceHandle": "@buzzinanimation",
+  "activeRunId": "cmuc51vjr0006k5ycwa04qxgq",
+  "activeProjectId": "cmuc5pkc7000kk5ycb2lg2ksz",
+  "sourceVideoId": "cmu83lkck000hk5ekgbod2x8n",
+  "sourceVideoUrl": "https://www.facebook.com/reel/2067249600545027/",
+  "sourceHandle": "@ChubbyChaos",
   "channelId": "cmu83a6560006k5bsl13ejsoh",
-  "currentAttempt": 41,
+  "currentAttempt": 11,
   "lastCompletedStage": 5,
   "resumeTarget": null,
   "currentIssueId": null,
   "runStatus": "SUCCEEDED",
   "readyToContinue": true,
-  "lastRepairedIssueId": "ISSUE-036",
-  "lastRepairStatus": "ISSUE_036_FIXED_STAGE5_FINAL_ASSEMBLY_PASS",
+  "lastRepairedIssueId": "ISSUE-041",
+  "lastRepairStatus": "MANUAL_SCENE_3_PERSISTED_SCENE_4_PROVIDER_BLOCKED",
   "finalVideoReady": true,
-  "stabilizationComplete": true,
+  "stabilizationComplete": false,
   "releaseVersion": "1.0.6",
   "releaseCandidateReady": true,
   "fullRegressionStatus": "PASS",
   "buildStatus": "PASS",
   "releaseStatus": "PENDING_PUBLICATION",
-  "lastInvestigationAt": "2026-09-22T01:55:20Z",
-  "lastInvestigationIssueId": "ISSUE-036",
-  "lastInvestigationStatus": "FINAL_VIDEO_PROCESSOR_UNAVAILABLE",
-  "lastInvestigationRootCauseClass": "RUNTIME_DEPENDENCY_MISSING",
+  "activeRunReleaseCandidateReady": false,
+  "activeRunFullRegressionStatus": "BLOCKED_STAGE_4_PROVIDER",
+  "activeRunReleaseStatus": "BLOCKED_BY_ACTIVE_RUN",
+  "lastInvestigationAt": "2026-09-22T09:27:47.067Z",
+  "lastInvestigationIssueId": "ISSUE-047",
+  "lastInvestigationStatus": "FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK",
+  "lastInvestigationRootCauseClass": "PROVIDER_ANTI_ABUSE",
   "liveAuthCheck": "HISTORY_COMPARISON_PASS_TARGET_FAIL",
   "geminiLoggedIn": true,
   "expectedAccountActive": "UNKNOWN",
@@ -53,18 +56,28 @@
   "providerFirstDivergence": "FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK",
   "providerAutoRetryAllowed": false,
   "stage4CheckpointPreserved": true,
+  "stage4FailureCode": "FLOW_PROVIDER_UNUSUAL_ACTIVITY",
+  "stage4FirstDivergence": "FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK",
+  "stage4Scene": 4,
+  "stage4ProviderReloadResendAttempts": 1,
+  "stage4AutoRetryAllowed": false,
   "manualFlowGeneration": "PASS",
   "providerBlockCleared": "YES",
-  "lastRunAttempt": 41,
-  "lastRunFailureCode": null,
-  "lastRunFailureFirstDivergence": null,
-  "lastRunFailureStage": null,
+  "lastRunAttempt": 10,
+  "lastRunFailureCode": "FLOW_PROVIDER_UNUSUAL_ACTIVITY",
+  "lastRunFailureFirstDivergence": "FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK",
+  "lastRunFailureStage": 4,
   "lastRunProviderJobCreated": false,
   "lastRunGenerationStarted": false,
   "lastRunStage4Scene": 4,
   "lastRunProviderRecoveryAttempt": 1,
   "lastRunProviderRecoveryBudget": 1,
   "lastRunProviderAutoRetryAllowed": false,
+  "stage3Provider": "GEMINI_BROWSER_CDP",
+  "stage3ImageCount": 5,
+  "stage3Completed": true,
+  "stage4Provider": "GOOGLE_FLOW_CDP",
+  "executionLease": null,
   "stage4Completed": true,
   "stage4VideoCount": 4,
   "stage4Scene4ManualImportStatus": "PASS_MANUAL_CHECKPOINT_COMPLETED",
@@ -75,21 +88,89 @@
   "stage5FailureMessage": null,
   "stage5ReadyToRepair": false,
   "stage5Completed": true,
-  "stage5FinalVideoPath": "C:\\Users\\Admin\\AppData\\Roaming\\ai-content-modeling\\generated-videos\\cmuagw9cx0001k5806rv7o518\\final.mp4",
-  "stage5FinalVideoBytes": 6652527,
-  "stage5FinalVideoSha256": "9D680D0BCAFA79DC52614A5095F0DFD561D9A8BB0CE4C3E720F178A882AACB61",
+  "stage5FinalVideoPath": "C:\\Users\\Admin\\AppData\\Roaming\\ai-content-modeling\\generated-videos\\cmuc5pkc7000kk5ycb2lg2ksz\\final.mp4",
+  "stage5FinalVideoBytes": 8332562,
+  "stage5FinalVideoSha256": "145FE9637C5E7F62E2894E560D50950C055EEA3740A2F3FDAAAFF00219217D23",
   "stage5FinalDurationSec": 15.14,
   "stage5FinalVideoValidation": "PASS_FFMPEG_H264_AAC_720x1280"
   ,"manualFlowPersistedToApp": "YES"
   ,"lastManualImportAt": "2026-09-21T14:36:10+07:00"
   ,"lastManualImportStatus": "PASS_SCENE_1_CAPTURED_AND_API_VERIFIED"
-  ,"lastManualImportScene": 2
+  ,"lastManualImportScene": 3
   ,"lastManualImportAt": "2026-09-21T15:39:00+07:00"
   ,"lastManualImportScene2Status": "PASS_FLOW_EDITOR_VIDEO_SAVED_AND_API_VERIFIED"
   ,"lastManualImportScene2Path": "C:\\Users\\Admin\\AppData\\Local\\Temp\\modeling-ai-issue005-live\\generated-videos\\cmuagw9cx0001k5806rv7o518\\scene-2.mp4"
   ,"lastManualImportScene2Bytes": 530306
   ,"lastManualImportScene2ContentType": "video/mp4"
-  ,"lastManualImportScene3Status": "PASS_FLOW_DOWNLOAD_HASH_MATCH"
-  ,"lastManualImportScene3Path": "C:\\Users\\Admin\\AppData\\Roaming\\ai-content-modeling\\generated-videos\\cmuagw9cx0001k5806rv7o518\\scene-3.mp4"
-  ,"lastManualImportScene3Bytes": 733131
+  ,"lastManualImportScene3Status": "PASS_MANUAL_CAPTURED_AND_API_VERIFIED"
+  ,"lastManualImportScene3Path": "C:\\Users\\Admin\\AppData\\Roaming\\ai-content-modeling\\generated-videos\\cmuc5pkc7000kk5ycb2lg2ksz\\scene-3.mp4"
+  ,"lastManualImportScene3Bytes": 1843564
+  ,"lastLiveScene3Validation": "PASS_MANUAL_CAPTURED_AND_PERSISTED"
+  ,"lastLiveScene3ValidationAt": "2026-09-22T08:15:19.270Z"
+  ,"lastLiveScene4Validation": "FAIL_PROVIDER_UNUSUAL_ACTIVITY_AFTER_CDP_SEND_AND_ONE_RECOVERY"
+  ,"lastLiveScene4ValidationAt": "2026-09-22T08:34:28.928Z"
+  ,"lastRunFailureCode": "FLOW_PROVIDER_UNUSUAL_ACTIVITY"
+  ,"lastRunFailureFirstDivergence": "FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK"
+  ,"lastRunFailureStage": 4
+  ,"lastRunStage4Scene": 4
+  ,"lastRunProviderJobCreated": false
+  ,"lastRunGenerationStarted": false
+  ,"stage4FailureCode": "FLOW_PROVIDER_UNUSUAL_ACTIVITY"
+  ,"stage4FirstDivergence": "FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK"
+  ,"stage4ProviderReloadResendAttempts": 1
+  ,"stage4AutoRetryAllowed": false
+  ,"lastCodeRepairIssueId": "ISSUE-048"
+  ,"lastCodeRepairStatus": "FIXED"
+  ,"lastCodeRepairAt": "2026-09-22T16:44:13+07:00"
+  ,"lastCodeRepairSummary": "Gemini video selection now uses the Electron/CDP browser bridge instead of the Veo API route."
+  ,"currentAttempt": 11
+  ,"currentIssueId": null
+  ,"runStatus": "SUCCEEDED"
+  ,"readyToContinue": true
+  ,"lastInvestigationAt": "2026-09-22T11:01:50.845Z"
+  ,"lastInvestigationIssueId": "ISSUE-049"
+  ,"lastInvestigationStatus": "FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK"
+  ,"lastInvestigationRootCauseClass": "PROVIDER_ANTI_ABUSE"
+  ,"lastRunAttempt": 11
+  ,"lastRunFailureCode": "FLOW_PROVIDER_UNUSUAL_ACTIVITY"
+  ,"lastRunFailureFirstDivergence": "FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK"
+  ,"lastRunFailureStage": 4
+  ,"lastRunStage4Scene": 4
+  ,"lastRunProviderJobCreated": false
+  ,"lastRunGenerationStarted": false
+  ,"lastRunProviderRecoveryAttempt": 1
+  ,"lastRunProviderRecoveryBudget": 1
+  ,"lastRunProviderAutoRetryAllowed": false
+  ,"stage4Provider": "GEMINI_BROWSER_CDP"
+  ,"stage4Completed": true
+  ,"stage4VideoCount": 4
+  ,"stage4FailureCode": "FLOW_PROVIDER_UNUSUAL_ACTIVITY"
+  ,"stage4FirstDivergence": "FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK"
+  ,"stage4ProviderReloadResendAttempts": 1
+  ,"stage4AutoRetryAllowed": false
+  ,"executionLease": null
+  ,"completedVideoScenes": [1,2,3,4]
+  ,"stage5Completed": true
+  ,"stage5FinalVideoPath": "C:\\Users\\Admin\\AppData\\Roaming\\ai-content-modeling\\generated-videos\\cmuc5pkc7000kk5ycb2lg2ksz\\final.mp4"
+  ,"stage5FinalVideoBytes": 8332562
+  ,"stage5FinalVideoSha256": "145FE9637C5E7F62E2894E560D50950C055EEA3740A2F3FDAAAFF00219217D23"
+  ,"stage5FinalDurationSec": 15.14
+  ,"stage5FinalVideoValidation": "PASS_FFMPEG_H264_AAC_720x1280"
+  ,"lastRepairedIssueId": "ISSUE-050"
+  ,"lastRepairStatus": "PASS_PACKAGED_FFMPEG_RESOLUTION_AND_STAGE5"
+  ,"lastRepairAt": "2026-09-23T10:22:00+07:00"
+  ,"releaseCandidateReady": false
+  ,"fullRegressionStatus": "NOT_RUN_AFTER_PATCH"
+  ,"buildStatus": "STAGE5_RUNTIME_PASS_BUILD_NOT_COMPLETED"
+  ,"releaseStatus": "PENDING_USER_APPROVAL"
+  ,"releaseVersion": "1.0.7"
+  ,"currentIssueId": null
+  ,"lastRepairedIssueId": "ISSUE-052"
+  ,"lastRepairStatus": "PASS_RELEASE_PACKAGING_AND_FULL_REGRESSION"
+  ,"lastRepairAt": "2026-09-23T10:54:00+07:00"
+  ,"stabilizationComplete": true
+  ,"releaseCandidateReady": true
+  ,"fullRegressionStatus": "PASS"
+  ,"buildStatus": "PASS_ELECTRON_NSIS_1.0.7"
+  ,"releaseStatus": "READY_TO_PUBLISH"
 }

@@ -1178,9 +1178,412 @@ Copy this template for each new issue. Do not delete historical records.
 - `TEST_RESULTS`: `PASS — package contract test 2/2; typecheck PASS; lint 0 errors; app.asar inspection confirms all required modules; clean-install smoke PASS with an isolated temporary userData directory.`
 - `STATUS`: `FIXED`
 
+### ISSUE-038
+
+- `ISSUE_ID`: `ISSUE-038`
+- `DISCOVERED_AT`: `2026-09-22T04:58:00Z`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `2`
+- `STAGE`: `3 — Tạo ảnh phân cảnh bằng Google Flow`
+- `JOB/SCENE`: `background image / Flow project=cf9458d1-5b5c-4672-9cc2-bc723ef6df1d`
+- `FIRST_DIVERGENCE`: `FLOW_ASSET_PICKER_SELECTOR_MISMATCH`
+- `SYMPTOM`: `The Flow project contained the requested source asset, but the automation reported that the exact reference image could not be found.`
+- `LAST_CONFIRMED_GOOD_STATE`: `Flow project opened and the source image was visible in the current project media UI.`
+- `EXPECTED_STATE`: `The asset picker identifies the exact asset and binds it before prompt submission.`
+- `ACTUAL_STATE`: `The current Flow UI rendered the picker inside a CDK overlay with role=option tiles, while the old selector set only searched the previous popover container and text-only candidates.`
+- `ROOT_CAUSE`: `The asset-picker locator did not cover the current Flow overlay/role=option DOM contract and could not match asset identity by aria-label/title.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `ERROR_THROW_SITE`: `electron/main.cjs findFlowAssetPoint / asset-picker selection`
+- `RECOMMENDED_REPAIR`: `Support the current overlay containers and role=option asset tiles; match stable accessible identity attributes, then fail closed if the exact asset is absent.`
+- `CHOSEN_REPAIR`: `Added CDK overlay/dialog and role=option selectors plus aria-label/title/text identity matching.`
+- `FILES_CHANGED`: `electron/main.cjs; electron/flow-prompt-input.test.ts`
+- `TESTS_ADDED`: `Regression contract for current Flow overlay and role=option asset selection.`
+- `TEST_RESULTS`: `PASS — electron/flow-prompt-input.test.ts 16/16; npm run typecheck PASS; node --check electron/main.cjs PASS; git diff --check PASS.`
+- `LIVE_VALIDATION`: `PASS — the exact reference asset was found/bound in the live Flow project after the locator repair.`
+- `STATUS`: `FIXED`
+- `RESUME_CHECKPOINT`: `Same run remains at Stage 3 image generation; no new run created.`
+
+### ISSUE-039
+
+- `ISSUE_ID`: `ISSUE-039`
+- `REGRESSION_OF`: `ISSUE-038`
+- `DISCOVERED_AT`: `2026-09-22T05:00:00Z`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `2`
+- `STAGE`: `3 — Tạo ảnh phân cảnh bằng Google Flow`
+- `JOB/SCENE`: `background image retrieval / Flow project=cf9458d1-5b5c-4672-9cc2-bc723ef6df1d`
+- `FIRST_DIVERGENCE`: `FLOW_IMAGE_RESPONSE_CAPTURE_SOURCE_STALE`
+- `SYMPTOM`: `Flow accepted the image generation action, but the app waited on a stale flow-content image URL and timed out instead of reading the current image source exposed by the live page.`
+- `LAST_CONFIRMED_GOOD_STATE`: `The exact asset was bound, prompt was accepted, and Flow exposed a generated image in the live DOM.`
+- `EXPECTED_STATE`: `The app captures the current generated image through the native CDP path and persists it.`
+- `ACTUAL_STATE`: `The first response source was a transient/stale flow-content URL; page-context fetch was not a reliable capture path because of cross-origin restrictions.`
+- `ROOT_CAUSE`: `Image retrieval did not prioritize current live DOM media sources and native CDP capture before attempting the stale candidate URL.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `ERROR_THROW_SITE`: `electron/main.cjs getFlowImageBuffer / readFlowMediaBufferThroughCdp`
+- `RECOMMENDED_REPAIR`: `Collect current live DOM image sources and attempt native CDP media capture first, while retaining the existing candidate fallback.`
+- `CHOSEN_REPAIR`: `Prioritized live DOM sources and native CDP image capture before the fallback candidate reader.`
+- `FILES_CHANGED`: `electron/main.cjs; electron/flow-prompt-input.test.ts`
+- `TESTS_ADDED`: `Regression contract requiring live-source CDP capture before stale candidate fallback.`
+- `TEST_RESULTS`: `PASS — electron/flow-prompt-input.test.ts 16/16; npm run typecheck PASS; node --check electron/main.cjs PASS; git diff --check PASS.`
+- `LIVE_VALIDATION`: `PASS for application-side capture path — the run advanced to the provider response stage; the remaining failure was the separate external provider block recorded below.`
+- `STATUS`: `FIXED`
+- `RESUME_CHECKPOINT`: `Same run remains at Stage 3 image generation; no new run created.`
+
+### ISSUE-040
+
+- `ISSUE_ID`: `ISSUE-040`
+- `REGRESSION_OF`: `ISSUE-026 / ISSUE-038 / ISSUE-039`
+- `DISCOVERED_AT`: `2026-09-22T05:01:22.283Z`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `3`
+- `STAGE`: `3 — Tạo ảnh phân cảnh bằng Google Flow`
+- `JOB/SCENE`: `background image generation / Flow project=cf9458d1-5b5c-4672-9cc2-bc723ef6df1d`
+- `FIRST_DIVERGENCE`: `FLOW_IMAGE_PROVIDER_UNUSUAL_ACTIVITY_BLOCK`
+- `SYMPTOM`: `After the repaired runtime found the exact source asset, accepted the validated prompt, and triggered Generate, Google Flow displayed “We noticed some unusual activity. Please visit the Help Center for more information. You have not been charged for this generation.”`
+- `LAST_CONFIRMED_GOOD_STATE`: `Stage 1 and Stage 2 were persisted; the Flow project opened; source binding and prompt submission completed through the current-worktree Electron/CDP runtime.`
+- `EXPECTED_STATE`: `Flow creates an image job/result and the app persists the background plus four scene images.`
+- `ACTUAL_STATE`: `The provider rejected Generate before creating a provider job or starting generation. The existing one bounded reload/rebind/resend recovery was consumed; the run was settled as FAILED with executionLease=null. Stage 3 is incomplete and Stage 4/5 were not started.`
+- `ROOT_CAUSE`: `Google Flow external anti-abuse/unusual-activity restriction. The application-side asset-picker and image-capture repairs passed before the provider rejected the generation.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `ERROR_THROW_SITE`: `Google Flow provider UI / electron/main.cjs image-generation wait path`
+- `FAILURE_CALL_CHAIN`: `Same-run Stage 3 → current-worktree CDP runtime → Flow project ready → exact asset bound → prompt accepted → Generate → provider unusual-activity block → bounded reload/rebind/resend → provider block remained → structured failure persisted.`
+- `RELEVANT_EVIDENCE`: `Live Flow DOM showed the exact provider message; generationStarted=false; providerJobCreated=false; browser remained authenticated; authenticated run patch readback shows status=FAILED, lastCompletedStage=2, failedStage=3, resumeTarget=IMAGES, attemptCount=3, executionLease=null, failureCode=FLOW_PROVIDER_UNUSUAL_ACTIVITY, autoRetryAllowed=false.`
+- `RECOMMENDED_REPAIR`: `No further code retry and no anti-abuse bypass. Keep the same run paused at IMAGES; allow normal/manual provider recovery, then require an explicit CONTINUE. Do not rotate account/profile/IP, spoof the browser, or delete cookies.`
+- `CHOSEN_REPAIR`: `None — this is an external provider blocker. The repaired application path is preserved and further automatic retries are disabled.`
+- `FILES_CHANGED`: `electron/main.cjs; electron/flow-prompt-input.test.ts; docs/live-debug/LIVE_DEBUG_LEDGER.md; docs/live-debug/LIVE_DEBUG_STATE.json`
+- `TESTS_ADDED`: `ISSUE-038/039 source-contract regressions.`
+- `TEST_RESULTS`: `PASS — 16/16 targeted tests; typecheck PASS; syntax PASS; git diff --check PASS.`
+- `LIVE_VALIDATION`: `PASS for diagnosis and failure classification; FAIL for full Stage 3 because Google Flow blocked the provider operation before job creation.`
+- `STRUCTURED_PROVIDER_ERROR`: `FLOW_PROVIDER_UNUSUAL_ACTIVITY`
+- `AUTO_RETRY_ALLOWED`: `NO`
+- `STAGE_3_CHECKPOINT_PRESERVED`: `YES — lastCompletedStage=2; resumeTarget=IMAGES; executionLease=null; Stage 3 incomplete.`
+- `STATUS`: `OPEN — EXTERNAL_PROVIDER_BLOCKED`
+- `RESUME_CHECKPOINT`: `runStatus=FAILED; lastCompletedStage=2; failedStage=3; resumeTarget=IMAGES; attemptCount=3; contentProjectId=cmuc5pkc7000kk5ycb2lg2ksz; executionLease=null.`
+- `NOTES`: `No new AutomationRun, database reset, account/profile change, cookie deletion, IP/proxy rotation, anti-abuse bypass, Stage 4 continuation, or Stage 5 continuation was performed.`
+
 ## RELEASE v1.0.6
 
 - `RELEASE_CANDIDATE_READY`: `YES`
 - `PACKAGING`: `PASS — Modeling.AI.Setup.1.0.6.exe, latest.yml and blockmap generated.`
 - `CLEAN_INSTALL_SMOKE`: `PASS — isolated startup and restart completed without accessing production AppData.`
 - `PACKAGED_MAIN_MODULES`: `PASS — main.cjs, user-data.cjs, temp-cleanup.cjs, ipc-contract.cjs, dev-runtime-identity.cjs, and gemini-error-transport.cjs are present in app.asar.`
+
+### ISSUE-041
+
+- `ISSUE_ID`: `ISSUE-041`
+- `DISCOVERED_AT`: `2026-09-22T07:03:08Z`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `3`
+- `STAGE`: `3 — IMAGE GENERATION`
+- `FIRST_DIVERGENCE`: `STAGE_3_PROVIDER_DESIGN_MISMATCH`
+- `SYMPTOM`: `Stage 3 used Google Flow for image generation, exposing image creation to Flow's external unusual-activity block before the video-only stage.`
+- `EXPECTED_STATE`: `Stage 3 creates the background and four scene reference images through Gemini; Google Flow is used only for Stage 4 video generation.`
+- `ROOT_CAUSE`: `The Stage 3 implementation selected the video provider for an image-generation responsibility, contrary to the revised workflow boundary.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `CHOSEN_REPAIR`: `Route Stage 3 slot generation through the existing Gemini CDP job bridge; retain Google Flow exclusively in Stage 4. Add a direct bare Gemini /app composer-ready path and a development FFmpeg fallback needed by the Gemini image crop path.`
+- `FILES_CHANGED`: `src/components/viral-dashboard.tsx; src/components/viral-dashboard.ui.test.ts; electron/main.cjs; electron/flow-prompt-input.test.ts; docs/live-debug/LIVE_DEBUG_LEDGER.md; docs/live-debug/LIVE_DEBUG_STATE.json`
+- `TESTS_ADDED`: `Stage-3 provider contract regression; bare Gemini composer-ready regression; development FFmpeg discovery regression.`
+- `TEST_RESULTS`: `PASS — 36 targeted tests; npm run typecheck PASS; node --check electron/main.cjs PASS; git diff --check PASS.`
+- `LIVE_VALIDATION`: `PASS — Gemini CDP created and persisted background-0.png plus scene-1.png through scene-4.png (five non-empty image files) in the canonical app store. Flow was not called during Stage 3.`
+- `STATUS`: `FIXED`
+- `RESUME_CHECKPOINT`: `runStatus=PAUSED; lastCompletedStage=3; failedStage=null; resumeTarget=null; executionLease=null; videos/final-video remain pending.`
+- `NOTES`: `The prior Flow provider block remains historical evidence only. Stage 4 will use Flow only when explicitly requested; it was not started by this repair.`
+
+### ISSUE-042
+
+- `ISSUE_ID`: `ISSUE-042`
+- `DISCOVERED_AT`: `2026-09-22T07:14:47Z`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `4`
+- `STAGE`: `4 — VIDEO GENERATION`
+- `JOB/SCENE`: `Scene 1`
+- `FIRST_DIVERGENCE`: `FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK`
+- `SYMPTOM`: `Flow accepted the application-side setup for Scene 1, including its Gemini-created start frame and a submitted Generate action, but displayed its unusual-activity provider block.`
+- `LAST_CONFIRMED_GOOD_STATE`: `Stages 1–3 were complete; five Gemini images were persisted. Flow opened its project, configured video mode, and attached scene-1.png as the Start frame.`
+- `EXPECTED_STATE`: `Flow creates a provider video job for Scene 1, then the application downloads, verifies, and persists scene-1.mp4 before proceeding.`
+- `ACTUAL_STATE`: `The initial Generate did not yield a provider job. The existing bounded recovery reloaded the Flow project, rebound the reference image, and sent the same request once more. Flow again returned unusual activity; generationStarted=false and providerJobCreated=false.`
+- `ROOT_CAUSE`: `Google Flow's provider anti-abuse system rejected the generation operation after a valid local application path.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `ERROR_THROW_SITE`: `Google Flow provider result after bounded reload/resend recovery.`
+- `FAILURE_CALL_CHAIN`: `Stage 4 → Scene 1 image-reference binding PASS → Generate → Flow unusual-activity block → one reload/rebind/resend → Flow unusual-activity block → settled failed checkpoint.`
+- `RELEVANT_EVIDENCE`: `Live CDP progress recorded Flow opening, video configuration, scene-1.png upload/reference binding, initial submission, exactly one reload/resend, and terminal provider message. The user screenshot also shows the Flow project with scene-1.png attached.`
+- `RECOMMENDED_REPAIR`: `Do not bypass Flow controls or exceed the one-recovery retry budget. Let the user confirm that manual Flow generation is accepted normally, then resume this same run from VIDEOS; the app will preserve Stage 3 and not recreate images.`
+- `CHOSEN_REPAIR`: `No code patch. The structured non-retryable provider-block handling and Stage 4 checkpoint settlement were applied.`
+- `FILES_CHANGED`: `docs/live-debug/LIVE_DEBUG_LEDGER.md; docs/live-debug/LIVE_DEBUG_STATE.json`
+- `TESTS_ADDED`: `None — external provider recurrence.`
+- `TEST_RESULTS`: `Checkpoint persistence PASS — status=FAILED; lastCompletedStage=3; failedStage=4; resumeTarget=VIDEOS; executionLease=null.`
+- `LIVE_VALIDATION`: `Application setup PASS; provider generation FAIL after the one permitted reload/resend.`
+- `STATUS`: `OPEN — EXTERNAL_PROVIDER_BLOCKED`
+- `RESUME_CHECKPOINT`: `Same run, Stage 4 / VIDEOS; Scene 1 incomplete; Stages 1–3 retained; Stage 5 pending.`
+- `NOTES`: `No third automatic submission was sent. No account/profile/IP/cookie change or anti-abuse bypass was performed.`
+
+### ISSUE-043
+
+- `ISSUE_ID`: `ISSUE-043`
+- `REGRESSION_OF`: `ISSUE-042`
+- `DISCOVERED_AT`: `2026-09-22T07:26:10Z`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `5`
+- `STAGE`: `4 — VIDEO GENERATION`
+- `JOB/SCENE`: `Scene 2`
+- `FIRST_DIVERGENCE`: `FLOW_PROVIDER_UNUSUAL_ACTIVITY_BLOCK`
+- `SYMPTOM`: `The repaired retry path waited longer after reload, but Flow still blocked Scene 2. The second-send branch also needed to preserve the structured provider error instead of returning the generic video-failure message.`
+- `LAST_CONFIRMED_GOOD_STATE`: `Scene 1 was manually completed and persisted as scene-1.mp4; Stages 1–3 remained complete.`
+- `EXPECTED_STATE`: `After the one bounded reload/rebind/resend, Flow either returns a video or the structured provider block is surfaced and the checkpoint settles.`
+- `ACTUAL_STATE`: `Flow again returned no provider job after the bounded resend. The run was settled with Scene 1 preserved and Scene 2 incomplete.`
+- `ROOT_CAUSE`: `External Flow anti-abuse state remained active for the automated Scene 2 operation; the application also had a generic fallback on the post-recovery failed-state branch.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `CHOSEN_REPAIR`: `Increase the post-reload stabilization window to 10 seconds, suppress stale provider-banner detection only during that bounded window, and reconstruct FLOW_PROVIDER_UNUSUAL_ACTIVITY when the post-recovery state still carries the provider block.`
+- `FILES_CHANGED`: `electron/main.cjs; electron/flow-prompt-input.test.ts; docs/live-debug/LIVE_DEBUG_LEDGER.md; docs/live-debug/LIVE_DEBUG_STATE.json`
+- `TESTS_ADDED`: `Recovery-settle and structured post-recovery provider-error regression.`
+- `TEST_RESULTS`: `PASS — 19/19 targeted Flow tests; typecheck PASS; syntax PASS; git diff --check PASS.`
+- `LIVE_VALIDATION`: `Application retry path executed with the new wait; provider still blocked Scene 2. No third retry was attempted.`
+- `STATUS`: `OPEN — EXTERNAL_PROVIDER_BLOCKED`
+- `RESUME_CHECKPOINT`: `runStatus=FAILED; lastCompletedStage=3; failedStage=4; resumeTarget=VIDEOS; executionLease=null; Scene 1 persisted; Scenes 2–4 incomplete.`
+- `NOTES`: `No account/profile/IP/cookie change or anti-abuse bypass was performed.`
+
+### ISSUE-044
+
+- `ISSUE_ID`: `ISSUE-044`
+- `REGRESSION_OF`: `ISSUE-043`
+- `DISCOVERED_AT`: `2026-09-22T15:06:27+07:00`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `7`
+- `STAGE`: `4 — VIDEO GENERATION`
+- `JOB/SCENE`: `Scene 3 pacing hardening`
+- `FIRST_DIVERGENCE`: `FLOW_INTERACTION_CADENCE_TOO_FAST (SUSPECTED)`
+- `SYMPTOM`: `The provider block persisted after the prior bounded recovery. The user reported that manual reload-and-send succeeds and requested slower, human-paced Flow interactions.`
+- `LAST_CONFIRMED_GOOD_STATE`: `Scene 2 was manually completed and persisted at the canonical application video path.`
+- `EXPECTED_STATE`: `Flow transitions are separated by observable UI waits before upload, prompt entry, and Generate; retry budget remains one.`
+- `ACTUAL_STATE`: `Pacing repair was applied and exercised live for Scene 3. Flow completed the application-side setup, but after the paced send and the existing one bounded reload/rebind/resend it again returned the unusual-activity block before creating a provider job.`
+- `ROOT_CAUSE`: `Rapid application-side Flow action cadence is a user-reported contributing-factor hypothesis; Google provider anti-abuse remains the confirmed external blocker and this hypothesis is not yet proven.`
+- `ROOT_CAUSE_CONFIDENCE`: `PROVISIONAL`
+- `RECOMMENDED_REPAIR`: `Use bounded human-paced waits at Flow control, upload, prompt, escape, and pre-Generate boundaries without changing retry or account behavior.`
+- `CHOSEN_REPAIR`: `Added explicit Flow pacing constants and boundary waits; preserved MAX_FLOW_PROVIDER_RELOAD_RECOVERY=1 and no anti-abuse bypass.`
+- `FILES_CHANGED`: `electron/main.cjs; electron/flow-prompt-input.test.ts; docs/live-debug/LIVE_DEBUG_LEDGER.md`
+- `TESTS_ADDED`: `Flow human-paced interaction contract.`
+- `TEST_RESULTS`: `PASS — 20/20 targeted Flow tests; typecheck PASS; syntax PASS; git diff --check PASS.`
+- `LIVE_VALIDATION`: `FAIL for Scene 3 provider generation; PASS for application-side pacing, exact scene-3 image binding, structured provider-block detection, one bounded recovery, and safe settlement. generationStarted=false; providerJobCreated=false; no third submission was attempted.`
+- `STATUS`: `OPEN — EXTERNAL_PROVIDER_BLOCKED`
+- `RESUME_CHECKPOINT`: `Same run; status=FAILED; lastCompletedStage=3; failedStage=4; resumeTarget=VIDEOS; attempt=7; completedVideoScenes=[1,2]; stage4Scene=3; executionLease=null; AUTO_RETRY_ALLOWED=NO.`
+- `NOTES`: `The slower interaction repair did not clear the provider block. No account/profile/IP/cookie change, anti-abuse bypass, database reset, or Stage 5 continuation was performed.`
+
+### ISSUE-045
+
+- `ISSUE_ID`: `ISSUE-045`
+- `REGRESSION_OF`: `ISSUE-044`
+- `DISCOVERED_AT`: `2026-09-22T08:34:28.928Z`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `8`
+- `STAGE`: `4 — VIDEO GENERATION`
+- `JOB/SCENE`: `Scene 4`
+- `FIRST_DIVERGENCE`: `FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK`
+- `SYMPTOM`: `Scene 3 was manually generated, captured, persisted and acknowledged by the app. The paced automated Scene 4 flow completed project setup, reference-image binding and Generate, then Flow returned its unusual-activity message after the bounded recovery.`
+- `LAST_CONFIRMED_GOOD_STATE`: `Stages 1–3 complete; scene-1.mp4, scene-2.mp4 and scene-3.mp4 are present in the canonical app video store; Flow accepted the Scene 4 setup.`
+- `EXPECTED_STATE`: `Flow creates a provider job for Scene 4, after which the app downloads and verifies scene-4.mp4.`
+- `ACTUAL_STATE`: `generationStarted=false and providerJobCreated=false. Flow returned “We noticed some unusual activity. Please visit the Help Center for more information. You have not been charged for this generation.” The one bounded recovery was consumed; no third submission was made.`
+- `ROOT_CAUSE`: `Google Flow provider anti-abuse restriction remains active for the automated video-generation operation. This is not an upload/reference-image failure.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `RECOMMENDED_REPAIR`: `Do not bypass or increase retries. Keep the same run paused at Scene 4; perform one normal/manual Flow generation when the provider accepts the account again, then import the result through the existing manual checkpoint.`
+- `CHOSEN_REPAIR`: `No provider-bypass patch. The human-paced interaction path was exercised; structured provider-block settlement was corrected so the primary error is preserved.`
+- `FILES_CHANGED`: `docs/live-debug/LIVE_DEBUG_LEDGER.md; docs/live-debug/LIVE_DEBUG_STATE.json; .tmp-capture-manual-scene3.cjs; .tmp-save-manual-scene3.cjs; .tmp-run-scene3.cjs; .tmp-settle-stage4-provider-block.cjs`
+- `TESTS_ADDED`: `None for the external provider block; existing 20/20 Flow tests remain PASS.`
+- `TEST_RESULTS`: `PASS — Scene 3 manual checkpoint/import; typecheck and prior targeted pacing tests PASS. Scene 4 provider generation FAIL.`
+- `LIVE_VALIDATION`: `FAIL at provider generation; application-side setup and safe one-recovery handling PASS.`
+- `STATUS`: `OPEN — EXTERNAL_PROVIDER_BLOCKED`
+- `RESUME_CHECKPOINT`: `status=FAILED; lastCompletedStage=3; failedStage=4; resumeTarget=VIDEOS; attempt=8; completedVideoScenes=[1,2,3]; stage4Scene=4; executionLease=null; AUTO_RETRY_ALLOWED=NO.`
+- `NOTES`: `No account/profile/IP/cookie change, anti-abuse bypass, database reset, or Stage 5 continuation was performed.`
+
+### ISSUE-046
+
+- `ISSUE_ID`: `ISSUE-046`
+- `REGRESSION_OF`: `None — new Gemini Veo API route for the same Stage-4 checkpoint.`
+- `DISCOVERED_AT`: `2026-09-22T09:17:01.677Z`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `9`
+- `STAGE`: `4 — VIDEO GENERATION`
+- `JOB/SCENE`: `Scene 4 — Gemini Veo API enqueue`
+- `FIRST_DIVERGENCE`: `GEMINI_VEO_API_CREDENTIAL_MISSING`
+- `SYMPTOM`: `The run was resumed at the preserved Stage-4 Scene-4 checkpoint with provider=gemini. The application rejected the request before creating a background job and returned API_PROVIDER_UNAVAILABLE: Chưa kết nối Veo/Google Video API; có thể dùng Flow fallback.`
+- `LAST_CONFIRMED_GOOD_STATE`: `Stages 1–3 are complete; scene-1.mp4, scene-2.mp4 and scene-3.mp4 exist in the canonical generated-video store; the same run checkpoint had completedVideoScenes=[1,2,3] and executionLease=null before this attempt.`
+- `EXPECTED_STATE`: `The Gemini Veo API route validates an active VEO or GEMINI video-generation connection, enqueues exactly one Scene-4 job, then the worker creates and persists scene-4.mp4.`
+- `ACTUAL_STATE`: `GET /api/v1/ai-connections returned only one active FACEBOOK/PLATFORM connection. No active GEMINI or VEO connection existed for VIDEO_GENERATION, so no queueJobId was created, generationStarted=false, providerJobCreated=false, and no provider request was sent.`
+- `ROOT_CAUSE`: `The Gemini Veo API route has no active VEO/GEMINI video-generation credential configured for the authenticated user. This is confirmed by the provider connection inventory and the route's requireProviderApiKey guard.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `ERROR_THROW_SITE`: `src/modules/generation/google-api-pipeline.ts — enqueueProjectVideosWithVeoApi() provider credential guard.`
+- `FAILURE_CALL_CHAIN`: `Same-run Stage 4 resume → provider=gemini POST /api/v1/projects/{projectId}/videos → requireProviderApiKey(VEO,GEMINI,VIDEO_GENERATION) → API_PROVIDER_UNAVAILABLE → no background job → run settled FAILED.`
+- `RELEVANT_EVIDENCE`: `HTTP 503 response code API_PROVIDER_UNAVAILABLE; authenticated /api/v1/ai-connections response contained only FACEBOOK/PLATFORM with no GEMINI/VEO entry; run readback status=FAILED, attemptCount=9, lastCompletedStage=3, failedStage=4, resumeTarget=VIDEOS, executionLease=null; checkpoint completedVideoScenes=[1,2,3].`
+- `RECOMMENDED_REPAIR`: `Add and verify one active VEO or GEMINI video-generation connection in the app's AI settings for this account, without exposing or logging the key. Then issue an explicit CONTINUE for the same run; do not retry the failed enqueue until the connection inventory confirms the credential.`
+- `CHOSEN_REPAIR`: `None — this run turn only performed the requested execution and safe settlement. No credential was created or changed automatically.`
+- `FILES_CHANGED`: `docs/live-debug/LIVE_DEBUG_LEDGER.md; docs/live-debug/LIVE_DEBUG_STATE.json`
+- `TESTS_ADDED`: `None — provider credential/configuration blocker discovered at runtime.`
+- `TEST_RESULTS`: `Not applicable for this execution-only failure; the provider guard and authenticated connection inventory were read and matched.`
+- `LIVE_VALIDATION`: `FAIL before job creation; no Gemini Veo generation request was sent.`
+- `AUTO_RETRY_ALLOWED`: `NO`
+- `STAGE_4_CHECKPOINT_PRESERVED`: `YES — lastCompletedStage=3; resumeTarget=VIDEOS; completedVideoScenes=[1,2,3]; executionLease=null; Scene 4 remains incomplete.`
+- `STATUS`: `OPEN — CONFIGURATION_CREDENTIAL_MISSING`
+- `RESUME_CHECKPOINT`: `Same run; attempt=9; status=FAILED; lastCompletedStage=3; failedStage=4; resumeTarget=VIDEOS; stage4Provider=GEMINI_VEO_API; executionLease=null.`
+- `NOTES`: `No Flow request, no Gemini Veo provider request, no retry, no account/profile/cookie/IP change, no database reset, and no Stage 5 continuation were performed.`
+
+### ISSUE-047
+
+- `ISSUE_ID`: `ISSUE-047`
+- `REGRESSION_OF`: `ISSUE-045`
+- `DISCOVERED_AT`: `2026-09-22T09:27:47.067Z`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `10`
+- `STAGE`: `4 — VIDEO GENERATION`
+- `JOB/SCENE`: `Scene 4 — Google Flow via Electron/CDP`
+- `FIRST_DIVERGENCE`: `FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK`
+- `SYMPTOM`: `The same-run Stage-4 Scene-4 job was sent through the browser/CDP Flow path without an API key. Flow completed application-side project setup, reference binding and Generate submission, then returned “We noticed some unusual activity. Please visit the Help Center for more information. You have not been charged for this generation.”`
+- `LAST_CONFIRMED_GOOD_STATE`: `Stages 1–3 are complete and scene-1.mp4, scene-2.mp4 and scene-3.mp4 remain present in the canonical app video store. The Flow queue job was claimed by the current-worktree Electron/CDP bridge.`
+- `EXPECTED_STATE`: `Flow creates a provider video job for Scene 4, the app captures the result, validates it and persists scene-4.mp4.`
+- `ACTUAL_STATE`: `Flow provider generationStarted=false and providerJobCreated=false. The application queue job failed with structured FLOW_PROVIDER_UNUSUAL_ACTIVITY after the existing one bounded reload/rebind/resend recovery; no video file was persisted.`
+- `ROOT_CAUSE`: `Google Flow's external anti-abuse/unusual-activity system rejected the Scene-4 generation after the browser/CDP path successfully completed local setup and submission.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `ERROR_THROW_SITE`: `Google Flow provider result in electron/main.cjs waitForFlowVideoWithRecovery() after the bounded recovery.`
+- `FAILURE_CALL_CHAIN`: `Same-run resume → provider=flow POST /api/v1/projects/{projectId}/videos → desktop.flow.videos queue → Electron/CDP bridge claim → Flow setup/upload/start-frame/prompt/Generate → provider unusual-activity block → one bounded recovery → provider block remains → queue failed → run settled FAILED.`
+- `RELEVANT_EVIDENCE`: `Queue status endpoint returned status=failed, provider=flow-browser, error=FLOW_PROVIDER_UNUSUAL_ACTIVITY; run readback status=FAILED, attemptCount=10, lastCompletedStage=3, failedStage=4, resumeTarget=VIDEOS, executionLease=null; generationStarted=false; providerJobCreated=false; completedVideoScenes=[1,2,3].`
+- `RECOMMENDED_REPAIR`: `Do not retry automatically or bypass Flow anti-abuse controls. Use a normal/manual Flow generation when the provider accepts the account, then import the confirmed Scene-4 result through the existing manual checkpoint; otherwise keep this run paused.`
+- `CHOSEN_REPAIR`: `None — this execution turn only used the CDP route and safely settled the failure. No account/profile/IP/cookie change or provider-bypass patch was made.`
+- `FILES_CHANGED`: `docs/live-debug/LIVE_DEBUG_LEDGER.md; docs/live-debug/LIVE_DEBUG_STATE.json`
+- `TESTS_ADDED`: `None — external provider blocker reproduced through the existing CDP path.`
+- `TEST_RESULTS`: `CDP execution reached Flow, claim and submission; provider generation failed before job creation.`
+- `LIVE_VALIDATION`: `FAIL at Flow provider generation; local CDP setup and one bounded recovery were exercised.`
+- `AUTO_RETRY_ALLOWED`: `NO`
+- `STAGE_4_CHECKPOINT_PRESERVED`: `YES — lastCompletedStage=3; resumeTarget=VIDEOS; completedVideoScenes=[1,2,3]; executionLease=null; Scene 4 remains incomplete.`
+- `STATUS`: `OPEN — EXTERNAL_PROVIDER_BLOCKED`
+- `RESUME_CHECKPOINT`: `Same run; attempt=10; status=FAILED; lastCompletedStage=3; failedStage=4; resumeTarget=VIDEOS; stage4Provider=GOOGLE_FLOW_CDP; executionLease=null.`
+- `NOTES`: `The missing Gemini/Veo API credential was not involved in this attempt. No API request was made. No third automatic submission, Stage 5 continuation, database reset, account/profile change or anti-abuse bypass was performed.`
+
+### ISSUE-048
+
+- `ISSUE_ID`: `ISSUE-048`
+- `DISCOVERED_AT`: `2026-09-22T16:44:13+07:00`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `10`
+- `STAGE`: `4 — VIDEO GENERATION ROUTING`
+- `FIRST_DIVERGENCE`: `GEMINI_VIDEO_PROVIDER_NOT_CDP`
+- `SYMPTOM`: `The Gemini video option was routed to the Veo API enqueue path, while the requested browser workflow requires Electron/CDP interaction.`
+- `LAST_CONFIRMED_GOOD_STATE`: `The existing Flow browser bridge and Electron/CDP video executor are available and already used by the Flow route.`
+- `EXPECTED_STATE`: `Selecting Gemini for video generation enqueues a browser bridge job marked gemini-cdp; Electron claims that job and performs the generation through the CDP-controlled browser.`
+- `ACTUAL_STATE`: `The Gemini selection called enqueueProjectVideosWithVeoApi(), requiring a configured Veo/Gemini API connection before any browser action.`
+- `ROOT_CAUSE`: `The provider-selection branch still pointed Gemini to the legacy Veo API implementation instead of the existing Electron/CDP bridge.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `RECOMMENDED_REPAIR`: `Route Gemini video selection through enqueueBrowserFlowJob with an explicit gemini-cdp provider marker; keep the legacy API worker separate and do not use it for this UI option.`
+- `CHOSEN_REPAIR`: `Moved the Gemini video POST branch to the desktop.flow.videos CDP queue, persisted gemini-cdp in the bridge payload, added provider reporting as gemini-browser-cdp, updated UI/status text, and fixed the direct Gemini video IPC contract to include channelId.`
+- `FILES_CHANGED`: `src/app/api/v1/projects/[id]/videos/route.ts; src/modules/generation/browser-flow-bridge.ts; src/components/viral-dashboard.tsx; src/components/viral-dashboard.ui.test.ts; src/modules/generation/video-provider-routing.test.ts; electron/preload.cjs`
+- `TESTS_ADDED`: `Gemini provider route must use CDP bridge; bridge provider marker persistence; channel-aware Gemini video IPC contract.`
+- `TEST_RESULTS`: `PASS — targeted provider/UI tests 26/26; npm run typecheck PASS; Electron syntax checks PASS; git diff --check PASS; npm run build PASS.`
+- `LIVE_VALIDATION`: `Not run — this was a routing/code repair only; the active production run remains settled at the existing Stage-4 external provider checkpoint.`
+- `STATUS`: `FIXED`
+- `RESUME_CHECKPOINT`: `Existing ISSUE-047 remains active: runStatus=FAILED; lastCompletedStage=3; resumeTarget=VIDEOS; executionLease=null; readyToContinue=false.`
+- `NOTES`: `This repair removes the Gemini Veo API credential dependency from the Gemini UI video route. It does not bypass or clear the separate Google Flow provider unusual-activity block.`
+
+### ISSUE-049
+
+- `ISSUE_ID`: `ISSUE-049`
+- `REGRESSION_OF`: `ISSUE-047`
+- `DISCOVERED_AT`: `2026-09-22T11:01:50.845Z`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `11`
+- `STAGE`: `4 — VIDEO GENERATION`
+- `JOB/SCENE`: `Scene 4 — Gemini browser route through Electron/CDP`
+- `FIRST_DIVERGENCE`: `FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK`
+- `SYMPTOM`: `The Gemini browser/CDP queue accepted Scene 4, Electron performed the Flow UI setup, reference binding and Generate action, but the provider returned the unusual-activity block before creating a generation job.`
+- `LAST_CONFIRMED_GOOD_STATE`: `Scene 1–3 MP4 files remained persisted; the same run checkpoint was resumable with executionLease=null.`
+- `EXPECTED_STATE`: `The Gemini-selected CDP job creates and downloads Scene 4, verifies a non-empty MP4 and persists it without changing completed scenes.`
+- `ACTUAL_STATE`: `Queue eba4c3e5-995a-4ee4-9b97-b57223dfdae1 completed as failed with FLOW_PROVIDER_UNUSUAL_ACTIVITY; generationStarted=false, providerJobCreated=false, recoveryAttempt=1/1, and no Scene 4 file was persisted.`
+- `ROOT_CAUSE`: `The external Google Flow anti-abuse/unusual-activity system still rejected the browser generation. The Gemini selection correctly used the CDP bridge, but the current Electron CDP video executor operates the Google Flow UI, so the provider-level block remains.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `ERROR_THROW_SITE`: `electron/main.cjs — waitForFlowVideoWithRecovery() after the bounded reload/rebind/resend recovery.`
+- `FAILURE_CALL_CHAIN`: `Same run continuation → provider=gemini POST → gemini-cdp browser bridge job → Electron claim → Flow project/upload/start-frame/prompt/Generate → provider unusual-activity block → one bounded recovery → provider block remains → job failed → run settled.`
+- `RELEVANT_EVIDENCE`: `POST /api/v1/projects/cmuc5pkc7000kk5ycb2lg2ksz/videos returned 202 with provider=gemini-browser-cdp; queue claim succeeded; queue payload provider=gemini-cdp; bridgeFailure.code=FLOW_PROVIDER_UNUSUAL_ACTIVITY; details.flowProjectUrl was created; generateTriggered=true; generationStarted=false; providerJobCreated=false; recoveryAttempt=1; recoveryBudget=1.`
+- `RECOMMENDED_REPAIR`: `Do not retry automatically or bypass the provider block. Use one normal/manual Flow generation when the provider accepts the account and import the confirmed Scene 4 MP4 through the existing checkpoint; otherwise keep the same run paused.`
+- `CHOSEN_REPAIR`: `None in this execution turn; the requested Gemini CDP route was exercised and safely settled.`
+- `FILES_CHANGED`: `docs/live-debug/LIVE_DEBUG_LEDGER.md; docs/live-debug/LIVE_DEBUG_STATE.json`
+- `TESTS_ADDED`: `None — execution-time external provider regression.`
+- `TEST_RESULTS`: `CDP route/queue PASS; provider generation FAIL before job creation; completed videos preserved.`
+- `LIVE_VALIDATION`: `FAIL at external provider generation; local app route, Electron claim, Flow setup and structured failure settlement PASS.`
+- `AUTO_RETRY_ALLOWED`: `NO`
+- `STAGE_4_CHECKPOINT_PRESERVED`: `YES — lastCompletedStage=3; resumeTarget=VIDEOS; completedVideoScenes=[1,2,3]; executionLease=null; Scene 4 remains incomplete.`
+- `STATUS`: `OPEN — EXTERNAL_PROVIDER_BLOCKED`
+- `RESUME_CHECKPOINT`: `Same run; attempt=11; status=FAILED; failedStage=4; resumeTarget=VIDEOS; stage4Provider=GEMINI_BROWSER_CDP; executionLease=null.`
+- `NOTES`: `No second automatic submission beyond the existing one bounded recovery. No account/profile/IP/cookie change, provider bypass, database reset or Stage 5 continuation was performed.`
+
+### ISSUE-050
+
+- `ISSUE_ID`: `ISSUE-050`
+- `REGRESSION_OF`: `ISSUE-036` / packaged FFmpeg resolver mismatch
+- `DISCOVERED_AT`: `2026-09-23T10:12:00+07:00`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `11`
+- `STAGE`: `5 — FINAL ASSEMBLY`
+- `JOB/SCENE`: `project=cmuc5pkc7000kk5ycb2lg2ksz / scenes 1–4`
+- `FIRST_DIVERGENCE`: `FINAL_ASSEMBLY_VIDEO_PROCESSOR_MISSING`
+- `SYMPTOM`: `The installed Electron runtime previously could not find FFmpeg during final assembly, although the packaged binary existed under resources\\app.asar.unpacked\\electron\\dist\\ffmpeg\\ffmpeg.exe.`
+- `LAST_CONFIRMED_GOOD_STATE`: `Four validated scene files were present in the canonical generated-videos store; Scene 4 had passed Start-frame identity validation.`
+- `EXPECTED_STATE`: `Electron resolves the FFmpeg binary shipped with the same package, renders final.mp4, validates it, and persists the completed Stage-5 checkpoint.`
+- `ACTUAL_STATE`: `The resolver checked resources\\ffmpeg and development __dirname\\dist paths but omitted the electron-builder app.asar.unpacked path. The patched current-worktree runtime resolved its bundled FFmpeg and rendered final.mp4 successfully.`
+- `ROOT_CAUSE`: `Packaged FFmpeg placement and Electron runtime resolution were not aligned; the asar-unpacked packaged path was missing from findFfmpegPath().`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `ERROR_THROW_SITE`: `electron/main.cjs findFfmpegPath() before final-video normalization`
+- `FAILURE_CALL_CHAIN`: `Stage-5 final assembly → video-editor:render-final → findFfmpegPath() → packaged path omitted → FINAL_ASSEMBLY_VIDEO_PROCESSOR_MISSING.`
+- `RELEVANT_EVIDENCE`: `Source now checks resources\\app.asar.unpacked\\electron\\dist\\ffmpeg\\ffmpeg.exe; targeted Flow/Electron tests 20/20 passed; typecheck and syntax checks passed; dev runtime identity matched the recovery worktree; direct Electron render returned status=completed; final.mp4 is 8,332,562 bytes, SHA-256 145FE9637C5E7F62E2894E560D50950C055EEA3740A2F3FDAAAFF00219217D23, duration 15.14s, H.264/AAC, 720x1280.`
+- `RECOMMENDED_REPAIR`: `Resolve the asar-unpacked FFmpeg candidate before machine-wide fallbacks and use the same bundled binary in packaged builds.`
+- `CHOSEN_REPAIR`: `Added the electron-builder app.asar.unpacked FFmpeg candidate to findFfmpegPath(), rebuilt the current renderer/runtime from the recovery worktree, and ran final assembly through the patched Electron bridge without regenerating scenes.`
+- `FILES_CHANGED`: `electron/main.cjs; electron/flow-prompt-input.test.ts; docs/live-debug/LIVE_DEBUG_LEDGER.md; docs/live-debug/LIVE_DEBUG_STATE.json`
+- `TESTS_ADDED`: `Extended ISSUE-042 FFmpeg resolver regression test to require the packaged-unpacked candidate.`
+- `TEST_RESULTS`: `PASS — targeted Electron tests 20/20; npm run typecheck PASS; node --check electron/main.cjs and electron/prepare-desktop.mjs PASS; final media probe PASS. A later packaging attempt with the dev server concurrently active did not complete the Next build and was not used for live validation.`
+- `LIVE_VALIDATION`: `PASS — current-worktree renderer identity matched; current-worktree Electron rendered the existing four scene files; app API PATCH persisted status=SUCCEEDED, lastCompletedStage=5, failedStage=null, resumeTarget=null, executionLease=null.`
+- `STATUS`: `FIXED`
+- `RESUME_CHECKPOINT`: `runStatus=SUCCEEDED; lastCompletedStage=5; failedStage=null; resumeTarget=null; attemptCount=11; finalVideoReady=true; executionLease=null.`
+- `NOTES`: `No scene was regenerated. No database reset, browser-profile change, cookie change, provider retry, or release publication was performed. Full regression/release-candidate work remains separate from this Stage-5 repair.`
+
+### ISSUE-051
+
+- `ISSUE_ID`: `ISSUE-051`
+- `DISCOVERED_AT`: `2026-09-23T10:42:09+07:00`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `11`
+- `STAGE`: `Release validation`
+- `FIRST_DIVERGENCE`: `FULL_REGRESSION_ENVIRONMENT_AND_CONTRACT_TEST_FAILURES`
+- `SYMPTOM`: `The first full regression run reported TEST_FFMPEG_NOT_FOUND in post-assembly media-handler suites, a stale queue-test expectation after Gemini browser jobs were added, and a broad strict-modeling assertion that rejected an unrelated CDP file-input helper.`
+- `LAST_CONFIRMED_GOOD_STATE`: `Stage 5 had already passed; targeted Electron tests, typecheck, syntax checks and final media validation were green.`
+- `EXPECTED_STATE`: `The complete test suite must discover the same bundled FFmpeg used by the application, assert the current queue exclusion contract, and scope prompt-contract assertions to the prompt compiler.`
+- `ACTUAL_STATE`: `Development test discovery omitted the repository-bundled FFmpeg candidate; the queue assertion expected only desktop.flow exclusion; the prompt assertion scanned the whole Electron main file.`
+- `ROOT_CAUSE`: `Release validation helpers and tests had not been updated for the final packaged-runtime/CDP changes.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `RECOMMENDED_REPAIR`: `Resolve the repository-bundled FFmpeg candidate during development, update the queue regression expectation, and avoid a file-wide assertion for an unrelated helper token.`
+- `CHOSEN_REPAIR`: `Added executable validation for electron/dist/ffmpeg before CapCut fallback, updated stale-job exclusion coverage for desktop.gemini jobs, and replaced the unrelated toUpperCase token with a case-insensitive node-name check.`
+- `FILES_CHANGED`: `src/modules/post-assembly-qa/smoke-ring-handler.ts; src/lib/jobs/queue.test.ts; electron/main.cjs; CHANGELOG.md; docs/live-debug/STABILIZATION_SUMMARY.md`
+- `TESTS_ADDED`: `Release validation of repository-bundled FFmpeg discovery; updated queue contract assertion.`
+- `TEST_RESULTS`: `PASS — targeted suites 219/219; full regression PASS after repair; typecheck PASS; lint PASS with warnings only; syntax PASS; build/package checks PASS.`
+- `LIVE_VALIDATION`: `Final Stage-5 MP4 remains valid and the release build uses the bundled FFmpeg runtime.`
+- `STATUS`: `FIXED`
+- `RESUME_CHECKPOINT`: `runStatus=SUCCEEDED; lastCompletedStage=5; resumeTarget=null; executionLease=null.`
+- `NOTES`: `No production data, browser profile, cookies, provider account, or historical successful run was reset or deleted.`
+
+### ISSUE-052
+
+- `ISSUE_ID`: `ISSUE-052`
+- `DISCOVERED_AT`: `2026-09-23T10:51:00+07:00`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `11`
+- `STAGE`: `Release packaging`
+- `FIRST_DIVERGENCE`: `PACKAGING_FFMPEG_SOURCE_DELETED_BEFORE_COPY`
+- `SYMPTOM`: `electron:build validated a configured FFmpeg located under electron/dist, then removed electron/dist before copying the same binary into the packaged output.`
+- `LAST_CONFIRMED_GOOD_STATE`: `Production Next build and full regression were PASS; the repository-bundled FFmpeg was valid before electron:prepare.`
+- `EXPECTED_STATE`: `electron:prepare must preserve or stage a configured FFmpeg source before recreating electron/dist.`
+- `ACTUAL_STATE`: `electron:prepare failed with ENOENT while copying electron/dist/ffmpeg/ffmpeg.exe after deleting that directory.`
+- `ROOT_CAUSE`: `The packaging script used an output-directory source without protecting it from its own cleanup step.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `RECOMMENDED_REPAIR`: `Stage a configured FFmpeg source outside electron/dist before cleanup, then copy the staged binary into the package.`
+- `CHOSEN_REPAIR`: `Added temporary staging for any FFmpeg source inside the packaging output directory and cleanup after the worker bundle is built.`
+- `FILES_CHANGED`: `electron/prepare-desktop.mjs; docs/live-debug/LIVE_DEBUG_LEDGER.md; docs/live-debug/STABILIZATION_SUMMARY.md`
+- `TESTS_ADDED`: `Packaging validation using the repository-bundled FFmpeg source.`
+- `TEST_RESULTS`: `PASS — production build, Electron prepare, electron-builder NSIS packaging, packaged helper inspection, and installer hash completed successfully.`
+- `LIVE_VALIDATION`: `PASS — Modeling.AI.Setup.1.0.7.exe exists; app.asar contains the required Electron helpers; app.asar.unpacked contains the bundled FFmpeg executable.`
+- `STATUS`: `FIXED`
+- `RESUME_CHECKPOINT`: `runStatus=SUCCEEDED; lastCompletedStage=5; resumeTarget=null; executionLease=null.`
+- `NOTES`: `No production data, browser profile, cookies, provider account, or historical successful run was reset or deleted.`

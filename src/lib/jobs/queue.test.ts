@@ -53,7 +53,7 @@ describe("LocalJobQueue priority", () => {
       where: {
         status: "running",
         startedAt: { lt: staleBefore },
-        NOT: { name: { startsWith: "desktop.flow." } },
+        NOT: { OR: [{ name: { startsWith: "desktop.flow." } }, { name: { startsWith: "desktop.gemini." } }] },
       },
       data: {
         status: "queued",

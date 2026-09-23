@@ -49,6 +49,7 @@ type BridgeRequest = {
   projectId: string;
   channelId: string;
   requestKey: string;
+  provider?: "flow-cdp" | "gemini-cdp";
   codexJobId?: string;
   stage?: "ASSETS" | "SCENES";
   slots: BrowserFlowImageSlot[] | BrowserFlowVideoSlot[];
@@ -110,12 +111,13 @@ export async function waitForBridgeJob(jobId: string, onProgress?: BridgeRequest
   }
 }
 
-async function enqueueAndWait(name: "desktop.flow.images" | "desktop.flow.videos", input: BridgeRequest) {
+async function enqueueAndWait(name: "desktop.flow.images" | "desktop.flow.videos" | "desktop.gemini.videos", input: BridgeRequest) {
   const queued = await enqueueBrowserFlowJob(name, input);
   return waitForBridgeJob(queued.jobId, input.onProgress);
 }
 
-export async function enqueueBrowserFlowJob(name: "desktop.flow.images" | "desktop.flow.videos", input: Omit<BridgeRequest, "onProgress">) {
+export async function enqueueBrowserFlowJob(name: "desktop.flow.images" | "desktop.flow.videos" | "desktop.gemini.videos", input: Omit<BridgeRequest, "onProgress">) {
+  if ((name === "desktop.gemini.videos") !== (input.provider === "gemini-cdp")) throw new Error("VIDEO_PROVIDER_EXECUTOR_MISMATCH");
   const project = await db.contentProject.findFirst({ where: { id: input.projectId, channelId: input.channelId, channel: { userId: input.userId } }, select: { id: true, sourceVideoId: true, sourceVideoUrl: true, sourceDuration: true, modelingPolicy: true, sourceModelingSpec: true, scenes: { select: { id: true, sceneNumber: true, sourceSceneId: true, targetDuration: true } } } });
   if (!project) throw new Error("Không tìm thấy content project để chạy Google Flow.");
   assertStrictModelingReady({ sourceVideoId: project.sourceVideoId, sourceVideoUrl: project.sourceVideoUrl, sourceDuration: project.sourceDuration, modelingPolicy: project.modelingPolicy, sourceModelingSpec: project.sourceModelingSpec, generatedScenes: project.scenes });
@@ -147,6 +149,7 @@ export async function enqueueBrowserFlowJob(name: "desktop.flow.images" | "deskt
   };
   if (input.codexJobId) payload.codexJobId = input.codexJobId;
   if (input.stage) payload.stage = input.stage;
+  if (input.provider) payload.provider = input.provider;
   return new LocalJobQueue().enqueue(name, payload, input.requestKey);
 }
 

@@ -1416,7 +1416,7 @@ async function processDesktopFlowBridgeJob(job) {
     });
   }, 30_000);
   const payload = claimed.payload || {};
-  activeDesktopFlowBridgeContext = { bridgeJobId: claimed.id, bridgeJobName: claimed.name, browserTarget: claimed.name === "desktop.flow.quality" ? "gemini" : "google-flow", ...(typeof payload.codexJobId === "string" ? { codexJobId: payload.codexJobId } : {}), ...(typeof payload.stage === "string" ? { stage: payload.stage } : {}) };
+  activeDesktopFlowBridgeContext = { bridgeJobId: claimed.id, bridgeJobName: claimed.name, browserTarget: claimed.name === "desktop.flow.quality" || claimed.name === "desktop.gemini.videos" ? "gemini" : "google-flow", ...(typeof payload.codexJobId === "string" ? { codexJobId: payload.codexJobId } : {}), ...(typeof payload.stage === "string" ? { stage: payload.stage } : {}) };
   const sender = { send: (channel, update) => notifyUpdate("flow-bridge-progress", { jobId: claimed.id, channel, payload: update }) };
   const event = { sender };
   try {
@@ -1424,7 +1424,11 @@ async function processDesktopFlowBridgeJob(job) {
     if (claimed.name === "desktop.flow.images") {
       result = await runFlowImageJob(event, payload.projectId, payload.channelId, payload.slots);
     } else if (claimed.name === "desktop.flow.videos") {
+      if (payload.provider === "gemini-cdp") throw new Error("VIDEO_PROVIDER_EXECUTOR_MISMATCH");
       result = await runFlowVideoJob(event, payload.projectId, payload.channelId, payload.slots);
+    } else if (claimed.name === "desktop.gemini.videos") {
+      if (payload.provider !== "gemini-cdp") throw new Error("VIDEO_PROVIDER_EXECUTOR_MISMATCH");
+      result = await runGeminiVideoJob(event, payload.projectId, payload.channelId, payload.slots);
     } else if (claimed.name === "desktop.flow.quality") {
       result = await withFlowOperation(() => runBrowserQualityJob(payload));
     } else {
@@ -1434,7 +1438,7 @@ async function processDesktopFlowBridgeJob(job) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const structuredFailure = serializeGeminiError(error);
-    await captureBrowserFailure(claimed.name === "desktop.flow.quality" ? getGeminiWindow() : getFlowWindow(), { action: "desktop-flow-job", state: "FLOW_FAILED", jobName: claimed.name, error: message, ...activeDesktopFlowBridgeContext });
+    await captureBrowserFailure(activeDesktopFlowBridgeContext.browserTarget === "gemini" ? getGeminiWindow() : getFlowWindow(), { action: "desktop-flow-job", state: "BRIDGE_FAILED", jobName: claimed.name, error: message, ...activeDesktopFlowBridgeContext });
     try {
       await requestDesktopFlowBridge(`/api/v1/desktop-flow/jobs/${encodeURIComponent(claimed.id)}/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "failed", error: redactDesktopRuntime(message), failure: redactDesktopRuntime(structuredFailure) }) });
     } catch (reportError) {
@@ -1442,7 +1446,7 @@ async function processDesktopFlowBridgeJob(job) {
     }
   } finally {
     clearInterval(heartbeat);
-    await closeFlowWindow();
+    if (activeDesktopFlowBridgeContext.browserTarget === "google-flow") await closeFlowWindow();
     activeDesktopFlowBridgeContext = {};
   }
 }
@@ -2496,6 +2500,28 @@ async function preflightGeminiForRun(window, runId, stage) {
 
 async function openNewGeminiConversation(window, runId, stage) {
   if (!window || window.isDestroyed()) throw new Error("BROWSER_ENVIRONMENT_NOT_READY: Cửa sổ Gemini không tồn tại.");
+  const existingNewChat = await window.webContents.executeJavaScript(`(() => {
+    const roots = [document]; const seen = new Set(roots);
+    for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+    const visible = (element) => { const rect = element?.getBoundingClientRect?.(); const style = element ? getComputedStyle(element) : null; return Boolean(element && element.isConnected && rect && rect.width > 100 && rect.height >= 20 && style?.display !== 'none' && style?.visibility !== 'hidden'); };
+    const input = roots.flatMap((root) => [...root.querySelectorAll('[contenteditable="true"],textarea,[role="textbox"]')]).find(visible);
+    const url = location.href;
+    const auth = /accounts\\.google\\.com|signin|challenge|captcha/i.test(url) || /sign in|đăng nhập|choose an account|chọn tài khoản|captcha|verify you are human/i.test(String(document.body?.innerText || '').slice(0, 4000));
+    return { url, bare: /^https:\/\/gemini\.google\.com\/app\/?(?:[?#].*)?$/i.test(url), inputReady: Boolean(input), auth };
+  })()`, true).catch(() => null);
+  if (existingNewChat?.auth) throw new Error("GEMINI_AUTH_REQUIRED");
+  if (existingNewChat?.bare && existingNewChat?.inputReady) {
+    recordBrowserAction({ action: "gemini-new-chat-open", runId, stage, result: "PASS", source: "BARE_APP_ALREADY_READY", url: existingNewChat.url, conversationId: null });
+    return { url: existingNewChat.url, conversationId: null, state: "UNBOUND" };
+  }
+  try {
+    await window.webContents.loadURL("https://gemini.google.com/app");
+    const ready = await waitForGeminiNewChatReady(window);
+    recordBrowserAction({ action: "gemini-new-chat-open", runId, stage, result: "PASS", source: "DIRECT_BARE_APP_NAVIGATION", url: ready.url, conversationId: null });
+    return ready;
+  } catch (error) {
+    if (error instanceof Error && error.message === "GEMINI_AUTH_REQUIRED") throw error;
+  }
   const clicked = await window.webContents.executeJavaScript(`(() => {
     const roots = [document]; const seen = new Set(roots);
     for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
@@ -3160,6 +3186,20 @@ function findFfmpegPath() {
   const bundled = path.join(process.resourcesPath || "", "ffmpeg", "ffmpeg.exe");
   if (fs.existsSync(bundled)) return bundled;
 
+  // electron-builder places files matched by asarUnpack under the sibling
+  // app.asar.unpacked directory in an installed package. Keep this explicit
+  // candidate before development and machine-wide fallbacks so the packaged
+  // app uses the FFmpeg shipped with the same release.
+  const packagedUnpacked = path.join(process.resourcesPath || "", "app.asar.unpacked", "electron", "dist", "ffmpeg", "ffmpeg.exe");
+  if (fs.existsSync(packagedUnpacked)) return packagedUnpacked;
+
+  // In development Electron does not set process.resourcesPath to the
+  // packaged application root. Reuse the repository's shipped binary so
+  // Gemini Stage 3 can create the identity reference crop without requiring
+  // a machine-wide CapCut installation or an environment override.
+  const developmentBundled = path.join(__dirname, "dist", "ffmpeg", "ffmpeg.exe");
+  if (fs.existsSync(developmentBundled)) return developmentBundled;
+
   const capCutApps = path.join(process.env.LOCALAPPDATA || "", "CapCut", "Apps");
   if (fs.existsSync(capCutApps)) {
     const candidates = fs.readdirSync(capCutApps, { withFileTypes: true })
@@ -3435,7 +3475,7 @@ async function waitForFlowUploadMenuPoint(window, timeout = 15_000) {
 async function clickFlowControl(window, labels, exact = false, timeout = 30_000) {
   const point = await waitForFlowControlPoint(window, labels, exact, timeout);
   await dispatchBrowserClick(window, point);
-  await delay(350);
+  await flowHumanPause("control");
 }
 
 async function dispatchBrowserEscape(window) {
@@ -3443,13 +3483,13 @@ async function dispatchBrowserEscape(window) {
   if (remoteClient) {
     await remoteClient.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
     await remoteClient.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
-    await delay(350);
+    await flowHumanPause("escape");
     return;
   }
   if (!window.webContents.debugger.isAttached()) window.webContents.debugger.attach("1.3");
   await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
   await window.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
-  await delay(350);
+  await flowHumanPause("escape");
 }
 
 async function findFlowAssetPoint(window, filename) {
@@ -3463,9 +3503,9 @@ async function findFlowAssetPoint(window, filename) {
     "      if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }",
     "    }",
     "  }",
-    "  const candidates = roots.flatMap((root) => [...root.querySelectorAll('button, [role=\"option\"], [role=\"listitem\"], [role=\"button\"], div')]).filter((element) => {",
-    "    const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); const text = (element.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();",
-    "    return bounds.width > 0 && bounds.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && text === target;",
+    "  const candidates = roots.flatMap((root) => [...root.querySelectorAll('flow-grid-tile-container, flow-tile-container, button, [role=\"option\"], [role=\"listitem\"], [role=\"button\"], div')]).filter((element) => {",
+    "    const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); const values = [element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent].filter(Boolean).map((value) => value.replace(/\\s+/g, ' ').trim().toLowerCase());",
+    "    return bounds.width > 0 && bounds.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && values.some((value) => value === target || value.includes(target));",
     "  });",
     "  const selected = candidates.sort((left, right) => (left.textContent || '').length - (right.textContent || '').length)[0];",
     "  if (!selected) return null;",
@@ -3643,7 +3683,7 @@ async function selectFlowIngredientCategory(window, category) {
       }
       const visible = (element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return bounds.width > 0 && bounds.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'; };
       const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-      const candidates = roots.flatMap((root) => [...root.querySelectorAll('flow-add-menu-popover-content [role="tab"], flow-add-menu-popover-content mat-list-item')]).filter((element) => visible(element));
+      const candidates = roots.flatMap((root) => [...root.querySelectorAll('flow-add-menu-popover-content [role="tab"], flow-add-menu-popover-content mat-list-item, [role="dialog"] [role="tab"], [role="dialog"] mat-list-item, .cdk-overlay-pane [role="tab"], .cdk-overlay-pane mat-list-item')]).filter((element) => visible(element));
       const selected = candidates.find((element) => normalize(element.textContent).endsWith(target));
       if (!selected) return false;
       selected.click();
@@ -3671,9 +3711,9 @@ async function clickFlowIngredientAsset(window, filename, timeout) {
       }
       const visible = (element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return bounds.width > 0 && bounds.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'; };
       const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-      const overlay = roots.flatMap((root) => [...root.querySelectorAll('flow-add-menu-popover-content')]).find(visible);
+      const overlay = roots.flatMap((root) => [...root.querySelectorAll('flow-add-menu-popover-content, [role="dialog"], .cdk-overlay-pane')]).find(visible);
       if (!overlay) return false;
-      const candidates = [...overlay.querySelectorAll('flow-grid-tile-container, [role="button"], button, div')].filter((element) => visible(element));
+      const candidates = [...overlay.querySelectorAll('flow-grid-tile-container, flow-tile-container, [role="option"], [role="button"], button, div')].filter((element) => visible(element));
       const matches = candidates.filter((element) => {
         const values = [element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent].filter(Boolean).map(normalize);
         return values.some((value) => value === target || value.includes(target));
@@ -3891,6 +3931,7 @@ async function uploadFlowAssetViaDrop(window, filePath, onStatus = () => {}) {
 
 async function uploadFlowAsset(window, filePath, attachToPrompt = false, onStatus = () => {}, options = {}) {
   const filename = path.basename(filePath);
+  await flowHumanPause("upload");
   const beforeImageCount = await countFlowVisualImages(window);
   const previousAttachmentCount = attachToPrompt ? await countFlowPromptAttachments(window) : 0;
   if (await findFlowAssetPoint(window, filename)) {
@@ -4006,6 +4047,7 @@ async function addFlowAssetToStart(window, filePath) {
   const filename = path.basename(filePath);
   let uploadedAsset = await resolveFlowAssetIdentity(window, filename);
   await clickFlowControl(window, ["Bắt đầu", "Start"], true);
+  await flowHumanPause("upload");
   let selected = false;
   for (let elapsed = 0; elapsed < 20_000 && !selected; elapsed += 250) {
     selected = await executeFlowJavaScript(window, `(() => {
@@ -4062,7 +4104,7 @@ async function clearFlowComposer(window) {
   const point = await findFlowControlPoint(window, ["Xoá câu lệnh", "Xóa câu lệnh", "Clear prompt"], false);
   if (point) {
     await dispatchBrowserClick(window, point);
-    await delay(500);
+    await flowHumanPause("control");
   }
 }
 
@@ -4207,7 +4249,7 @@ async function configureFlowVideo(window) {
   await clickFlowControl(window, ["Chọn nhóm mô hình", "Select model", "Model"], false);
   await clickFlowControl(window, ["Veo 3.1 - Lite [Lower Priority]"], true, 15_000);
   const qualityPoint = await findFlowControlPoint(window, ["720p"], true);
-  if (qualityPoint) { await dispatchBrowserClick(window, qualityPoint); await delay(350); }
+  if (qualityPoint) { await dispatchBrowserClick(window, qualityPoint); await flowHumanPause("control"); }
   await clickFlowControl(window, ["4 giây", "4 seconds", "4s"], false);
   await clickFlowControl(window, ["x1"], true);
   // Flow exposes the Start/End frame inputs after the other settings are set.
@@ -4484,7 +4526,7 @@ async function createFlowProject(window) {
   throw new Error(`FLOW_PROJECT_OPEN_FAILURE: Google Flow không mở được project mới sau các strategy browser khác nhau. ${lastError}`);
 }
 
-async function reloadFlowProject(window, projectUrl) {
+async function reloadFlowProject(window, projectUrl, settleMs = 1_500) {
   const targetUrl = projectUrl || window.webContents.getURL();
   flowLoadPromise = new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("Google Flow tải lại quá lâu.")), 60_000);
@@ -4499,7 +4541,7 @@ async function reloadFlowProject(window, projectUrl) {
     await window.webContents.loadURL(targetUrl);
     await waitForFlowLoad(window);
   }
-  await delay(1_500);
+  await delay(settleMs);
   await waitForFlowComposer(window);
 }
 
@@ -4546,6 +4588,21 @@ function isNonRetryableFlowProviderBlock(error) {
 }
 
 const MAX_FLOW_PROVIDER_RELOAD_RECOVERY = 1;
+const FLOW_PROVIDER_RELOAD_SETTLE_MS = 10_000;
+// Flow interaction pacing: keep each UI transition observable before the next
+// action. This improves managed-browser reliability; it is not an anti-abuse
+// bypass and it does not increase the recovery budget.
+const FLOW_HUMAN_PACE = Object.freeze({
+  control: 900,
+  escape: 700,
+  prompt: 1_200,
+  upload: 1_500,
+  beforeGenerate: 2_500,
+});
+
+async function flowHumanPause(kind) {
+  await delay(FLOW_HUMAN_PACE[kind] || FLOW_HUMAN_PACE.control);
+}
 
 async function inspectFlowVideo(window, beforeSources = [], beforeCardCount = 0) {
   const expression = [
@@ -4581,7 +4638,7 @@ async function waitForFlowVideo(window, beforeSources, beforeCardCount = 0, time
   let startedPlayback = false;
   for (let elapsed = 0; elapsed < timeout; elapsed += 2_000) {
     const state = await inspectFlowVideo(window, beforeSources, beforeCardCount);
-    if (state?.unusualActivity) {
+    if (state?.unusualActivity && (!Number.isFinite(context.providerDetectionNotBefore) || Date.now() >= context.providerDetectionNotBefore)) {
       const details = {
         stage: context.stage || "STAGE_4_VIDEO_GENERATION",
         sceneId: typeof context.sceneId === "string" ? context.sceneId : null,
@@ -4839,16 +4896,32 @@ async function waitForFlowVideoWithRecovery(window, projectUrl, beforeSources, b
           projectUrl: redactNetworkUrl(projectUrl),
           code: error.code,
         });
-        await reloadFlowProject(window, projectUrl);
+        await reloadFlowProject(window, projectUrl, FLOW_PROVIDER_RELOAD_SETTLE_MS);
         const prepared = await context.resendAfterReload(window, recoveryAttempt + 1);
         const retryContext = {
           ...context,
           providerRecoveryAttempt: recoveryAttempt + 1,
           allowProviderReloadRecovery: true,
+          providerDetectionNotBefore: Date.now() + FLOW_PROVIDER_RELOAD_SETTLE_MS,
         };
         try {
           const state = await waitForFlowVideo(window, prepared?.beforeSources || [], prepared?.beforeCardCount || 0, 600_000, retryContext);
           if (state?.videoSource && !state?.failed) return state;
+          if (state?.unusualActivity) {
+            throw createFlowGenerationFailure("FLOW_PROVIDER_UNUSUAL_ACTIVITY", "Google Flow tạm chặn tạo video vì phát hiện hoạt động bất thường.", {
+              stage: context.stage || "STAGE_4_VIDEO_GENERATION",
+              sceneId: context.sceneId || null,
+              flowProjectUrl: redactNetworkUrl(projectUrl),
+              providerBlockedAt: new Date().toISOString(),
+              autoRetryAllowed: false,
+              generateTriggered: context.generateTriggered !== false,
+              generationStarted: false,
+              providerJobCreated: false,
+              recoveryAttempt: recoveryAttempt + 1,
+              recoveryBudget: MAX_FLOW_PROVIDER_RELOAD_RECOVERY,
+              firstDivergence: "FLOW_VIDEO_PROVIDER_UNUSUAL_ACTIVITY_BLOCK",
+            });
+          }
           if (state?.failed) throw new Error("Google Flow vẫn báo tạo video không thành công sau khi tải lại và gửi lại.");
           throw new Error("Google Flow không trả về video sau khi tải lại và gửi lại.");
         } catch (retryError) {
@@ -4930,7 +5003,7 @@ async function setFlowPrompt(window, prompt) {
     })()`);
   }
 
-  await delay(500);
+  await flowHumanPause("prompt");
   const state = await executeFlowJavaScript(window, `(() => {
     const roots = [document];
     const seen = new Set(roots);
@@ -5042,6 +5115,18 @@ async function waitForFlowImage(window, beforeSources, timeout = 600_000) {
 async function getFlowImageBuffer(window, result) {
   if (typeof result?.imageSource === "string" && result.imageSource && !result.imageSource.startsWith("blob:")) {
     if (window?.edgeRuntime) {
+      // flow-content.google image URLs are intentionally not CORS-readable
+      // from the page context. Capture the authenticated response through
+      // the managed Edge CDP session first, before waiting on the URL to be
+      // promoted to a different tile source.
+      const liveCdpSources = [...new Set([...(await listFlowImageSources(window)), result.imageSource])];
+      for (const liveSource of liveCdpSources) {
+        const directCdpBuffer = await readFlowMediaBufferThroughCdp(window, liveSource, "image");
+        if (directCdpBuffer) {
+          recordBrowserAction({ action: "flow-image-direct-cdp-success", source: redactNetworkUrl(liveSource), mimeType: detectFlowImageMimeType(directCdpBuffer), byteLength: directCdpBuffer.length });
+          return { buffer: directCdpBuffer, mimeType: detectFlowImageMimeType(directCdpBuffer) };
+        }
+      }
       const pageMedia = await readFlowImageDataFromCandidates(window, result.imageSource);
       if (pageMedia) {
         return pageMedia;
@@ -5603,7 +5688,7 @@ async function runFlowImageJobUnlocked(event, projectId, channelId, slots) {
     const compiledPrompt = await validatedPromptForSend(slot, "ảnh " + (slot.label || "cảnh"), { projectId, channelId, promptType: "IMAGE", sceneNumber: isScene ? slot.sceneNumber : undefined });
     assertFlowPromptContract(compiledPrompt, "ảnh " + (slot.label || "cảnh"));
 
-    const prepared = await window.webContents.executeJavaScript([
+    const prepared = await executeFlowJavaScript(window, [
       "(() => {",
       "  const roots = [document];",
       "  const seen = new Set(roots);",
@@ -5615,18 +5700,11 @@ async function runFlowImageJobUnlocked(event, projectId, channelId, slots) {
       "  const allImages = () => roots.flatMap((root) => [...root.querySelectorAll('img')]);",
       "  const beforeSources = allImages().map((image) => image.currentSrc || image.src).filter(Boolean);",
       "  const beforeResources = performance.getEntriesByType('resource').map((entry) => entry.name).filter((source) => /flow-content\\.google\\/image\\//i.test(source));",
-      "  const input = roots.flatMap((root) => [...root.querySelectorAll('textarea, [contenteditable=\"true\"], [role=\"textbox\"]')]).filter((element) => { const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element); return bounds.width > 100 && bounds.height >= 20 && style.visibility !== 'hidden' && style.display !== 'none'; }).at(-1);",
-      "  if (!input) return { error: 'Không tìm thấy ô nhập prompt Google Flow.' };",
-      "  const prompt = " + JSON.stringify(compiledPrompt) + ";",
-      "  input.focus();",
-      "  if (input.tagName === 'TEXTAREA') { const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, prompt); }",
-      "  else { document.execCommand('selectAll', false); document.execCommand('insertText', false, prompt); }",
-      "  input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));",
-      "  input.dispatchEvent(new Event('change', { bubbles: true }));",
       "  return { beforeSources: [...beforeSources, ...beforeResources] };",
       "})()",
     ].join("\n"), true);
     if (prepared?.error) throw new Error(prepared.error);
+    await setFlowPrompt(window, compiledPrompt);
 
     if (isScene && (useCharacterReference || useBackgroundReference) && await countFlowPromptAttachments(window) < ((useCharacterReference && activeCharacterReference ? 1 : 0) + (useBackgroundReference ? 1 : 0))) {
       throw new Error("Ảnh tham chiếu nhân vật hoặc bối cảnh chưa vào ô lệnh; chưa gửi tạo ảnh.");
@@ -5675,6 +5753,267 @@ async function runFlowImageJobUnlocked(event, projectId, channelId, slots) {
 
 async function runFlowImageJob(event, projectId, channelId, slots) {
   return withFlowOperation(() => runFlowImageJobUnlocked(event, projectId, channelId, slots));
+}
+
+async function geminiVideoUiState(window) {
+  return window.webContents.executeJavaScript(`(() => {
+    const roots = [document]; const seen = new Set(roots);
+    for (let i = 0; i < roots.length; i++) for (const node of roots[i].querySelectorAll('*')) if (node.shadowRoot && !seen.has(node.shadowRoot)) { seen.add(node.shadowRoot); roots.push(node.shadowRoot); }
+    const visible = (node) => { const box = node?.getBoundingClientRect?.(); const style = node ? getComputedStyle(node) : null; return Boolean(box && box.width > 0 && box.height > 0 && style?.visibility !== 'hidden' && style?.display !== 'none'); };
+    const controls = roots.flatMap(root => [...root.querySelectorAll('button,[role="button"],[role="menuitemcheckbox"]')]).filter(visible);
+    const label = (node) => String(node.getAttribute('aria-label') || node.getAttribute('title') || node.textContent || '').replace(/\\s+/g, ' ').trim();
+    const has = (pattern) => controls.some(node => pattern.test(label(node)));
+    const input = roots.flatMap(root => [...root.querySelectorAll('[contenteditable="true"],textarea,[role="textbox"]')]).find(visible);
+    const videos = roots.flatMap(root => [...root.querySelectorAll('video')]).filter(visible).map(node => node.currentSrc || node.src || node.querySelector('source')?.src).filter(Boolean);
+    const inputLabel = String(input?.getAttribute?.('aria-label') || input?.getAttribute?.('placeholder') || input?.textContent || '');
+    const videoRoute = location.hostname === 'gemini.google.com' && location.pathname === '/videos';
+    const videoComposer = videoRoute || /(?:mô tả video|describe your video)/i.test(inputLabel) || roots.flatMap(root => [...root.querySelectorAll('*')]).some(node => visible(node) && /^(?:Video)$/i.test(String(node.textContent || '').replace(/\\s+/g, ' ').trim()));
+    return { url: location.href, videoMode: Boolean(input) && videoComposer, videoTool: has(/^(?:Tạo video|Create video)$/i), tools: has(/(?:Nội dung tải lên và công cụ|Uploads? and tools|Add files)/i), tryButton: has(/^(?:Dùng thử|Try it)$/i), upload: has(/^(?:Tải tệp lên|Upload file|Thêm tệp|Add files?)$/i), inputReady: Boolean(input), videos, textTail: String(document.body?.innerText || '').slice(-1800) };
+  })()`, true);
+}
+
+async function clickGeminiVideoControl(window, names) {
+  const clicked = await window.webContents.executeJavaScript(`(() => {
+    const names = ${JSON.stringify(names)};
+    const roots = [document]; const seen = new Set(roots);
+    for (let i = 0; i < roots.length; i++) for (const node of roots[i].querySelectorAll('*')) if (node.shadowRoot && !seen.has(node.shadowRoot)) { seen.add(node.shadowRoot); roots.push(node.shadowRoot); }
+    const visible = (node) => { const box = node?.getBoundingClientRect?.(); const style = node ? getComputedStyle(node) : null; return Boolean(box && box.width > 0 && box.height > 0 && style?.visibility !== 'hidden' && style?.display !== 'none'); };
+    const normalize = (value) => String(value || '').normalize('NFKD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const wanted = names.map(normalize);
+    const button = roots.flatMap(root => [...root.querySelectorAll('button,[role="button"],[role="menuitemcheckbox"]')]).find(node => visible(node) && wanted.some(name => {
+      const value = normalize([node.getAttribute('aria-label'), node.getAttribute('title'), node.textContent].join(' '));
+      return value === name || value.includes(name);
+    }));
+    if (!button || button.disabled) return false;
+    button.click(); return true;
+  })()`, true);
+  if (!clicked) throw new Error(`GEMINI_VIDEO_CONTROL_NOT_FOUND: ${names.join('/')}`);
+}
+
+// File pickers are guarded by Chromium as a trusted user-activation API.
+// Calling HTMLElement.click() from executeJavaScript can open menus, but it
+// does not reliably create the activation Gemini needs before it requests the
+// native chooser. Return viewport coordinates so the caller can use actual
+// CDP pointer events instead.
+async function findGeminiVideoControlPoint(window, names) {
+  return window.webContents.executeJavaScript(`(() => {
+    const names = ${JSON.stringify(names)};
+    const roots = [document]; const seen = new Set(roots);
+    for (let i = 0; i < roots.length; i++) for (const node of roots[i].querySelectorAll('*')) if (node.shadowRoot && !seen.has(node.shadowRoot)) { seen.add(node.shadowRoot); roots.push(node.shadowRoot); }
+    const visible = (node) => { const box = node?.getBoundingClientRect?.(); const style = node ? getComputedStyle(node) : null; return Boolean(box && box.width > 0 && box.height > 0 && style?.visibility !== 'hidden' && style?.display !== 'none'); };
+    const normalize = (value) => String(value || '').normalize('NFKD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const wanted = names.map(normalize);
+    const button = roots.flatMap(root => [...root.querySelectorAll('button,[role="button"],[role="menuitemcheckbox"]')]).find(node => visible(node) && !node.disabled && wanted.some(name => {
+      const value = normalize([node.getAttribute('aria-label'), node.getAttribute('title'), node.textContent].join(' '));
+      return value === name || value.includes(name);
+    }));
+    if (!button) return null;
+    const box = button.getBoundingClientRect();
+    return { x: box.left + (box.width / 2), y: box.top + (box.height / 2) };
+  })()`, true);
+}
+
+async function findGeminiVideoFileInputBackendNodeId(window) {
+  const documentResult = await window.webContents.debugger.sendCommand("DOM.getDocument", { depth: -1, pierce: true });
+  const visit = (node) => {
+    if (!node) return null;
+    const attributes = Array.isArray(node.attributes) ? node.attributes : [];
+    const attribute = (name) => {
+      const index = attributes.findIndex((value) => String(value).toLowerCase() === name);
+      return index >= 0 ? String(attributes[index + 1] || "") : "";
+    };
+    if (/^input$/i.test(String(node.nodeName || "")) && attribute("type").toLowerCase() === "file" && Number.isInteger(node.backendNodeId)) return node.backendNodeId;
+    for (const child of [...(node.children || []), ...(node.shadowRoots || [])]) {
+      const match = visit(child);
+      if (match) return match;
+    }
+    return null;
+  };
+  return visit(documentResult?.root) || null;
+}
+
+async function selectGeminiVideoGenerationTool(window) {
+  if ((await geminiVideoUiState(window)).videoMode) return;
+  // The current Gemini video UI exposes the tools menu as a compact plus
+  // button. Its text may be empty, but aria-haspopup=menu is stable.
+  let opened = false;
+  for (let attempt = 0; attempt < 60 && !opened; attempt += 1) {
+    opened = await window.webContents.executeJavaScript(`(() => {
+    const roots=[document],seen=new Set(roots);for(let i=0;i<roots.length;i++)for(const n of roots[i].querySelectorAll('*'))if(n.shadowRoot&&!seen.has(n.shadowRoot)){seen.add(n.shadowRoot);roots.push(n.shadowRoot);}
+    const visible=n=>{const b=n?.getBoundingClientRect?.(),s=n?getComputedStyle(n):null;return Boolean(b&&b.width>0&&b.height>0&&s?.display!=='none'&&s?.visibility!=='hidden');};
+    const input=roots.flatMap(r=>[...r.querySelectorAll('[contenteditable="true"],textarea,[role="textbox"]')]).find(visible);if(!input)return false;const box=input.getBoundingClientRect();
+    const candidates=roots.flatMap(r=>[...r.querySelectorAll('button,[role="button"]')]).filter(n=>visible(n)&&n.getAttribute('aria-haspopup')==='menu');
+    const target=candidates.sort((a,b)=>{const x=a.getBoundingClientRect(),y=b.getBoundingClientRect();return Math.hypot(x.right-box.left,x.top-box.bottom)-Math.hypot(y.right-box.left,y.top-box.bottom);})[0];if(!target||target.disabled)return false;target.click();return true;
+    })()`, true).catch(() => false);
+    if (!opened) await delay(250);
+  }
+  if (!opened) throw new Error("GEMINI_VIDEO_TOOL_LAUNCHER_NOT_FOUND");
+  for (let i = 0; i < 40 && !(await geminiVideoUiState(window)).videoTool; i++) await delay(250);
+  const selected = await window.webContents.executeJavaScript(`(() => {
+    const roots=[document],seen=new Set(roots);for(let i=0;i<roots.length;i++)for(const n of roots[i].querySelectorAll('*'))if(n.shadowRoot&&!seen.has(n.shadowRoot)){seen.add(n.shadowRoot);roots.push(n.shadowRoot);}
+    const visible=n=>{const b=n?.getBoundingClientRect?.(),s=n?getComputedStyle(n):null;return Boolean(b&&b.width>0&&b.height>0&&s?.display!=='none'&&s?.visibility!=='hidden');};
+    const node=roots.flatMap(r=>[...r.querySelectorAll('button,[role="button"],[role="menuitemcheckbox"]')]).find(n=>visible(n)&&/^(?:tạo video|create video)$/i.test(String(n.getAttribute('aria-label')||n.textContent||'').replace(/\\s+/g,' ').trim()));if(!node||node.disabled)return false;node.click();return true;
+  })()`, true).catch(() => false);
+  if (!selected) throw new Error("GEMINI_VIDEO_TOOL_OPTION_NOT_FOUND");
+  for (let i = 0; i < 40; i++) {
+    const state = await geminiVideoUiState(window);
+    if (state.videoMode) return;
+    if (state.tryButton) { await clickGeminiVideoControl(window, ["Dùng thử", "Try it"]); break; }
+    await delay(250);
+  }
+  for (let i = 0; i < 80; i++) { if ((await geminiVideoUiState(window)).videoMode) return; await delay(250); }
+  throw new Error("GEMINI_VIDEO_MODE_NOT_READY");
+}
+
+async function openGeminiVideoComposer(window) {
+  const expectedUrl = "https://gemini.google.com/videos";
+  if (!/^https:\/\/gemini\.google\.com\/videos(?:[/?#]|$)/i.test(window.webContents.getURL())) await window.webContents.loadURL(expectedUrl);
+  for (let elapsed = 0; elapsed < 30_000; elapsed += 250) {
+    const state = await geminiVideoUiState(window);
+    if (/accounts\.google\.com|signin|challenge|captcha/i.test(state.url) || /sign in|đăng nhập|choose an account|chọn tài khoản|captcha|verify you are human/i.test(state.textTail)) throw new Error("GEMINI_AUTH_REQUIRED");
+    if (/^https:\/\/gemini\.google\.com\/videos(?:[/?#]|$)/i.test(state.url) && state.videoMode && state.inputReady) return state;
+    await delay(250);
+  }
+  throw new Error("GEMINI_VIDEO_PAGE_NOT_READY");
+}
+
+async function uploadGeminiVideoReference(window, imagePath) {
+  const filePath = assertReadableAbsoluteFile(imagePath);
+  const baseline = await readEdgeGeminiAttachmentEvidence(window, [filePath]);
+  const confirmPreview = async (paths, timeoutMs) => {
+    for (let elapsed = 0; elapsed < timeoutMs; elapsed += 250) {
+      const evidence = await readEdgeGeminiAttachmentEvidence(window, paths);
+      if (evidence?.confirmed && (evidence.previewCount > (baseline?.previewCount || 0) || evidence.previewImageCount > (baseline?.previewImageCount || 0) || evidence.filenamePresent)) return evidence;
+      await delay(250);
+    }
+    return { confirmed: false };
+  };
+  try {
+    await uploadWithEdgeFileChooser({
+      window, cdp: window.webContents.debugger, filePaths: [filePath],
+      getMainFrameId: () => getEdgeGeminiMainFrameId(window),
+      targetIsCurrent: () => !window.isDestroyed() && /^https:\/\/gemini\.google\.com\//i.test(window.webContents.getURL()),
+      openToolbar: async () => {
+        if ((await geminiVideoUiState(window)).upload) return;
+        // This is a non-native menu toggle. A CDP user-gesture evaluation is
+        // more reliable than a pointer click here because the menu otherwise
+        // races its own animation and can toggle closed again.
+        await clickGeminiVideoControl(window, ["Nội dung tải lên và công cụ", "Uploads and tools", "Add files"]);
+        for (let elapsed = 0; elapsed < 10_000; elapsed += 250) {
+          if ((await geminiVideoUiState(window)).upload) return;
+          await delay(250);
+        }
+        throw new Error("GEMINI_VIDEO_UPLOAD_MENU_NOT_READY");
+      },
+      findUploadAction: async () => (await geminiVideoUiState(window)).upload,
+      clickUploadAction: async () => {
+        const point = await findGeminiVideoControlPoint(window, ["Tải tệp lên", "Upload file", "Thêm tệp", "Add files"]);
+        if (!point) throw new Error("GEMINI_VIDEO_UPLOAD_CONTROL_NOT_FOUND");
+        await dispatchBrowserClick(window, point);
+      },
+      confirmPreview,
+    });
+  } catch (error) {
+    // Gemini's current Video composer exposes a real hidden input, but some
+    // builds do not emit Page.fileChooserOpened for that control. This is a
+    // narrow CDP fallback for the same rendered input, not a second upload or
+    // a UI bypass: it sets the selected file then still requires its preview.
+    if (!(error instanceof Error) || error.message !== "EDGE_FILE_CHOOSER_NOT_OPENED") throw error;
+    const backendNodeId = await findGeminiVideoFileInputBackendNodeId(window);
+    if (!backendNodeId) throw new Error("GEMINI_VIDEO_FILE_INPUT_NOT_FOUND");
+    await window.webContents.debugger.sendCommand("DOM.setFileInputFiles", { backendNodeId, files: [filePath] });
+    const preview = await confirmPreview([filePath], 15_000);
+    if (!preview?.confirmed) throw new Error("GEMINI_VIDEO_REFERENCE_PREVIEW_NOT_CONFIRMED");
+    recordBrowserAction({ action: "gemini-video-reference-upload", provider: "EDGE_CDP", method: "DOM_SET_FILE_INPUT_FILES", filename: path.basename(filePath), preview });
+  }
+}
+
+async function readGeminiVideoBuffer(window, source) {
+  const dataUrl = await window.webContents.executeJavaScript(`(async () => {
+    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 60000);
+    try {
+      const response = await fetch(${JSON.stringify(source)}, { credentials: 'include', signal: controller.signal });
+      if (!response.ok) return null;
+      const blob = await response.blob();
+      if (!blob.type.startsWith('video/') || blob.size < 1024) return null;
+      return await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); });
+    } finally { clearTimeout(timeout); }
+  })()`, true).catch(() => null);
+  const match = typeof dataUrl === "string" ? /^data:video\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=]+)$/i.exec(dataUrl) : null;
+  const buffer = match ? Buffer.from(match[1], "base64") : null;
+  if (!buffer || buffer.length < 1024 || buffer.toString("ascii", 4, 8) !== "ftyp") throw new Error("GEMINI_VIDEO_DOWNLOAD_INVALID: không tải được MP4 hợp lệ từ Gemini.");
+  return buffer;
+}
+
+async function runGeminiVideoJobUnlocked(event, projectId, channelId, slots) {
+  const window = await createGeminiWindow();
+  const videos = {};
+  for (let index = 0; index < slots.length; index++) {
+    const slot = slots[index];
+    if (!Number.isInteger(slot?.sceneNumber) || typeof slot.englishPrompt !== "string" || !slot.englishPrompt.trim()) throw new Error("GEMINI_VIDEO_SLOT_INVALID");
+    const sceneNumber = slot.sceneNumber;
+    sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label: `Đang mở Gemini tạo video cảnh ${sceneNumber}...` });
+    // Gemini Video has its own first-party composer at /videos. Opening it
+    // directly avoids treating the chat-tool menu as the video product and
+    // matches the UI where the user can create a video manually.
+    let before = await openGeminiVideoComposer(window);
+    const imagePath = findSceneImagePath(projectId, sceneNumber);
+    await uploadGeminiVideoReference(window, imagePath);
+    const prompt = await validatedPromptForSend(slot, `video cảnh ${sceneNumber}`, { projectId, channelId, promptType: "VIDEO", sceneNumber });
+    const submitVideoPrompt = async () => {
+      const command = createGeminiCommand({ purpose: "VIDEO_GENERATION", prompt });
+      await startGeminiNavigationObserver(window, command);
+      await startGeminiNetworkObserver(window, command);
+      const baseline = await captureGeminiResponseSnapshot(window, null, "VIDEO_GENERATION");
+      command.recordConversationState({ url: baseline.conversationUrl, mode: baseline.conversationMode, assistantTurnCount: baseline.assistantTurnCount, userTurnCount: baseline.userTurnCount });
+      command.setSubmissionBaseline({ expectedConversationUrl: baseline.conversationUrl, expectedConversationId: conversationIdFromUrl(baseline.conversationUrl), allowNewConversation: !conversationIdFromUrl(baseline.conversationUrl), userTurnCount: baseline.userTurnCount, assistantTurnCount: baseline.assistantTurnCount, userTurns: baseline.userTurns });
+      await submitGeminiCommand(window, command, prompt, "GEMINI_VIDEO_COMPOSER_MISSING", baseline);
+      if (command.snapshot().submissionConfirmed !== true) throw new Error("GEMINI_VIDEO_SUBMISSION_NOT_CONFIRMED");
+      return command;
+    };
+    sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label: `Đang gửi prompt cảnh ${sceneNumber} tới Gemini...` });
+    let command;
+    try {
+      command = await submitVideoPrompt();
+    } catch (error) {
+      const firstAttempt = error instanceof Error && error.message.startsWith("GEMINI_SUBMISSION_NOT_CONFIRMED");
+      const resetToBareApp = isBareGeminiAppUrl(window.webContents.getURL());
+      if (!firstAttempt || !resetToBareApp) throw error;
+      // Google may rotate its cookies exactly when the Video composer submits.
+      // A fresh /videos page and one resend are permitted only when no user
+      // turn was created, so this cannot duplicate a real video request.
+      recordBrowserAction({ action: "gemini-video-submit-reload-recovery", sceneNumber, recoveryAttempt: 1, recoveryBudget: 1, result: "RETRY", reason: "BARE_APP_WITHOUT_CONFIRMED_USER_TURN" });
+      before = await openGeminiVideoComposer(window);
+      await uploadGeminiVideoReference(window, imagePath);
+      command = await submitVideoPrompt().catch((recoveryError) => {
+        if (recoveryError instanceof Error && recoveryError.message.startsWith("GEMINI_SUBMISSION_NOT_CONFIRMED") && isBareGeminiAppUrl(window.webContents.getURL())) {
+          const terminal = new Error("GEMINI_VIDEO_PAGE_RESET_DURING_SEND");
+          terminal.code = "GEMINI_VIDEO_PAGE_RESET_DURING_SEND";
+          terminal.firstDivergence = "GEMINI_VIDEO_PAGE_RESET_DURING_SEND";
+          throw terminal;
+        }
+        throw recoveryError;
+      });
+    }
+    let source = null;
+    for (let elapsed = 0; elapsed < 600_000; elapsed += 2_000) {
+      const state = await geminiVideoUiState(window);
+      if (/video.*(?:failed|couldn.t be generated)|không thể tạo video|video.*(?:not available|limit reached)/i.test(state.textTail)) throw new Error(`GEMINI_VIDEO_PROVIDER_FAILED: ${state.textTail.slice(-350)}`);
+      source = state.videos.find(value => !before.videos.includes(value));
+      if (source) break;
+      await delay(2_000);
+    }
+    if (!source) throw new Error("GEMINI_VIDEO_RESULT_TIMEOUT");
+    const buffer = await readGeminiVideoBuffer(window, source);
+    const url = saveGeminiVideo(projectId, sceneNumber, buffer);
+    videos[`scene-${sceneNumber}`] = url;
+    sendProgress(event, "gemini-browser:video-progress", { processed: index + 1, total: slots.length, label: `Đã lưu video cảnh ${sceneNumber} từ Gemini.` });
+  }
+  return { status: "completed", videos };
+}
+
+async function runGeminiVideoJob(event, projectId, channelId, slots) {
+  return withGeminiBrowserOperation(() => runGeminiVideoJobUnlocked(event, projectId, channelId, slots));
 }
 
 async function runFlowVideoJobUnlocked(event, projectId, channelId, slots) {
@@ -5734,6 +6073,7 @@ async function runFlowVideoJobUnlocked(event, projectId, channelId, slots) {
 
     const submitPreparedVideo = async (targetWindow, prepared) => {
       const sendPoint = await waitForFlowControlPoint(targetWindow, ["Bắt đầu tạo", "Tạo video", "Generate", "Create", "Start generation", "arrow_forward"], false, 30_000);
+      await flowHumanPause("beforeGenerate");
       await dispatchBrowserClick(targetWindow, sendPoint);
       let acknowledgement = await waitForFlowSubmissionAcknowledgement(targetWindow, prepared.beforeSources ?? [], prepared.beforeCardCount ?? 0);
       if (!acknowledgement) {
@@ -5939,12 +6279,21 @@ ipcMain.handle("gemini-browser:run-video-job", async (event, value) => {
     if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || typeof channelId !== "string" || !/^[A-Za-z0-9_-]+$/.test(channelId) || !Array.isArray(slots) || slots.length === 0) {
       throw new Error("Yêu cầu tạo video không hợp lệ.");
     }
-    const result = await runFlowVideoJob(event, projectId, channelId, slots);
-    await closeFlowWindow();
+    const result = await runGeminiVideoJob(event, projectId, channelId, slots);
     return { ok: true, data: result };
   } catch (error) {
     return { ok: false, error: serializeGeminiError(error) };
   }
+});
+
+ipcMain.handle("flow-browser:run-video-job", async (event, value) => {
+  try {
+    const { projectId, channelId, slots } = value || {};
+    if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || typeof channelId !== "string" || !/^[A-Za-z0-9_-]+$/.test(channelId) || !Array.isArray(slots) || !slots.length) throw new Error("Yêu cầu tạo video Flow không hợp lệ.");
+    const result = await runFlowVideoJob(event, projectId, channelId, slots);
+    await closeFlowWindow();
+    return { ok: true, data: result };
+  } catch (error) { return { ok: false, error: serializeGeminiError(error) }; }
 });
 
 ipcMain.handle("flow-browser:resume-after-manual-submission", async (_event, value) => {

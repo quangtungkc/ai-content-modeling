@@ -87,12 +87,22 @@ export async function findSmokeRingFfmpegPath() {
   const configured = process.env.MODELING_AI_FFMPEG_PATH;
   if (configured) return configured;
   const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
-  if (resourcesPath) return path.join(resourcesPath, "ffmpeg", process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg");
+  const executable = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
+  const candidates = [
+    ...(resourcesPath ? [path.join(resourcesPath, "ffmpeg", executable)] : []),
+    path.join(process.cwd(), "electron", "dist", "ffmpeg", executable),
+  ];
+  for (const candidate of candidates) {
+    try {
+      await execFileAsync(candidate, ["-version"], { windowsHide: true });
+      return candidate;
+    } catch { /* try the next bundled runtime */ }
+  }
   const root = path.join(process.env.LOCALAPPDATA ?? "", "CapCut", "Apps");
   try {
     const entries = await readdir(root, { withFileTypes: true });
-    const candidates = entries.filter(entry => entry.isDirectory()).map(entry => path.join(root, entry.name, process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg")).sort().reverse();
-    for (const candidate of candidates) {
+    const capCutCandidates = entries.filter(entry => entry.isDirectory()).map(entry => path.join(root, entry.name, executable)).sort().reverse();
+    for (const candidate of capCutCandidates) {
       try { await execFileAsync(candidate, ["-version"], { windowsHide: true }); return candidate; } catch { /* try the next installed runtime */ }
     }
   } catch { /* optional local runtime directory */ }

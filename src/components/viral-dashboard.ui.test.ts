@@ -49,7 +49,7 @@ describe("Video Modeling automatic-only UI", () => {
   it("CASE 9: keeps all automatic pipeline stages internally wired", () => {
     expect(source).toContain("await generateModelingIdea(runId)");
     expect(source).toContain("await createContentProject(currentIdea, true, runId)");
-    expect(source).toContain("await generateAllProjectImages(project)");
+    expect(source).toContain("await generateAllProjectImages(project, undefined, generatedImages, runId)");
     expect(source).toContain("await generateAllProjectVideos(project, images, undefined, videos)");
     expect(source).toContain("await renderFinalProjectVideo(project, videos)");
   });
@@ -112,5 +112,38 @@ describe("Video Modeling automatic-only UI", () => {
     expect(source).toContain("const persistedVideos = await loadPersistedProjectVideos(project.id, project.scenes);");
     expect(source).toContain("generateAllProjectVideos(project, images, undefined, videos)");
     expect(source).toContain("!existingVideos[`scene-${scene.sceneNumber}`]");
+  });
+
+  it("CASE 18: routes Stage 3 image generation through Gemini and reserves Flow for Stage 4 video generation", () => {
+    const imageStart = source.indexOf("async function generateAllProjectImages");
+    const imageEnd = source.indexOf("async function generateAllProjectVideos", imageStart);
+    const imageFunction = source.slice(imageStart, imageEnd);
+    expect(source).toContain("function buildGeminiImageSlots");
+    expect(imageFunction).toContain("desktopGemini");
+    expect(imageFunction).toContain("gemini.runJob(project.id, preparedSlots");
+    expect(imageFunction).not.toContain("desktopFlow");
+    expect(imageFunction).not.toContain("runImageJob(");
+  });
+
+  it("CASE 19: exposes selectable Flow and Gemini video providers", () => {
+    expect(source).toContain('type VideoProvider = "flow" | "gemini"');
+    expect(source).toContain('name="video-provider"');
+    expect(source).toContain("Luồng 1 · Google Flow");
+    expect(source).toContain("Luồng 2 · Gemini qua CDP");
+  });
+
+  it("CASE 20: routes the Gemini selection through the queued CDP path", () => {
+    const videoStart = source.indexOf("async function generateAllProjectVideos");
+    const videoEnd = source.indexOf("async function loadPersistedProjectImages", videoStart);
+    const videoFunction = source.slice(videoStart, videoEnd);
+    expect(videoFunction).toContain('provider: "gemini"');
+    expect(videoFunction).toContain("status=1&queueJobId=");
+    expect(videoFunction).toContain("Gemini qua CDP đang tạo video");
+    expect(videoFunction).not.toContain("Gemini Veo API");
+  });
+
+  it("CASE 21: keeps provider selection disabled while a run is active", () => {
+    expect(source).toContain("disabled={isAutomaticRunning || isGeneratingVideos}");
+    expect(source).toContain("providerAtStart");
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "ai-content-modeling",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "private": true,
   "main": "electron/main.cjs",
   "scripts": {
@@ -65,7 +65,7 @@
     "productName": "Modeling AI",
     "artifactName": "Modeling.AI.Setup.${version}.${ext}",
     "directories": {
-      "output": "release/1.0.6-production"
+      "output": "release/1.0.7-production"
     },
     "files": [
     "electron/main.cjs",

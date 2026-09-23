@@ -26,6 +26,12 @@ describe("ISSUE-023 Flow prompt input contract", () => {
     expect(videoJob).not.toContain("document.execCommand('insertText', false, prompt)");
     expect(videoJob).toContain("await setFlowPrompt(targetWindow, prompt);");
   });
+
+  it("uses the same native CDP prompt insertion for Flow image jobs", () => {
+    const imageJob = source.slice(source.indexOf("async function runFlowImageJobUnlocked"), source.indexOf("async function runFlowImageJob(event"));
+    expect(imageJob).not.toContain("document.execCommand('insertText', false, prompt)");
+    expect(imageJob).toContain("await setFlowPrompt(window, compiledPrompt);");
+  });
 });
 
 describe("Flow generation blocker contract", () => {
@@ -69,12 +75,36 @@ describe("Flow generation blocker contract", () => {
     expect(videoJob).toContain("await submitPreparedVideo(targetWindow, retryPrepared);");
   });
 
+  it("settles the Flow page before a bounded resend and ignores stale provider banners during that window", () => {
+    expect(source).toContain("const FLOW_PROVIDER_RELOAD_SETTLE_MS = 10_000;");
+    expect(source).toContain("async function reloadFlowProject(window, projectUrl, settleMs = 1_500)");
+    expect(source).toContain("await reloadFlowProject(window, projectUrl, FLOW_PROVIDER_RELOAD_SETTLE_MS);");
+    expect(source).toContain("providerDetectionNotBefore: Date.now() + FLOW_PROVIDER_RELOAD_SETTLE_MS");
+    expect(source).toContain("state?.unusualActivity && (!Number.isFinite(context.providerDetectionNotBefore) || Date.now() >= context.providerDetectionNotBefore)");
+    expect(source).toContain('throw createFlowGenerationFailure("FLOW_PROVIDER_UNUSUAL_ACTIVITY"');
+  });
+
   it("records safe stage/scene/provider evidence and preserves completed scenes on resume", () => {
     expect(source).toContain("stage: \"STAGE_4_VIDEO_GENERATION\"");
     expect(source).toContain("flowProjectUrl: projectUrl");
     expect(source).toContain("generationStarted: false");
     expect(source).toContain("providerBlockedAt");
     expect(source).toContain("sceneId: typeof slot.sceneId === \"string\" ? slot.sceneId : null");
+  });
+});
+
+describe("Flow human-paced interaction contract", () => {
+  it("paces controls, upload, prompt entry and the final Generate action without changing retry policy", () => {
+    expect(source).toContain("const FLOW_HUMAN_PACE = Object.freeze");
+    expect(source).toContain("control: 900");
+    expect(source).toContain("prompt: 1_200");
+    expect(source).toContain("upload: 1_500");
+    expect(source).toContain("beforeGenerate: 2_500");
+    expect(source).toContain('await flowHumanPause("control")');
+    expect(source).toContain('await flowHumanPause("upload")');
+    expect(source).toContain('await flowHumanPause("prompt")');
+    expect(source).toContain('await flowHumanPause("beforeGenerate")');
+    expect(source).toContain("const MAX_FLOW_PROVIDER_RELOAD_RECOVERY = 1;");
   });
 });
 
@@ -95,6 +125,49 @@ describe("ISSUE-033 Flow Start-frame binding contract", () => {
     expect(verifySource).toContain("if ((frames || ingredients) && (!framesSelected || ingredientsSelected)) return false;");
     expect(verifySource).toContain('button[aria-label="Image ingredient"] img');
     expect(verifySource).not.toContain("img[data-media-id]");
+  });
+});
+
+describe("ISSUE-038 Flow asset picker compatibility", () => {
+  it("recognizes current Flow overlay containers and role=option asset tiles", () => {
+    expect(source).toContain('flow-add-menu-popover-content, [role="dialog"], .cdk-overlay-pane');
+    expect(source).toContain('flow-grid-tile-container, flow-tile-container, [role="option"]');
+    expect(source).toContain("element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent");
+  });
+});
+
+describe("ISSUE-039 Flow image response retrieval", () => {
+  it("uses authenticated Edge CDP response capture before CORS-limited page fetch", () => {
+    const start = source.indexOf("async function getFlowImageBuffer");
+    const end = source.indexOf("async function waitForFlowImageWithRecovery", start);
+    const imageBufferSource = source.slice(start, end);
+    expect(imageBufferSource).toContain("const liveCdpSources = [...new Set([...(await listFlowImageSources(window)), result.imageSource])];");
+    expect(imageBufferSource).toContain('readFlowMediaBufferThroughCdp(window, liveSource, "image")');
+    expect(imageBufferSource.indexOf("liveCdpSources")).toBeLessThan(imageBufferSource.indexOf("readFlowImageDataFromCandidates"));
+  });
+});
+
+describe("ISSUE-042 development FFmpeg runtime", () => {
+  it("resolves packaged-unpacked and repository-bundled FFmpeg before considering a machine-wide fallback", () => {
+    const start = source.indexOf("function findFfmpegPath()");
+    const end = source.indexOf("function runFfmpeg", start);
+    const ffmpegSource = source.slice(start, end);
+    expect(ffmpegSource).toContain('path.join(process.resourcesPath || "", "app.asar.unpacked", "electron", "dist", "ffmpeg", "ffmpeg.exe")');
+    expect(ffmpegSource).toContain('path.join(__dirname, "dist", "ffmpeg", "ffmpeg.exe")');
+    expect(ffmpegSource.indexOf("packagedUnpacked")).toBeLessThan(ffmpegSource.indexOf("const capCutApps"));
+    expect(ffmpegSource.indexOf("developmentBundled")).toBeLessThan(ffmpegSource.indexOf("const capCutApps"));
+  });
+});
+
+describe("ISSUE-043 Gemini bare new-chat state", () => {
+  it("uses an already-ready bare /app composer instead of requiring a sidebar New chat button", () => {
+    const start = source.indexOf("async function openNewGeminiConversation");
+    const end = source.indexOf("async function waitForGeminiNewChatReady", start);
+    const newChatSource = source.slice(start, end);
+    expect(newChatSource).toContain("BARE_APP_ALREADY_READY");
+    expect(newChatSource).toContain("DIRECT_BARE_APP_NAVIGATION");
+    expect(newChatSource).toContain("existingNewChat?.bare && existingNewChat?.inputReady");
+    expect(newChatSource.indexOf("DIRECT_BARE_APP_NAVIGATION")).toBeLessThan(newChatSource.indexOf("const clicked"));
   });
 });
 

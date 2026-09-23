@@ -18,7 +18,7 @@ export class LocalJobQueue implements JobQueue {
       where: { status: "queued", name: "codex.job.execute" },
       orderBy: { createdAt: "desc" },
     }) ?? await db.backgroundJob.findFirst({
-      where: { status: "queued", NOT: { name: { startsWith: "desktop.flow." } } },
+      where: { status: "queued", NOT: { OR: [{ name: { startsWith: "desktop.flow." } }, { name: { startsWith: "desktop.gemini." } }] } },
       orderBy: { createdAt: "asc" },
     });
     if (!job) return null;
@@ -41,13 +41,13 @@ export class LocalJobQueue implements JobQueue {
   }
 
   async findStale(staleBefore: Date): Promise<QueuedJob[]> {
-    const jobs = await db.backgroundJob.findMany({ where: { status: "running", startedAt: { lt: staleBefore }, NOT: { name: { startsWith: "desktop.flow." } } }, orderBy: { startedAt: "asc" } });
+    const jobs = await db.backgroundJob.findMany({ where: { status: "running", startedAt: { lt: staleBefore }, NOT: { OR: [{ name: { startsWith: "desktop.flow." } }, { name: { startsWith: "desktop.gemini." } }] } }, orderBy: { startedAt: "asc" } });
     return jobs.map((job) => ({ jobId: job.id, name: job.name, payload: job.payload as JobPayload, idempotencyKey: job.idempotencyKey, attempts: job.attempts, maxAttempts: job.maxAttempts }));
   }
 
   async requeueStale(staleBefore: Date) {
     return db.backgroundJob.updateMany({
-      where: { status: "running", startedAt: { lt: staleBefore }, NOT: { name: { startsWith: "desktop.flow." } } },
+      where: { status: "running", startedAt: { lt: staleBefore }, NOT: { OR: [{ name: { startsWith: "desktop.flow." } }, { name: { startsWith: "desktop.gemini." } }] } },
       data: { status: "queued", startedAt: null, error: "Worker bị gián đoạn; job được resume từ checkpoint." },
     });
   }

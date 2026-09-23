@@ -28,13 +28,13 @@ export async function GET(request: Request) {
     await db.backgroundJob.updateMany({
       where: {
         status: "running",
-        name: { startsWith: "desktop.flow." },
+        OR: [{ name: { startsWith: "desktop.flow." } }, { name: { startsWith: "desktop.gemini." } }],
         startedAt: { lt: new Date(Date.now() - FLOW_BRIDGE_STALE_AFTER_MS) },
       },
       data: { status: "queued", startedAt: null, error: "Electron Flow mất heartbeat quá 90 giây; job được resume từ checkpoint." },
     });
     const jobs = await db.backgroundJob.findMany({
-      where: { status: "queued", name: { startsWith: "desktop.flow." } },
+      where: { status: "queued", OR: [{ name: { startsWith: "desktop.flow." } }, { name: { startsWith: "desktop.gemini." } }] },
       // Pull a wider window so a new source-analysis job cannot be hidden
       // behind an old recovery backlog; priority is applied after ownership.
       orderBy: { createdAt: "desc" },

@@ -52,12 +52,14 @@ type DesktopFacebook = {
 };
 type DesktopGemini = {
   runJob: (projectId: string, slots: ImageSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void, runId?: string) => Promise<{ status: string; images: Record<string, string> }>;
+  runVideoJob: (projectId: string, channelId: string, slots: VideoSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; videos: Record<string, string> }>;
   analyzeSource: (video: Record<string, unknown>, channelDNA?: Record<string, unknown>, runId?: string) => Promise<VideoAnalysisResult["analysis"]>;
   generateIdea: (video: Record<string, unknown>, analysis: VideoAnalysisResult["analysis"], channelDNA?: Record<string, unknown>, artStyle?: string, runId?: string) => Promise<{ schemaVersion: "1.0"; modelingDirections: ModelingIdeaResult[] }>;
   developProject: (video: Record<string, unknown>, analysis: VideoAnalysisResult["analysis"], idea: ModelingIdeaResult, channelDNA?: Record<string, unknown>, aspectRatio?: string, runId?: string) => Promise<Record<string, unknown>>;
 };
 type ImageSlot = { kind: "background" | "scene"; sceneNumber?: number; label: string; prompt: string; aspectRatio: string; promptId?: string; validatedPrompt?: string; validatedPromptHash?: string };
 type VideoSlot = { sceneNumber: number; sceneId?: string; label: string; visualBlock: string; actionBlock: string; audioBlock: string; englishPrompt: string; aspectRatio: string; promptId?: string; validatedPrompt?: string; validatedPromptHash?: string };
+type VideoProvider = "flow" | "gemini";
 type DesktopFlow = {
   open: () => Promise<{ status: string }>;
   runImageJob: (projectId: string, channelId: string, slots: ImageSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; images: Record<string, string> }>;
@@ -190,6 +192,7 @@ export function ViralDashboard() {
   const [generatedVideos, setGeneratedVideos] = useState<Record<string, string>>({});
   const [isGeneratingVideos, setIsGeneratingVideos] = useState(false);
   const [showGeneratedVideos, setShowGeneratedVideos] = useState(false);
+  const [videoProvider, setVideoProvider] = useState<VideoProvider>("flow");
   const [geminiVideoMessage, setGeminiVideoMessage] = useState("");
   const [geminiVideoProgress, setGeminiVideoProgress] = useState({ processed: 0, total: 0 });
   const [isRenderingFinalVideo, setIsRenderingFinalVideo] = useState(false);
@@ -698,7 +701,7 @@ export function ViralDashboard() {
     if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Prompt Fidelity Gate không cho phép generation.");
     return body.data;
   }
-  function buildFlowImageSlots(project = contentProject): ImageSlot[] {
+  function buildGeminiImageSlots(project = contentProject): ImageSlot[] {
     if (!project) return [];
     const strictSpec = assertStrictModelingReady({ sourceVideoId: project.sourceVideoId, sourceVideoUrl: project.sourceVideoUrl, sourceDuration: project.sourceDuration, modelingPolicy: project.modelingPolicy ?? "STRICT_MODELING", sourceModelingSpec: project.sourceModelingSpec, generatedScenes: project.scenes.map((scene) => ({ sceneNumber: scene.sceneNumber, sourceSceneId: scene.sourceSceneId, targetDuration: scene.targetDuration })) });
     const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
@@ -725,12 +728,12 @@ export function ViralDashboard() {
       ...sceneSlots,
     ];
   }
-  async function generateAllProjectImages(project = contentProject, onlySceneNumbers?: number[], existingImages = generatedImages): Promise<Record<string, string> | null> {
+  async function generateAllProjectImages(project = contentProject, onlySceneNumbers?: number[], existingImages = generatedImages, runId?: string): Promise<Record<string, string> | null> {
     if (!project) return null;
     setIsGeneratingImages(true);
     setContentProjectError("");
     try {
-      const allSlots = buildFlowImageSlots(project);
+      const allSlots = buildGeminiImageSlots(project);
       const selected = onlySceneNumbers?.length ? new Set(onlySceneNumbers) : null;
       const slots = selected ? allSlots.filter((slot) => slot.kind === "scene" && slot.sceneNumber !== undefined && selected.has(slot.sceneNumber)) : allSlots;
       if (!slots.length) throw new Error("Không xác định được ảnh cần tạo lại.");
@@ -741,18 +744,18 @@ export function ViralDashboard() {
       setPromptFidelityStatus("PASS");
       setFlowImageSlots(preparedSlots);
       setFlowImageProgress({ processed: 0, total: preparedSlots.length });
-      setFlowImageMessage("Đang tạo ảnh bằng Google Flow qua trình duyệt...");
-      const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
-      if (!flow) throw new Error("Không tìm thấy cầu nối Google Flow trên trình duyệt. Hãy chạy app desktop.");
-      const result = await flow.runImageJob(project.id, selectedChannelId, preparedSlots, (progress) => { setFlowImageProgress({ processed: progress.processed, total: progress.total }); setFlowImageMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`); });
+      setFlowImageMessage("Đang tạo ảnh bằng Gemini qua trình duyệt...");
+      const gemini = (window as Window & { desktopGemini?: DesktopGemini }).desktopGemini;
+      if (!gemini) throw new Error("Không tìm thấy cầu nối Gemini trên trình duyệt. Hãy chạy app desktop.");
+      const result = await gemini.runJob(project.id, preparedSlots, (progress) => { setFlowImageProgress({ processed: progress.processed, total: progress.total }); setFlowImageMessage(`Gemini đang tạo ${progress.label} — ${progress.processed}/${progress.total}`); }, runId);
       setFlowImageProgress({ processed: preparedSlots.length, total: preparedSlots.length });
-      setFlowImageMessage("Đã tạo và lưu ảnh bằng Google Flow qua trình duyệt.");
+      setFlowImageMessage("Đã tạo và lưu ảnh bằng Gemini qua trình duyệt.");
       const mergedImages = { ...existingImages, ...result.images };
       setGeneratedImages(mergedImages);
       setShowGeneratedImages(true);
       setFlowImageMessage("Đã tạo và đưa toàn bộ ảnh vào app theo đúng thứ tự.");
       return mergedImages;
-    } catch (caught) { notifyRuntimeFailure(caught, { operation: "generate-project-images", projectId: project.id, stage: "ASSETS" }); setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo ảnh bằng Google Flow."); throw caught; }
+    } catch (caught) { notifyRuntimeFailure(caught, { operation: "generate-project-images", projectId: project.id, stage: "ASSETS" }); setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo ảnh bằng Gemini."); throw caught; }
     finally { setIsGeneratingImages(false); }
   }
   async function generateAllProjectVideos(project = contentProject, images = generatedImages, onlySceneNumbers?: number[], existingVideos = generatedVideos): Promise<Record<string, string> | null> {
@@ -784,20 +787,44 @@ export function ViralDashboard() {
     setIsGeneratingVideos(true);
     setContentProjectError("");
     setGeminiVideoProgress({ processed: 0, total: sceneSlots.length });
-    setGeminiVideoMessage("Đang tạo video bằng Flow Veo 3 qua trình duyệt...");
+    const providerAtStart = videoProvider;
+    setGeminiVideoMessage(providerAtStart === "flow" ? "Đang tạo video bằng Flow qua CDP..." : "Đang xếp hàng tạo video bằng Gemini qua CDP...");
     try {
       if (!selectedChannelId) throw new Error("Hãy chọn kênh trước khi tạo video.");
-      const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
-      if (!flow) throw new Error("Không tìm thấy cầu nối Google Flow trên trình duyệt. Hãy chạy app desktop.");
       setPromptFidelityStatus("NOT_EVALUATED");
       const preparedSceneSlots = await Promise.all(sceneSlots.map(async (slot) => { const prepared = await preparePromptForFlow(project.id, slot.englishPrompt, "VIDEO", slot.sceneNumber); return { ...slot, englishPrompt: prepared.validatedPrompt, promptId: prepared.promptId, validatedPrompt: prepared.validatedPrompt, validatedPromptHash: prepared.promptHash }; }));
       setPromptFidelityStatus("PASS");
-      const result = await flow.runVideoJob(project.id, selectedChannelId, preparedSceneSlots, (progress) => {
-        setGeminiVideoProgress({ processed: progress.processed, total: progress.total });
-        setGeminiVideoMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`);
-      });
+      let result: { status: string; videos: Record<string, string> } | null = null;
+      if (providerAtStart === "gemini") {
+        const response = await fetch(`/api/v1/projects/${encodeURIComponent(project.id)}/videos`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: "gemini", channelId: selectedChannelId, slots: preparedSceneSlots }) });
+        const body = await response.json() as { data?: { queueJobId?: string; status?: string; videos?: Record<string, string>; error?: string | null }; error?: { message?: string } };
+        if (!response.ok || !body.data?.queueJobId) throw new Error(body.error?.message ?? "Không thể xếp hàng video bằng Gemini qua CDP.");
+        const queueJobId = body.data.queueJobId;
+        let completedVideos: Record<string, string> = {};
+        for (let poll = 0; poll < 2_400; poll += 1) {
+          const statusResponse = await fetch(`/api/v1/projects/${encodeURIComponent(project.id)}/videos?status=1&queueJobId=${encodeURIComponent(queueJobId)}`, { cache: "no-store" });
+          const statusBody = await statusResponse.json() as { data?: { status?: string; videos?: Record<string, string>; error?: string | null }; error?: { message?: string } };
+          if (!statusResponse.ok || !statusBody.data) throw new Error(statusBody.error?.message ?? "Không thể đọc tiến trình Gemini qua CDP.");
+          completedVideos = statusBody.data.videos ?? {};
+          const processed = preparedSceneSlots.filter((slot) => Boolean(completedVideos[`scene-${slot.sceneNumber}`])).length;
+          setGeminiVideoProgress({ processed, total: preparedSceneSlots.length });
+          setGeminiVideoMessage(`Gemini qua CDP đang tạo video — ${processed}/${preparedSceneSlots.length}`);
+          if (statusBody.data.status === "completed") { result = { status: "completed", videos: completedVideos }; break; }
+          if (statusBody.data.status === "failed") throw new Error(statusBody.data.error ?? "Gemini qua CDP không tạo được video.");
+          await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+        }
+        if (!result) throw new Error("Gemini qua CDP vượt quá thời gian chờ cho phép.");
+      } else {
+        const flow = (window as Window & { desktopFlow?: DesktopFlow }).desktopFlow;
+        if (!flow) throw new Error("Không tìm thấy cầu nối Google Flow trên trình duyệt. Hãy chạy app desktop.");
+        result = await flow.runVideoJob(project.id, selectedChannelId, preparedSceneSlots, (progress) => {
+          setGeminiVideoProgress({ processed: progress.processed, total: progress.total });
+          setGeminiVideoMessage(`Đang tạo ${progress.label} — ${progress.processed}/${progress.total}`);
+        });
+      }
+      if (!result) throw new Error("Không nhận được kết quả tạo video.");
       setGeminiVideoProgress({ processed: preparedSceneSlots.length, total: preparedSceneSlots.length });
-      setGeminiVideoMessage("Đã tạo và lưu video bằng Flow Veo 3 qua trình duyệt.");
+      setGeminiVideoMessage(providerAtStart === "flow" ? "Đã tạo và lưu video bằng Flow qua CDP." : "Đã tạo và lưu video bằng Gemini qua CDP.");
       const mergedVideos = { ...existingVideos, ...result.videos };
       setGeneratedVideos(mergedVideos);
       setShowGeneratedVideos(true);
@@ -805,7 +832,7 @@ export function ViralDashboard() {
       return mergedVideos;
     } catch (caught) {
       notifyRuntimeFailure(caught, { operation: "generate-project-videos", projectId: project.id, stage: "SCENES" });
-      setContentProjectError(isFlowProviderUnusualActivityError(caught) ? FLOW_PROVIDER_UNUSUAL_ACTIVITY_MESSAGE : caught instanceof Error ? caught.message : "Không thể tạo video bằng Flow Veo 3.");
+      setContentProjectError(isFlowProviderUnusualActivityError(caught) ? FLOW_PROVIDER_UNUSUAL_ACTIVITY_MESSAGE : caught instanceof Error ? caught.message : providerAtStart === "flow" ? "Không thể tạo video bằng Flow qua CDP." : "Không thể tạo video bằng Gemini qua CDP.");
       throw caught;
     } finally {
       setIsGeneratingVideos(false);
@@ -1148,9 +1175,9 @@ export function ViralDashboard() {
       let images = generatedImages;
       if (targetStage <= 3) {
         activeStep = "images";
-        await changeStep(activeStep, "running", "Đang tạo ảnh bằng Google Flow qua trình duyệt...");
-        const generated = await generateAllProjectImages(project);
-        if (!generated) throw new Error("Không tạo đủ ảnh bằng Google Flow.");
+        await changeStep(activeStep, "running", "Đang tạo ảnh bằng Gemini qua trình duyệt...");
+        const generated = await generateAllProjectImages(project, undefined, generatedImages, runId);
+        if (!generated) throw new Error("Không tạo đủ ảnh bằng Gemini.");
         images = generated;
         await changeStep(activeStep, "completed", `Đã tạo ${Object.keys(images).length} ảnh và lưu vào app.`);
         if (resumeSelection.stopAfterStage === 3) {
@@ -1172,7 +1199,7 @@ export function ViralDashboard() {
         activeStep = "videos";
         await changeStep(activeStep, "running", "Đang tạo video cho từng phân cảnh...");
         const generated = await generateAllProjectVideos(project, images, undefined, videos);
-        if (!generated) throw new Error("Không tạo đủ video bằng Flow Veo 3.");
+        if (!generated) throw new Error(videoProvider === "flow" ? "Không tạo đủ video bằng Flow qua CDP." : "Không tạo đủ video bằng Gemini qua CDP.");
         videos = generated;
         await changeStep(activeStep, "completed", `Đã tạo ${Object.keys(videos).length} video phân cảnh.`);
       } else {
@@ -1510,6 +1537,18 @@ export function ViralDashboard() {
               {contentProject && contentProject.scenes.every((scene) => generatedImages[`scene-${scene.sceneNumber}`]) && (
                 <div className="mt-5 border-t border-[#d8e3f1] pt-4">
                   <p className="text-sm font-semibold text-[#6883aa]">Video từng phân cảnh sẽ được tạo tự động trong phiên chạy.</p>
+                  <div className="mt-3 rounded-xl border border-[#d8e3f1] bg-[#f7f9fc] p-4">
+                    <p className="font-extrabold text-[#0b3262]">Chọn luồng tạo video</p>
+                    <p className="mt-1 text-sm leading-6 text-[#6883aa]">Chọn một nhà cung cấp cho Stage tạo video. Lựa chọn này áp dụng cho phiên chạy tiếp theo và không làm lại video đã lưu.</p>
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2" role="radiogroup" aria-label="Luồng tạo video">
+                      <label className={`cursor-pointer rounded-lg border p-3 ${videoProvider === "flow" ? "border-[#0b5799] bg-white ring-2 ring-[#0b5799]/20" : "border-[#cbd9ea] bg-white"}`}>
+                        <span className="flex items-start gap-3"><input type="radio" name="video-provider" value="flow" checked={videoProvider === "flow"} onChange={() => setVideoProvider("flow")} disabled={isAutomaticRunning || isGeneratingVideos} className="mt-1" /><span><span className="block font-bold text-[#0b3262]">Luồng 1 · Google Flow</span><span className="mt-1 block text-xs leading-5 text-[#6883aa]">Tạo qua trình duyệt Flow, giữ nguyên thao tác và checkpoint Flow hiện có.</span></span></span>
+                      </label>
+                      <label className={`cursor-pointer rounded-lg border p-3 ${videoProvider === "gemini" ? "border-[#6d28d9] bg-white ring-2 ring-[#6d28d9]/20" : "border-[#cbd9ea] bg-white"}`}>
+                        <span className="flex items-start gap-3"><input type="radio" name="video-provider" value="gemini" checked={videoProvider === "gemini"} onChange={() => setVideoProvider("gemini")} disabled={isAutomaticRunning || isGeneratingVideos} className="mt-1" /><span><span className="block font-bold text-[#0b3262]">Luồng 2 · Gemini qua CDP</span><span className="mt-1 block text-xs leading-5 text-[#6883aa]">Tạo bằng trình duyệt Gemini/CDP qua hàng đợi Electron; không cần khóa API Veo.</span></span></span>
+                      </label>
+                    </div>
+                  </div>
                   {geminiVideoMessage && <p className="mt-2 text-sm font-semibold text-[#6d28d9]">{geminiVideoMessage}</p>}
                   {Object.keys(generatedVideos).length > 0 && <button type="button" onClick={() => setShowGeneratedVideos((visible) => !visible)} className="ml-2 rounded-lg border border-[#7c3aed] px-4 py-2.5 text-sm font-bold text-[#6d28d9]">{showGeneratedVideos ? "Ẩn video" : "Xem video"}</button>}
                   {contentProject.scenes.every((scene) => generatedVideos[`scene-${scene.sceneNumber}`]) && <>
