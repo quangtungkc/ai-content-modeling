@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.8 — 2026-09-23
+
+### Fixed
+
+- Packaged the second video-generation route as a first-class Gemini-through-CDP flow alongside Google Flow, with provider selection preserved in the dashboard and queue payload.
+- Fixed the Gemini video send path using an unbound conversation variable after the reference image was attached.
+- Added an explicit 9:16 output directive to the sealed video prompt when the Gemini Video UI does not expose a ratio control; 16:9 remains explicit when selected.
+- Kept the current `/videos` composer readiness gate, `Tệp` upload fallback, reference-preview confirmation, and bounded page-reset recovery in the release build.
+
+### Validation
+
+- Added regression coverage for Gemini-CDP executor routing, aspect-ratio prompt sealing, and the Gemini video send-boundary variable regression.
+
 ## 1.0.7 — 2026-09-23
 
 ### Fixed

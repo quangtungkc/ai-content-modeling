@@ -1587,3 +1587,61 @@ Copy this template for each new issue. Do not delete historical records.
 - `STATUS`: `FIXED`
 - `RESUME_CHECKPOINT`: `runStatus=SUCCEEDED; lastCompletedStage=5; resumeTarget=null; executionLease=null.`
 - `NOTES`: `No production data, browser profile, cookies, provider account, or historical successful run was reset or deleted.`
+
+### ISSUE-053
+
+- `ISSUE_ID`: `ISSUE-053`
+- `REGRESSION_OF`: `None — new focused Gemini Video composer test; previous production run remains successful.`
+- `DISCOVERED_AT`: `2026-09-23T04:11:13.353Z`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `focused-single-scene-test-1 (production attempt remains 11)`
+- `STAGE`: `4 — VIDEO GENERATION`
+- `JOB/SCENE`: `Scene 4 — direct Electron Gemini-CDP IPC test; no BackgroundJob was created.`
+- `FIRST_DIVERGENCE`: `GEMINI_VIDEO_UPLOAD_MENU_NOT_READY`
+- `SYMPTOM`: `The Gemini-CDP video path opened the Gemini /videos page, but stopped before uploading the Scene-4 reference image because the upload menu/action never became available.`
+- `LAST_CONFIRMED_GOOD_STATE`: `Current-worktree renderer identity matched sourceCommit ad92c97; Prompt Fidelity preparation returned HTTP 200; scene-4.png existed (949,096 bytes); Electron exposed desktopGemini.runVideoJob; the canonical Edge CDP target loaded https://gemini.google.com/videos.`
+- `EXPECTED_STATE`: `The actual Gemini Video composer is selected and ready, the upload control/file input is available, the Scene-4 reference preview is confirmed, and only then prompt submission and generation are attempted.`
+- `ACTUAL_STATE`: `Electron accepted https://gemini.google.com/videos as videoMode because the route itself was treated as sufficient. Read-only CDP inspection showed the general Gemini tools menu with visible labels “Nội dung tải lên và công cụ”, “Tệp” and “Tạo video”, but uploadAction=false. The helper wait expired with GEMINI_VIDEO_UPLOAD_MENU_NOT_READY.`
+- `ROOT_CAUSE`: `The Gemini /videos UI contract was narrower than the live DOM: the current Video landing/composer exposes the reference entry as “Tệp” inside the uploads/tools menu, while uploadGeminiVideoReference() only recognized the older upload labels. The route must be accepted only with the rendered Video landing heading/input, and the generic chat-menu “Tạo video” item must not be clicked during /videos hydration because it navigates back to /app.`
+- `ROOT_CAUSE_CONFIDENCE`: `CONFIRMED`
+- `ERROR_THROW_SITE`: `electron/main.cjs — uploadGeminiVideoReference() upload-menu readiness wait; caused by geminiVideoUiState() not recognizing the current “Tệp” entry and by an unsafe attempt to re-select the generic chat tool during /videos hydration.`
+- `FAILURE_CALL_CHAIN`: `window.desktopGemini.runVideoJob → runGeminiVideoJobUnlocked → openGeminiVideoComposer (rendered /videos landing gate) → uploadGeminiVideoReference → open uploads/tools menu → recognize “Tệp” → CDP file attach/preview confirmation.`
+- `RELEVANT_EVIDENCE`: `Direct CDP IPC result: phase=VIDEO_JOB, progress stopped at “Đang mở Gemini tạo video cảnh 4...”, error=GEMINI_VIDEO_UPLOAD_MENU_NOT_READY. Edge CDP 9333 target remained at https://gemini.google.com/videos; DOM readback reported videoRoute=true, inputReady=true, createVideoMenu=true, uploadAction=false. No prompt was sent, Generate was not clicked, no provider job was created, and no provider error occurred. Existing scene-4.mp4 remained unchanged at 681,673 bytes, SHA-256 8F3004D2EC57605A39D5F8F529FDF1C11AAF5CC2DC12D1D40AABC15872E24FC0.`
+- `RECOMMENDED_REPAIR`: `Require rendered /videos Video landing evidence (heading plus usable input), do not re-click the generic chat “Tạo video” item on that route, recognize the current “Tệp” upload entry, and confirm the reference preview before prompt submission. Do not change provider, retry count or anti-abuse behavior.`
+- `CHOSEN_REPAIR`: `Updated geminiVideoUiState() with explicit videoLanding/videoMode evidence, current menu selectors (including gem-list-item/menuitem), “Tệp” upload recognition, and a direct /videos readiness path that does not click the destructive generic chat-mode menu during hydration.`
+- `FILES_CHANGED`: `electron/main.cjs; electron/flow-prompt-input.test.ts; docs/live-debug/LIVE_DEBUG_LEDGER.md; docs/live-debug/LIVE_DEBUG_STATE.json`
+- `TESTS_ADDED`: `ISSUE-053 source-contract tests for route-only rejection, rendered Video landing readiness, current Gemini menu item selectors, and “Tệp” upload handling.`
+- `TEST_RESULTS`: `Targeted flow-prompt-input suite PASS (23/23); typecheck PASS; node --check electron/main.cjs PASS; git diff --check PASS. The first focused run exposed an over-eager tool-selection branch; read-only CDP confirmed the live /videos landing is valid and that clicking generic “Tạo video” navigates to /app. After the correction, the focused test passed composer opening, reference upload and preview, and prompt preparation.`
+- `LIVE_VALIDATION`: `Original ISSUE-053 divergence FIXED and live path reached the send boundary. A later first divergence occurred after the repair: Gemini reset /videos to bare /app during prompt send and produced GEMINI_VIDEO_PAGE_RESET_DURING_SEND; recorded separately as ISSUE-054. No provider generation, no Generate acknowledgement, and no canonical scene-4 overwrite occurred.`
+- `STATUS`: `FIXED — composer/readiness repair verified; follow-up send-reset ISSUE-054 is OPEN.`
+- `RESUME_CHECKPOINT`: `Production run unchanged: status=SUCCEEDED; lastCompletedStage=5; failedStage=null; resumeTarget=null; completedVideoScenes=[1,2,3,4]; executionLease=null. Focused test status=FAILED; automatic retry=NO.`
+- `NOTES`: `No production resume, no retry after the send reset, no provider generation, no account/profile/cookie change, no DB reset, no canonical video overwrite, and no Stage-5 continuation. Focused validation used the same canonical Edge profile and CDP route; production run remains SUCCEEDED.`
+
+### ISSUE-054
+
+- `ISSUE_ID`: `ISSUE-054`
+- `REGRESSION_OF`: `None — new send-boundary failure discovered after ISSUE-053 composer/readiness repair.`
+- `DISCOVERED_AT`: `2026-09-23T04:38:34.703Z`
+- `RUN_ID`: `cmuc51vjr0006k5ycwa04qxgq`
+- `ATTEMPT`: `focused-single-scene-test-3 (production attempt remains 11)`
+- `STAGE`: `4 — VIDEO GENERATION`
+- `JOB/SCENE`: `Scene 4 — direct Electron Gemini-CDP IPC test; no BackgroundJob was created.`
+- `FIRST_DIVERGENCE`: `GEMINI_VIDEO_PAGE_RESET_DURING_SEND`
+- `SYMPTOM`: `The focused Gemini Video path opened the correct /videos landing, uploaded and confirmed the Scene-4 reference, prepared the prompt, then the page reset to bare /app while the prompt send was being confirmed.`
+- `LAST_CONFIRMED_GOOD_STATE`: `Prompt Fidelity returned HTTP 200; rendered /videos Video landing was accepted; current “Tệp” upload entry was opened; reference attachment/preview confirmation completed; send boundary was reached.`
+- `EXPECTED_STATE`: `Gemini remains on the active Video page, a new exact user turn is confirmed, generation starts, and only then response/video completion is awaited.`
+- `ACTUAL_STATE`: `Gemini navigated to https://gemini.google.com/app during send; no confirmed user turn, no generation-start evidence, no provider job, and no new scene-4.mp4 were produced. The bounded path surfaced GEMINI_VIDEO_PAGE_RESET_DURING_SEND.`
+- `ROOT_CAUSE`: `A valid Gemini Video page reset to the bare Gemini app during prompt submission. The observed reset is confirmed, but the underlying provider/session reason (cookie rotation, auth refresh, or another Gemini navigation event) is not proven by this focused run.`
+- `ROOT_CAUSE_CONFIDENCE`: `UNKNOWN`
+- `ERROR_THROW_SITE`: `electron/main.cjs — runGeminiVideoJobUnlocked() submitVideoPrompt() recovery catch, terminal GEMINI_VIDEO_PAGE_RESET_DURING_SEND.`
+- `FAILURE_CALL_CHAIN`: `window.desktopGemini.runVideoJob → runGeminiVideoJobUnlocked → openGeminiVideoComposer PASS → uploadGeminiVideoReference PASS → submitGeminiCommand → submission not confirmed + URL bare /app → bounded recovery terminal error.`
+- `RELEVANT_EVIDENCE`: `Focused CDP result at 2026-09-23T04:38:34.703Z: progress reached “Đang gửi prompt cảnh 4 tới Gemini...”; final message GEMINI_VIDEO_PAGE_RESET_DURING_SEND. Edge CDP 9333 ended at https://gemini.google.com/app. generationStarted=false; providerJobCreated=false; no Generate acknowledgement; canonical scene-4.mp4 remained preserved.`
+- `RECOMMENDED_REPAIR`: `Investigate the Gemini send/reset boundary read-only and preserve the structured reset as the primary error. Do not retry automatically, do not bypass provider/session controls, and do not change the ISSUE-053 composer repair.`
+- `CHOSEN_REPAIR`: `None — repair is not authorized for ISSUE-054 in this turn; failure was recorded and execution stopped.`
+- `FILES_CHANGED`: `docs/live-debug/LIVE_DEBUG_LEDGER.md; docs/live-debug/LIVE_DEBUG_STATE.json`
+- `TESTS_ADDED`: `None.`
+- `TEST_RESULTS`: `ISSUE-053 targeted suite/typecheck/syntax/diff checks PASS; focused CDP validation reached send then failed at the new reset boundary.`
+- `LIVE_VALIDATION`: `FAIL — GEMINI_VIDEO_PAGE_RESET_DURING_SEND; no retry.`
+- `STATUS`: `OPEN — SEND_RESET_AFTER_COMPOSER_REPAIR`
+- `RESUME_CHECKPOINT`: `Production run unchanged: status=SUCCEEDED; lastCompletedStage=5; failedStage=null; resumeTarget=null; completedVideoScenes=[1,2,3,4]; executionLease=null. Focused test settled with no production lease.`
+- `NOTES`: `Do not treat this as a provider generation failure or as ISSUE-053 regression without further evidence. No production data, profile, cookies, or canonical media were mutated.`

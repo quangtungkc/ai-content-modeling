@@ -5760,15 +5760,19 @@ async function geminiVideoUiState(window) {
     const roots = [document]; const seen = new Set(roots);
     for (let i = 0; i < roots.length; i++) for (const node of roots[i].querySelectorAll('*')) if (node.shadowRoot && !seen.has(node.shadowRoot)) { seen.add(node.shadowRoot); roots.push(node.shadowRoot); }
     const visible = (node) => { const box = node?.getBoundingClientRect?.(); const style = node ? getComputedStyle(node) : null; return Boolean(box && box.width > 0 && box.height > 0 && style?.visibility !== 'hidden' && style?.display !== 'none'); };
-    const controls = roots.flatMap(root => [...root.querySelectorAll('button,[role="button"],[role="menuitemcheckbox"]')]).filter(visible);
+    const controls = roots.flatMap(root => [...root.querySelectorAll('button,[role="button"],[role="menuitem"],[role="menuitemcheckbox"],gem-list-item')]).filter(visible);
     const label = (node) => String(node.getAttribute('aria-label') || node.getAttribute('title') || node.textContent || '').replace(/\\s+/g, ' ').trim();
     const has = (pattern) => controls.some(node => pattern.test(label(node)));
     const input = roots.flatMap(root => [...root.querySelectorAll('[contenteditable="true"],textarea,[role="textbox"]')]).find(visible);
     const videos = roots.flatMap(root => [...root.querySelectorAll('video')]).filter(visible).map(node => node.currentSrc || node.src || node.querySelector('source')?.src).filter(Boolean);
     const inputLabel = String(input?.getAttribute?.('aria-label') || input?.getAttribute?.('placeholder') || input?.textContent || '');
     const videoRoute = location.hostname === 'gemini.google.com' && location.pathname === '/videos';
-    const videoComposer = videoRoute || /(?:mô tả video|describe your video)/i.test(inputLabel) || roots.flatMap(root => [...root.querySelectorAll('*')]).some(node => visible(node) && /^(?:Video)$/i.test(String(node.textContent || '').replace(/\\s+/g, ' ').trim()));
-    return { url: location.href, videoMode: Boolean(input) && videoComposer, videoTool: has(/^(?:Tạo video|Create video)$/i), tools: has(/(?:Nội dung tải lên và công cụ|Uploads? and tools|Add files)/i), tryButton: has(/^(?:Dùng thử|Try it)$/i), upload: has(/^(?:Tải tệp lên|Upload file|Thêm tệp|Add files?)$/i), inputReady: Boolean(input), videos, textTail: String(document.body?.innerText || '').slice(-1800) };
+    const videoPrompt = /(?:mô tả video|describe your video)/i.test(inputLabel);
+    const videoModeBadge = roots.flatMap(root => [...root.querySelectorAll('*')]).some(node => visible(node) && /^(?:Video)$/i.test(String(node.textContent || '').replace(/\\s+/g, ' ').trim()));
+    const videoLanding = videoRoute && /(?:^|\\n)Tạo video(?:\\n|$)|(?:^|\\n)Create video(?:\\n|$)/i.test(String(document.body?.innerText || ''));
+    const videoComposer = videoPrompt || videoModeBadge || videoLanding;
+    const toolsMenuOpen = has(/^(?:Tệp|Files?|Drive|Google Photos|Sổ ghi chú|Notebooks|Tạo hình ảnh|Create image|Tạo video|Create video|Tạo nhạc|Create music|Canvas)$/i);
+    return { url: location.href, videoRoute, videoMode: Boolean(input) && videoComposer, videoLanding, videoTool: has(/^(?:Tạo video|Create video)$/i), tools: has(/(?:Nội dung tải lên và công cụ|Uploads? and tools|Add files)/i), toolsMenuOpen, tryButton: has(/^(?:Dùng thử|Try it)$/i), upload: has(/^(?:Tệp|Files?|Tải tệp lên|Upload file|Thêm tệp|Add files?)$/i), inputReady: Boolean(input), videos, textTail: String(document.body?.innerText || '').slice(-1800) };
   })()`, true);
 }
 
@@ -5780,7 +5784,7 @@ async function clickGeminiVideoControl(window, names) {
     const visible = (node) => { const box = node?.getBoundingClientRect?.(); const style = node ? getComputedStyle(node) : null; return Boolean(box && box.width > 0 && box.height > 0 && style?.visibility !== 'hidden' && style?.display !== 'none'); };
     const normalize = (value) => String(value || '').normalize('NFKD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
     const wanted = names.map(normalize);
-    const button = roots.flatMap(root => [...root.querySelectorAll('button,[role="button"],[role="menuitemcheckbox"]')]).find(node => visible(node) && wanted.some(name => {
+    const button = roots.flatMap(root => [...root.querySelectorAll('button,[role="button"],[role="menuitem"],[role="menuitemcheckbox"],gem-list-item')]).find(node => visible(node) && wanted.some(name => {
       const value = normalize([node.getAttribute('aria-label'), node.getAttribute('title'), node.textContent].join(' '));
       return value === name || value.includes(name);
     }));
@@ -5833,10 +5837,11 @@ async function findGeminiVideoFileInputBackendNodeId(window) {
 }
 
 async function selectGeminiVideoGenerationTool(window) {
-  if ((await geminiVideoUiState(window)).videoMode) return;
+  const initialState = await geminiVideoUiState(window);
+  if (initialState.videoMode) return;
   // The current Gemini video UI exposes the tools menu as a compact plus
   // button. Its text may be empty, but aria-haspopup=menu is stable.
-  let opened = false;
+  let opened = Boolean(initialState.toolsMenuOpen || initialState.videoTool);
   for (let attempt = 0; attempt < 60 && !opened; attempt += 1) {
     opened = await window.webContents.executeJavaScript(`(() => {
     const roots=[document],seen=new Set(roots);for(let i=0;i<roots.length;i++)for(const n of roots[i].querySelectorAll('*'))if(n.shadowRoot&&!seen.has(n.shadowRoot)){seen.add(n.shadowRoot);roots.push(n.shadowRoot);}
@@ -5852,7 +5857,7 @@ async function selectGeminiVideoGenerationTool(window) {
   const selected = await window.webContents.executeJavaScript(`(() => {
     const roots=[document],seen=new Set(roots);for(let i=0;i<roots.length;i++)for(const n of roots[i].querySelectorAll('*'))if(n.shadowRoot&&!seen.has(n.shadowRoot)){seen.add(n.shadowRoot);roots.push(n.shadowRoot);}
     const visible=n=>{const b=n?.getBoundingClientRect?.(),s=n?getComputedStyle(n):null;return Boolean(b&&b.width>0&&b.height>0&&s?.display!=='none'&&s?.visibility!=='hidden');};
-    const node=roots.flatMap(r=>[...r.querySelectorAll('button,[role="button"],[role="menuitemcheckbox"]')]).find(n=>visible(n)&&/^(?:tạo video|create video)$/i.test(String(n.getAttribute('aria-label')||n.textContent||'').replace(/\\s+/g,' ').trim()));if(!node||node.disabled)return false;node.click();return true;
+    const node=roots.flatMap(r=>[...r.querySelectorAll('button,[role="button"],[role="menuitem"],[role="menuitemcheckbox"],gem-list-item')]).find(n=>visible(n)&&/^(?:tạo video|create video)$/i.test(String(n.getAttribute('aria-label')||n.textContent||'').replace(/\\s+/g,' ').trim()));if(!node||node.disabled)return false;node.click();return true;
   })()`, true).catch(() => false);
   if (!selected) throw new Error("GEMINI_VIDEO_TOOL_OPTION_NOT_FOUND");
   for (let i = 0; i < 40; i++) {
@@ -5871,6 +5876,10 @@ async function openGeminiVideoComposer(window) {
   for (let elapsed = 0; elapsed < 30_000; elapsed += 250) {
     const state = await geminiVideoUiState(window);
     if (/accounts\.google\.com|signin|challenge|captcha/i.test(state.url) || /sign in|đăng nhập|choose an account|chọn tài khoản|captcha|verify you are human/i.test(state.textTail)) throw new Error("GEMINI_AUTH_REQUIRED");
+    // /videos is the first-party Video landing/composer. Do not click the
+    // generic chat tools menu while this page is hydrating: that menu's
+    // “Tạo video” item switches back to /app and destroys the Video context.
+    // The explicit videoLanding predicate below is the readiness gate.
     if (/^https:\/\/gemini\.google\.com\/videos(?:[/?#]|$)/i.test(state.url) && state.videoMode && state.inputReady) return state;
     await delay(250);
   }
@@ -5894,11 +5903,12 @@ async function uploadGeminiVideoReference(window, imagePath) {
       getMainFrameId: () => getEdgeGeminiMainFrameId(window),
       targetIsCurrent: () => !window.isDestroyed() && /^https:\/\/gemini\.google\.com\//i.test(window.webContents.getURL()),
       openToolbar: async () => {
-        if ((await geminiVideoUiState(window)).upload) return;
+        const initialState = await geminiVideoUiState(window);
+        if (initialState.upload) return;
         // This is a non-native menu toggle. A CDP user-gesture evaluation is
         // more reliable than a pointer click here because the menu otherwise
         // races its own animation and can toggle closed again.
-        await clickGeminiVideoControl(window, ["Nội dung tải lên và công cụ", "Uploads and tools", "Add files"]);
+        if (!initialState.toolsMenuOpen) await clickGeminiVideoControl(window, ["Nội dung tải lên và công cụ", "Uploads and tools", "Add files"]);
         for (let elapsed = 0; elapsed < 10_000; elapsed += 250) {
           if ((await geminiVideoUiState(window)).upload) return;
           await delay(250);
@@ -5907,7 +5917,7 @@ async function uploadGeminiVideoReference(window, imagePath) {
       },
       findUploadAction: async () => (await geminiVideoUiState(window)).upload,
       clickUploadAction: async () => {
-        const point = await findGeminiVideoControlPoint(window, ["Tải tệp lên", "Upload file", "Thêm tệp", "Add files"]);
+        const point = await findGeminiVideoControlPoint(window, ["Tệp", "Files", "Tải tệp lên", "Upload file", "Thêm tệp", "Add files"]);
         if (!point) throw new Error("GEMINI_VIDEO_UPLOAD_CONTROL_NOT_FOUND");
         await dispatchBrowserClick(window, point);
       },
@@ -5965,8 +5975,9 @@ async function runGeminiVideoJobUnlocked(event, projectId, channelId, slots) {
       await startGeminiNavigationObserver(window, command);
       await startGeminiNetworkObserver(window, command);
       const baseline = await captureGeminiResponseSnapshot(window, null, "VIDEO_GENERATION");
+      const baselineConversationId = conversationIdFromUrl(baseline.conversationUrl);
       command.recordConversationState({ url: baseline.conversationUrl, mode: baseline.conversationMode, assistantTurnCount: baseline.assistantTurnCount, userTurnCount: baseline.userTurnCount });
-      command.setSubmissionBaseline({ expectedConversationUrl: baseline.conversationUrl, expectedConversationId: conversationIdFromUrl(baseline.conversationUrl), allowNewConversation: !conversationIdFromUrl(baseline.conversationUrl), userTurnCount: baseline.userTurnCount, assistantTurnCount: baseline.assistantTurnCount, userTurns: baseline.userTurns });
+      command.setSubmissionBaseline({ expectedConversationUrl: baseline.conversationUrl, expectedConversationId: baselineConversationId, allowNewConversation: !baselineConversationId, userTurnCount: baseline.userTurnCount, assistantTurnCount: baseline.assistantTurnCount, userTurns: baseline.userTurns });
       await submitGeminiCommand(window, command, prompt, "GEMINI_VIDEO_COMPOSER_MISSING", baseline);
       if (command.snapshot().submissionConfirmed !== true) throw new Error("GEMINI_VIDEO_SUBMISSION_NOT_CONFIRMED");
       return command;

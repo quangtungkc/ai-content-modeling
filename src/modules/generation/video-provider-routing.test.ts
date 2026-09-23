@@ -6,6 +6,7 @@ const routeSource = readFileSync(path.resolve(process.cwd(), "src/app/api/v1/pro
 const workerSource = readFileSync(path.resolve(process.cwd(), "src/workers/job-handler.ts"), "utf8");
 const preloadSource = readFileSync(path.resolve(process.cwd(), "electron/preload.cjs"), "utf8");
 const mainSource = readFileSync(path.resolve(process.cwd(), "electron/main.cjs"), "utf8");
+const dashboardSource = readFileSync(path.resolve(process.cwd(), "src/components/viral-dashboard.tsx"), "utf8");
 
 describe("video provider routing", () => {
   it("accepts an explicit Gemini provider without changing the Flow default", () => {
@@ -49,5 +50,20 @@ describe("video provider routing", () => {
     const geminiIpc = mainSource.slice(mainSource.indexOf('ipcMain.handle("gemini-browser:run-video-job"'), mainSource.indexOf('ipcMain.handle("flow-browser:run-video-job"'));
     expect(geminiIpc).toContain("runGeminiVideoJob(");
     expect(geminiIpc).not.toContain("runFlowVideoJob(");
+  });
+
+  it("makes the requested video aspect ratio explicit before prompt-fidelity sealing", () => {
+    expect(dashboardSource).toContain("const videoAspectRatioDirective = aspectRatio === \"16:9\"");
+    expect(dashboardSource).toContain("OUTPUT REQUIREMENT: Create the video in a vertical 9:16 aspect ratio.");
+    expect(dashboardSource).toContain("videoAspectRatioDirective");
+  });
+
+  it("does not reference an unbound conversation variable in the Gemini video submit path", () => {
+    const start = mainSource.indexOf("async function runGeminiVideoJobUnlocked");
+    const end = mainSource.indexOf("async function runGeminiVideoJob(event", start);
+    const geminiJob = mainSource.slice(start, end);
+    expect(geminiJob).toContain("const baselineConversationId = conversationIdFromUrl(baseline.conversationUrl);");
+    expect(geminiJob).toContain("expectedConversationId: baselineConversationId");
+    expect(geminiJob).not.toContain("expectedConversationId: conversationId");
   });
 });

@@ -765,6 +765,7 @@ export function ViralDashboard() {
     const identityPack = channels.find((channel) => channel.id === selectedChannelId)?.characterIdentityPack;
     if (!identityPack?.active || !identityPack.referenceImages.some((reference) => reference.active)) throw new Error("MAIN_CHARACTER_IDENTITY_MISSING: Hãy lưu Character Identity Pack cho Channel trước khi tạo video.");
     const identityPrompt = `PRESERVE IDENTITY: use the approved Character Identity Pack ${identityPack.name}. LOCKED TRAITS: ${JSON.stringify(identityPack.lockedTraits)}. PRESERVE IDENTITY: face identity, facial structure, skin tone, base hairstyle, body proportions, body build, age appearance, distinctive traits and core character design language. APPLY SCENE APPEARANCE: use only the outfit, shoes, accessories, props, emotion, pose and temporary condition explicitly required by this scene.`;
+    const videoAspectRatioDirective = aspectRatio === "16:9" ? "OUTPUT REQUIREMENT: Create the video in a 16:9 landscape aspect ratio." : "OUTPUT REQUIREMENT: Create the video in a vertical 9:16 aspect ratio.";
     const selected = onlySceneNumbers?.length ? new Set(onlySceneNumbers) : null;
     const sceneSlots: VideoSlot[] = project.scenes.filter((scene) => (!selected || selected.has(scene.sceneNumber)) && !existingVideos[`scene-${scene.sceneNumber}`]).map((scene) => ({
       sceneNumber: scene.sceneNumber,
@@ -773,7 +774,7 @@ export function ViralDashboard() {
       visualBlock: scene.visualBlock,
       actionBlock: scene.actionBlock,
       audioBlock: scene.audioBlock,
-      englishPrompt: `${identityPrompt}\n${compileStrictModelingConstraints(strictSpec, scene.sourceSceneId ?? undefined)}\n${scene.englishPrompt?.trim() || `Create one 4-second video starting from the approved start image for scene ${scene.sceneNumber}. Preserve the character, background, composition, story meaning, and ending, and animate only the specified primary action with synchronized sound.`}`,
+      englishPrompt: `${identityPrompt}\n${videoAspectRatioDirective}\n${compileStrictModelingConstraints(strictSpec, scene.sourceSceneId ?? undefined)}\n${scene.englishPrompt?.trim() || `Create one 4-second video starting from the approved start image for scene ${scene.sceneNumber}. Preserve the character, background, composition, story meaning, and ending, and animate only the specified primary action with synchronized sound.`}`,
       aspectRatio,
     }));
     if (!sceneSlots.length) {

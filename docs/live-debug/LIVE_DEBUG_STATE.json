@@ -163,7 +163,7 @@
   ,"fullRegressionStatus": "NOT_RUN_AFTER_PATCH"
   ,"buildStatus": "STAGE5_RUNTIME_PASS_BUILD_NOT_COMPLETED"
   ,"releaseStatus": "PENDING_USER_APPROVAL"
-  ,"releaseVersion": "1.0.7"
+  ,"releaseVersion": "1.0.8"
   ,"currentIssueId": null
   ,"lastRepairedIssueId": "ISSUE-052"
   ,"lastRepairStatus": "PASS_RELEASE_PACKAGING_AND_FULL_REGRESSION"
@@ -171,8 +171,28 @@
   ,"stabilizationComplete": true
   ,"releaseCandidateReady": true
   ,"fullRegressionStatus": "PASS"
-  ,"buildStatus": "PASS_ELECTRON_NSIS_1.0.7"
-  ,"releaseStatus": "PUBLISHED"
-  ,"releaseUrl": "https://github.com/quangtungkc/ai-content-modeling/releases/tag/v1.0.7"
+  ,"buildStatus": "PASS_ELECTRON_NSIS_1.0.8"
+  ,"releaseStatus": "PENDING_PUBLICATION"
   ,"releasePublishedAt": "2026-09-23T11:05:00+07:00"
+  ,"currentIssueId": "ISSUE-053"
+  ,"readyToContinue": false
+  ,"lastFocusedTestIssueId": "ISSUE-053"
+  ,"lastFocusedTestType": "SINGLE_SCENE_GEMINI_CDP"
+  ,"lastFocusedTestScene": 4
+  ,"lastFocusedTestStatus": "FAILED"
+  ,"lastFocusedTestFirstDivergence": "GEMINI_VIDEO_PAGE_RESET_DURING_SEND"
+  ,"lastFocusedTestProviderJobCreated": false
+  ,"lastFocusedTestGenerationStarted": false
+  ,"lastFocusedTestReferenceUploadConfirmed": true
+  ,"lastFocusedTestPromptSent": false
+  ,"lastFocusedTestGenerateTriggered": false
+  ,"lastFocusedTestRetryAllowed": false
+  ,"lastFocusedTestCanonicalVideoPreserved": true
+  ,"lastFocusedTestAt": "2026-09-23T04:38:34.703Z"
+  ,"lastRepairedIssueId": "ISSUE-053"
+  ,"lastRepairStatus": "FIXED_COMPOSER_READINESS_FOCUSED_TEST_REACHED_SEND_RESET"
+  ,"lastRepairAt": "2026-09-23T04:38:34.703Z"
+  ,"currentIssueId": "ISSUE-054"
+  ,"lastFocusedTestIssueId": "ISSUE-054"
+  ,"readyToContinue": false
 }

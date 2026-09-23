@@ -171,6 +171,45 @@ describe("ISSUE-043 Gemini bare new-chat state", () => {
   });
 });
 
+describe("ISSUE-053 Gemini Video composer readiness", () => {
+  it("does not treat the /videos route alone as an active Video composer", () => {
+    const start = source.indexOf("async function geminiVideoUiState");
+    const end = source.indexOf("async function clickGeminiVideoControl", start);
+    const uiState = source.slice(start, end);
+    expect(uiState).toContain("const videoPrompt =");
+    expect(uiState).toContain("const videoModeBadge =");
+    expect(uiState).toContain("const videoLanding = videoRoute &&");
+    expect(uiState).toContain("const videoComposer = videoPrompt || videoModeBadge || videoLanding;");
+    expect(uiState).not.toContain("const videoComposer = videoRoute ||");
+    expect(uiState).toContain("toolsMenuOpen");
+  });
+
+  it("recognizes and selects the current Gemini Tạo video menu item", () => {
+    const start = source.indexOf("async function selectGeminiVideoGenerationTool");
+    const end = source.indexOf("async function openGeminiVideoComposer", start);
+    const selection = source.slice(start, end);
+    expect(selection).toContain("const initialState = await geminiVideoUiState(window);");
+    expect(selection).toContain("let opened = Boolean(initialState.toolsMenuOpen || initialState.videoTool);");
+    expect(selection).toContain("[role=\"menuitem\"]");
+    expect(selection).toContain("gem-list-item");
+  });
+
+  it("waits for the real composer before upload and supports the current Tệp tile", () => {
+    const openStart = source.indexOf("async function openGeminiVideoComposer");
+    const openEnd = source.indexOf("async function uploadGeminiVideoReference", openStart);
+    const openSource = source.slice(openStart, openEnd);
+    expect(openSource).toContain("The explicit videoLanding predicate below is the readiness gate.");
+    expect(openSource).not.toContain("await selectGeminiVideoGenerationTool(window);");
+
+    const uploadStart = source.indexOf("async function uploadGeminiVideoReference");
+    const uploadEnd = source.indexOf("async function readGeminiVideoBuffer", uploadStart);
+    const uploadSource = source.slice(uploadStart, uploadEnd);
+    expect(uploadSource).toContain("const initialState = await geminiVideoUiState(window);");
+    expect(uploadSource).toContain("if (!initialState.toolsMenuOpen) await clickGeminiVideoControl");
+    expect(uploadSource).toContain('["Tệp", "Files", "Tải tệp lên"');
+  });
+});
+
 describe("ISSUE-029 manual Flow handoff lifecycle", () => {
   it("treats an already persisted checkpoint video as idempotently complete without reopening Flow", () => {
     const handoffStart = source.indexOf("async function resumeAfterManualFlowSubmission");
