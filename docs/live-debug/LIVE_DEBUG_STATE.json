@@ -172,8 +172,9 @@
   ,"releaseCandidateReady": true
   ,"fullRegressionStatus": "PASS"
   ,"buildStatus": "PASS_ELECTRON_NSIS_1.0.8"
-  ,"releaseStatus": "PENDING_PUBLICATION"
-  ,"releasePublishedAt": "2026-09-23T11:05:00+07:00"
+  ,"releaseStatus": "PUBLISHED"
+  ,"releaseUrl": "https://github.com/quangtungkc/ai-content-modeling/releases/tag/v1.0.8"
+  ,"releasePublishedAt": "2026-09-23T07:26:19Z"
   ,"currentIssueId": "ISSUE-053"
   ,"readyToContinue": false
   ,"lastFocusedTestIssueId": "ISSUE-053"
