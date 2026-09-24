@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.11 — 2026-09-24
+
+### Fixed
+
+- Stage 5 now trims every generated scene to its approved storyboard `targetDuration` before concatenation, preventing provider-length tails from repeating scene beats in the final video.
+- Final assembly now rejects a scene that is shorter than its approved target and rejects a final MP4 whose duration differs from the expected cut/transition duration.
+- The server-side assembly path and the Electron desktop path now enforce the same duration contract.
+
+### Validation
+
+- Regression suite: 83 test files, 920 tests passed.
+- Typecheck and lint passed; lint retains only pre-existing warnings.
+- Existing completed runs are not rewritten automatically because their intermediate scene files were intentionally removed after cleanup; a corrected final requires regenerating the scene MP4s or restoring them from backup.
+
 ## 1.0.10 — 2026-09-24
 
 ### Fixed

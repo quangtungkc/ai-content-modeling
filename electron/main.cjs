@@ -4095,6 +4095,7 @@ function normalizeVideoEditOptions(value, sceneNumbers) {
       sceneNumber: scene.sceneNumber,
       trimStart: clampNumber(scene.trimStart, 0, 3600, 0),
       trimEnd: clampNumber(scene.trimEnd, 0, 3600, 0),
+      targetDuration: clampNumber(scene.targetDuration, 0.2, 3600, null),
     })),
     transition,
     transitionDuration: clampNumber(value?.transitionDuration, 0.2, 0.4, 0.3),
@@ -4131,8 +4132,10 @@ async function renderFinalVideo(event, projectId, sceneNumbers, rawOptions = {})
     for (let index = 0; index < sourceFiles.length; index += 1) {
       const sceneOptions = orderedScenes[index];
       const sourceDuration = await readMediaDuration(sourceFiles[index]);
-      const targetDuration = sourceDuration - sceneOptions.trimStart - sceneOptions.trimEnd;
-      if (targetDuration < 0.2) throw new Error(`Cảnh ${sceneOptions.sceneNumber} còn quá ngắn sau khi cắt đầu/cuối.`);
+      const availableDuration = sourceDuration - sceneOptions.trimStart - sceneOptions.trimEnd;
+      if (availableDuration < 0.2) throw new Error(`FINAL_SCENE_DURATION_UNDERFLOW: cảnh ${sceneOptions.sceneNumber} còn quá ngắn sau khi cắt đầu/cuối.`);
+      const targetDuration = sceneOptions.targetDuration === null ? availableDuration : Math.min(sceneOptions.targetDuration, availableDuration);
+      if (sceneOptions.targetDuration !== null && sceneOptions.targetDuration > availableDuration + 0.05) throw new Error(`FINAL_SCENE_DURATION_UNDERFLOW: video cảnh ${sceneOptions.sceneNumber} ngắn hơn thời lượng storyboard yêu cầu.`);
       const target = path.join(temporaryRoot, `scene-${index + 1}.mp4`);
       await runFfmpeg(["-y", "-hide_banner", "-ss", sceneOptions.trimStart.toFixed(3), "-i", sourceFiles[index], "-t", targetDuration.toFixed(3), "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30", "-c:v", "h264_mf", "-b:v", "4500k", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", target]);
       normalized.push(target);
@@ -4185,7 +4188,8 @@ async function renderFinalVideo(event, projectId, sceneNumbers, rawOptions = {})
     }
     if (!fs.existsSync(finalPath) || fs.statSync(finalPath).size < 1024) throw new Error("Video cuối không hợp lệ sau khi xuất.");
     const finalProbe = await runFfmpeg(["-hide_banner", "-i", finalPath, "-f", "null", "-"], true);
-    validateFinalVideoProbe(finalProbe);
+    const expectedDuration = durations.reduce((sum, value) => sum + value, 0) - (options.transition === "fade" ? options.transitionDuration * Math.max(0, durations.length - 1) : 0);
+    validateFinalVideoProbe(finalProbe, expectedDuration);
     const cleanup = cleanupCompletedProjectArtifacts(app.getPath("userData"), projectId);
     if (cleanup.status !== "completed") throw new Error("COMPLETED_ARTIFACT_CLEANUP_FAILED");
     sendProgress(event, "video-editor:progress", { stage: "cleanup", processed: 1, total: 1, label: "Đã dọn dữ liệu trung gian, giữ lại video cuối trong app." });

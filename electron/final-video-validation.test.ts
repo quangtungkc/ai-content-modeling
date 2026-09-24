@@ -1,5 +1,5 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { validateFinalVideoProbe } = require("./final-video-validation.cjs") as { validateFinalVideoProbe: (output: string) => { durationSec: number; width: number; height: number } };
+const { validateFinalVideoProbe } = require("./final-video-validation.cjs") as { validateFinalVideoProbe: (output: string, expectedDurationSec?: number, toleranceSec?: number) => { durationSec: number; width: number; height: number } };
 import { describe, expect, it } from "vitest";
 
 const valid = `Duration: 00:00:11.43, start: 0.000000, bitrate: 4281 kb/s\nStream #0:0: Video: h264 (Constrained Baseline), yuv420p, 720x1280, 30 fps\nStream #0:1: Audio: aac (LC), 48000 Hz, stereo`;
@@ -7,6 +7,11 @@ const valid = `Duration: 00:00:11.43, start: 0.000000, bitrate: 4281 kb/s\nStrea
 describe("final video validation before cleanup", () => {
   it("accepts the observed 9:16 H.264/AAC output", () => {
     expect(validateFinalVideoProbe(valid)).toMatchObject({ durationSec: 11.43, width: 720, height: 1280 });
+  });
+
+  it("rejects a technically valid file with the wrong assembled duration", () => {
+    expect(() => validateFinalVideoProbe(valid, 14.2)).toThrow("FINAL_MEDIA_DURATION_MISMATCH");
+    expect(validateFinalVideoProbe(valid, 11.5)).toMatchObject({ durationSec: 11.43 });
   });
   it.each([
     valid.replace("720x1280", "1280x720"),

@@ -3,8 +3,10 @@ import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { applicationDataDirectory } from "@/lib/app-data";
+import { db } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { cleanupCompletedProjectArtifacts } from "@/modules/generation/completed-artifact-cleanup";
+import { assertFinalDuration, expectedAssembledDuration, resolveSceneAssemblyDuration } from "@/modules/generation/assembly-duration";
 
 const appDataRoot = () => applicationDataDirectory(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd());
 
@@ -51,13 +53,14 @@ async function duration(file: string) {
   return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
 }
 
-async function validateFinalOutput(file: string) {
+async function validateFinalOutput(file: string, expectedDuration?: number) {
   const size = (await stat(file)).size;
   if (size < 1024) throw new Error("Video cuối không hợp lệ.");
   const metadata = await runFfmpeg(["-hide_banner", "-i", file, "-f", "null", "-"], true);
   const seconds = await duration(file);
   const resolution = metadata.match(/Video:.*?(\d{2,5})x(\d{2,5})/i);
   if (!/Video:/i.test(metadata) || !resolution || seconds <= 0.1) throw new Error("FINAL_MEDIA_VALIDATION_FAILED");
+  if (expectedDuration !== undefined) assertFinalDuration(seconds, expectedDuration);
   await runFfmpeg(["-hide_banner", "-loglevel", "error", "-i", file, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"]);
   return { finalContainerValid: true, finalVideoStreamValid: true, finalDurationSec: seconds, finalResolution: `${resolution[1]}x${resolution[2]}` };
 }
@@ -67,6 +70,9 @@ export async function assembleProjectVideo(projectId: string, sceneNumbers: numb
   if (!ordered.length) throw new AppError("SCENES_REQUIRED", "Không có video phân cảnh để ghép.", 409);
   const videoDirectory = path.join(appDataRoot(), "generated-videos", projectId);
   const sources = ordered.map((number) => path.join(videoDirectory, `scene-${number}.mp4`));
+  const project = await db.contentProject.findUnique({ where: { id: projectId }, select: { scenes: { select: { sceneNumber: true, targetDuration: true } } } });
+  if (!project) throw new AppError("PROJECT_NOT_FOUND", "Không tìm thấy Content Project để ghép video.", 404);
+  const targetDurations = new Map(project.scenes.map((scene) => [scene.sceneNumber, scene.targetDuration]));
   for (const source of sources) {
     try { if ((await stat(source)).size < 1024) throw new Error(); } catch { throw new AppError("SCENE_VIDEO_MISSING", `Thiếu video ${path.basename(source)}.`, 409); }
   }
@@ -78,9 +84,11 @@ export async function assembleProjectVideo(projectId: string, sceneNumbers: numb
     const durations: number[] = [];
     for (let index = 0; index < sources.length; index += 1) {
       const target = path.join(temporary, `scene-${index + 1}.mp4`);
-      await runFfmpeg(["-y", "-hide_banner", "-i", sources[index], "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30", "-c:v", "h264_mf", "-b:v", "4500k", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", target]);
+      const sourceDuration = await duration(sources[index]);
+      const targetDuration = resolveSceneAssemblyDuration({ sourceDuration, trimStart: 0, trimEnd: 0, targetDuration: targetDurations.get(ordered[index]) });
+      await runFfmpeg(["-y", "-hide_banner", "-i", sources[index], "-t", targetDuration.toFixed(3), "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30", "-c:v", "h264_mf", "-b:v", "4500k", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", target]);
       normalized.push(target);
-      durations.push(await duration(target));
+      durations.push(targetDuration);
       await onProgress?.(`Đã chuẩn hóa cảnh ${ordered[index]}.`, index + 1, sources.length);
     }
     if (normalized.length === 1) await copyFile(normalized[0], finalPath);
@@ -101,7 +109,8 @@ export async function assembleProjectVideo(projectId: string, sceneNumbers: numb
       }
       await runFfmpeg(["-y", "-hide_banner", ...normalized.flatMap((file) => ["-i", file]), "-filter_complex", filters.join(";"), "-map", `[${videoLabel}]`, "-map", `[${audioLabel}]`, "-c:v", "h264_mf", "-b:v", "4500k", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", finalPath]);
     }
-    const validation = await validateFinalOutput(finalPath);
+    const expectedDuration = expectedAssembledDuration({ durations, transition: "fade", transitionDuration: 0.3 });
+    const validation = await validateFinalOutput(finalPath, expectedDuration);
     await cleanupCompletedProjectArtifacts(projectId);
     await onProgress?.("Đã xuất video hoàn chỉnh.", sources.length, sources.length);
     return { finalPath, finalVideoUrl: `/api/v1/projects/${projectId}/videos?final=1&v=${Date.now()}`, sceneOrder: ordered, aspectRatio: "9:16", hasAudio: true, ...validation };

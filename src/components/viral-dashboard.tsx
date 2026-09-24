@@ -72,7 +72,7 @@ type DesktopVideoEditor = {
   pickAudio: () => Promise<{ status: "cancelled" | "selected"; path?: string; name?: string }>;
   renderFinal: (projectId: string, sceneNumbers: number[], options: VideoEditOptions, onProgress?: (progress: { stage: string; processed: number; total: number; label: string }) => void) => Promise<{ status: string; video: string }>;
 };
-type VideoEditScene = { sceneNumber: number; trimStart: number; trimEnd: number; duration?: number };
+type VideoEditScene = { sceneNumber: number; trimStart: number; trimEnd: number; targetDuration?: number; duration?: number };
 type VideoEditOptions = { scenes: VideoEditScene[]; transition: "none" | "fade"; transitionDuration: number; originalVolume: number; musicVolume: number; musicPath?: string };
 type VideoAnalysisResult = {
   id?: string;
@@ -941,7 +941,12 @@ export function ViralDashboard() {
     } catch (caught) { setContentProjectError(caught instanceof Error ? caught.message : "Không thể tạo checkpoint Flow thủ công."); }
   }
   function defaultVideoEditScenes(project: ContentProjectResult): VideoEditScene[] {
-    return project.scenes.map((scene) => ({ sceneNumber: scene.sceneNumber, trimStart: 0, trimEnd: 0 }));
+    return project.scenes.map((scene) => ({
+      sceneNumber: scene.sceneNumber,
+      trimStart: 0,
+      trimEnd: 0,
+      ...(typeof scene.targetDuration === "number" && Number.isFinite(scene.targetDuration) && scene.targetDuration > 0 ? { targetDuration: scene.targetDuration } : {}),
+    }));
   }
   function openVideoEditor(project = contentProject) {
     if (!project) return;
@@ -984,14 +989,16 @@ export function ViralDashboard() {
   }
   async function renderFinalProjectVideo(project = contentProject, videos = generatedVideos, editOptions?: VideoEditOptions): Promise<string | null> {
     if (!project) return null;
-    const scenes = editOptions?.scenes?.length ? editOptions.scenes : videoEditScenes.length ? videoEditScenes : defaultVideoEditScenes(project);
+    const sceneTargets = new Map(project.scenes.map((scene) => [scene.sceneNumber, scene.targetDuration]));
+    const selectedScenes = editOptions?.scenes?.length ? editOptions.scenes : videoEditScenes.length ? videoEditScenes : defaultVideoEditScenes(project);
+    const scenes = selectedScenes.map((scene) => ({ ...scene, targetDuration: scene.targetDuration ?? sceneTargets.get(scene.sceneNumber) ?? undefined }));
     const sceneNumbers = scenes.map((scene) => scene.sceneNumber);
     if (sceneNumbers.some((sceneNumber) => !videos[`scene-${sceneNumber}`])) {
       setContentProjectError("Hãy tạo đầy đủ video phân cảnh trước khi ghép.");
       return null;
     }
     const options: VideoEditOptions = {
-      scenes: scenes.map((scene) => ({ sceneNumber: scene.sceneNumber, trimStart: scene.trimStart, trimEnd: scene.trimEnd })),
+      scenes: scenes.map((scene) => ({ sceneNumber: scene.sceneNumber, trimStart: scene.trimStart, trimEnd: scene.trimEnd, targetDuration: scene.targetDuration })),
       transition: editOptions?.transition ?? videoEditTransition,
       transitionDuration: editOptions?.transitionDuration ?? videoEditTransitionDuration,
       originalVolume: (editOptions?.originalVolume ?? videoEditOriginalVolume) / 100,
