@@ -62,6 +62,13 @@ describe("Gemini remote script diagnostics", () => {
     expect(source).toContain("if (!canRunFormatRetry(first))");
   });
 
+  it("binds storyboard count and order to the source scene contract", () => {
+    const source = readFileSync(new URL("./main.cjs", import.meta.url), "utf8");
+    expect(source).toContain("storyboard MUST contain exactly the same number of scenes as sourceModelingSpec.scenes");
+    expect(source).toContain("storyboard sceneNumber must be continuous 1..");
+    expect(source).toContain("storyboard sourceSceneId/order does not match sourceModelingSpec.scenes");
+  });
+
   it("latency probes generate valid renderer expressions with real newline joins", () => {
     const source = readFileSync(new URL("./main.cjs", import.meta.url), "utf8");
     const pageStart = source.indexOf("function geminiLatencyPageStateExpression()");

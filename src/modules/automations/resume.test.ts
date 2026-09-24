@@ -227,6 +227,23 @@ describe("automatic run checkpoint resume", () => {
     expect((reconciliation.patch.steps as Array<{ key: string; status: string }>).map((step) => step.status)).toEqual(["completed", "failed", "pending", "pending", "pending"]);
   });
 
+  it("recovers a killed Stage 2 execution that was persisted as running", () => {
+    const run = baseRun({
+      status: "RUNNING",
+      lastCompletedStage: 1,
+      failedStage: null,
+      resumeTarget: null,
+      steps: baseRun().steps!.map((step) => step.key === "modeling-idea"
+        ? { ...step, status: "completed" }
+        : step.key === "content-project"
+          ? { ...step, status: "running" }
+          : { ...step, status: "pending" }),
+      checkpoint: { ...baseRun().checkpoint, lastCompletedStage: 1, failedStage: null, resumeTarget: null, executionLease: null },
+    });
+    const reconciliation = reconcileStaleRunningRun(run, new Date("2026-09-16T00:00:00.000Z"));
+    expect(reconciliation).toMatchObject({ status: "RECOVERED", patch: { status: "PAUSED", lastCompletedStage: 1, failedStage: 2, resumeTarget: "CONTENT_PROJECT_CREATION" } });
+  });
+
   it("STALE CASE 8: sends an ambiguous ownerless RUNNING checkpoint to review", () => {
     const run = baseRun({ status: "RUNNING", steps: baseRun().steps!.map((step) => step.key === "modeling-idea" ? { ...step, status: "pending" } : step), checkpoint: { executionLease: null } });
     expect(reconcileStaleRunningRun(run, new Date("2026-09-16T00:00:00.000Z"))).toMatchObject({ status: "NEEDS_REVIEW" });

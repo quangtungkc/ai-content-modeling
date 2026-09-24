@@ -6,7 +6,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 const INVOKE_CHANNELS = Object.freeze([
   "desktop-app:version", "desktop-auth:clear", "desktop-auth:save", "desktop-update:check", "desktop-update:download", "desktop-update:install",
   "facebook-browser:open", "facebook-browser:scan", "flow-browser:prepare-manual-submission", "flow-browser:resume-after-manual-submission", "flow-browser:run-image-job",
-  "gemini-browser:analyze-source", "gemini-browser:copy", "gemini-browser:develop-project", "gemini-browser:generate-idea", "gemini-browser:import-images", "gemini-browser:open", "gemini-browser:open-flow", "gemini-browser:run-job", "gemini-browser:run-video-job",
+  "gemini-browser:analyze-source", "gemini-browser:copy", "gemini-browser:develop-project", "gemini-browser:generate-idea", "gemini-browser:import-images", "gemini-browser:open", "gemini-browser:open-flow", "gemini-browser:run-job", "gemini-browser:run-video-job", "desktop-images:validate-project",
   "runtime-error:report", "video-editor:pick-audio", "video-editor:render-final",
 ]);
 const invokeChannelSet = new Set(INVOKE_CHANNELS);
@@ -86,6 +86,7 @@ contextBridge.exposeInMainWorld("desktopGemini", {
     ipcRenderer.on("gemini-browser:video-progress", handler);
     return invokeStructured("gemini-browser:run-video-job", { projectId, channelId, slots }).finally(() => ipcRenderer.removeListener("gemini-browser:video-progress", handler));
   },
+  validateProjectImages: (projectId, sceneNumbers) => invoke("desktop-images:validate-project", { projectId, sceneNumbers }),
 });
 
 contextBridge.exposeInMainWorld("desktopFlow", {

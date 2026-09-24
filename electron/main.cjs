@@ -1028,10 +1028,40 @@ async function submitGeminiCommand(window, command, prompt, missingCode, preSubm
       const videoSendButton = await clickGeminiSendButton(window);
       if (!videoSendButton) throw new Error("GEMINI_VIDEO_SEND_BUTTON_NOT_FOUND");
       recordBrowserAction({ action: "gemini-video-send-button", commandId: command.snapshot().commandId, phase: attempt === 0 ? "INITIAL_SEND" : "RECOVERY_SEND", label: videoSendButton.label, result: "PASS" });
+      await delay(1_200);
+      const videoComposerStillContainsPrompt = await window.webContents.executeJavaScript(`(() => {
+        const roots = [document]; const seen = new Set(roots);
+        for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        const input = roots.flatMap((root) => [...root.querySelectorAll('[contenteditable="true"], textarea, [role="textbox"]')]).find((element) => {
+          const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element);
+          return bounds.width > 100 && bounds.height >= 20 && style.visibility !== 'hidden' && style.display !== 'none';
+        });
+        const currentText = input?.innerText || input?.value || '';
+        return currentText.includes(${JSON.stringify(prompt.slice(0, 48))});
+      })()`, true).catch(() => false);
+      if (videoComposerStillContainsPrompt && Number.isFinite(videoSendButton.x) && Number.isFinite(videoSendButton.y)) {
+        recordBrowserAction({ action: "gemini-video-send-pointer-recovery", commandId: command.snapshot().commandId, phase: attempt === 0 ? "INITIAL_SEND_POINTER_RECOVERY" : "RECOVERY_SEND_POINTER_RECOVERY", result: "RETRY" });
+        await dispatchBrowserClick(window, videoSendButton);
+        await delay(1_800);
+      }
+      const videoComposerStillContainsPromptAfterRecovery = await window.webContents.executeJavaScript(`(() => {
+        const roots = [document]; const seen = new Set(roots);
+        for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
+        const input = roots.flatMap((root) => [...root.querySelectorAll('[contenteditable="true"], textarea, [role="textbox"]')]).find((element) => {
+          const bounds = element.getBoundingClientRect(); const style = getComputedStyle(element);
+          return bounds.width > 100 && bounds.height >= 20 && style.visibility !== 'hidden' && style.display !== 'none';
+        });
+        const currentText = input?.innerText || input?.value || '';
+        return currentText.includes(${JSON.stringify(prompt.slice(0, 48))});
+      })()`, true).catch(() => false);
+      if (videoComposerStillContainsPromptAfterRecovery) {
+        recordBrowserAction({ action: "gemini-video-send-not-applied", commandId: command.snapshot().commandId, phase: attempt === 0 ? "INITIAL_SEND" : "RECOVERY_SEND", result: "FAIL" });
+        throw new Error(`GEMINI_SUBMISSION_NOT_CONFIRMED: video composer vẫn giữ prompt sau bấm DOM/CDP; commandId=${command.snapshot().commandId}`);
+      }
     } else {
       await dispatchGeminiEnter(window, command, attempt === 0 ? "INITIAL_SEND" : "RECOVERY_SEND");
     }
-    await delay(1_200);
+    if (command.snapshot().purpose !== "VIDEO_GENERATION") await delay(1_200);
     const composerStillContainsPrompt = await window.webContents.executeJavaScript(`(() => {
       const roots = [document]; const seen = new Set(roots);
       for (let index = 0; index < roots.length; index += 1) for (const element of roots[index].querySelectorAll('*')) if (element.shadowRoot && !seen.has(element.shadowRoot)) { seen.add(element.shadowRoot); roots.push(element.shadowRoot); }
@@ -2620,7 +2650,7 @@ async function runBrowserDevelopedIdeaJobUnlocked(payload) {
   {
     const beforeCount = await countGeminiResponseNodes(window);
     const formatPrompt = ({ rawResponse, error }) => String(error || "").startsWith("CONTENT_PROJECT_SCHEMA_INVALID")
-      ? `Your previous response was valid JSON but failed the authoritative Content Project contract: ${error}. Repair ONLY the JSON structure. The canonical field is sourceModelingSpec.scenes (array); do not use sourceModelingSpec.sourceScenes. Every sourceModelingSpec.scenes item MUST include a non-empty string subjectPosition describing the observed subject placement, even when the value is "center" or "uncertain"; do not omit it and do not invent a new action. sourceStartTime and sourceEndTime must be JSON numbers in seconds, not quoted strings or clock text; duration must also be a JSON number in seconds, not a quoted string or unit-suffixed value; relativeObjectPositions must be an array of non-empty strings, with [] allowed. If relativeObjectPositions was one string, represent the same spatial meaning as a one-element array and do not add/remove objects. actionSequence must be an array of at least one non-empty string per scene; if it was one string or numbered prose, return a new array preserving the exact action content and chronological order. Do not add, remove, or reorder action beats. cameraType, shotSize, cameraAngle and framing must be non-empty JSON strings; cameraMovement must be a JSON string or null. Do not map synonyms in the application. Preserve each timing value exactly, keep sourceEndTime greater than sourceStartTime, and keep duration consistent with sourceEndTime - sourceStartTime under the authoritative schema tolerance. Do not change start/end times to hide a duration error. Preserve exactly the scene count, scene order, scene text, actionSequence content/order, camera constraints/intent, timing, character/source mapping, and all other content. Do not add creative content. Return one complete corrected JSON object only. ORIGINAL PARSED JSON: ${rawResponse}`
+      ? `Your previous response was valid JSON but failed the authoritative Content Project contract: ${error}. Repair ONLY the JSON structure. The canonical field is sourceModelingSpec.scenes (array); do not use sourceModelingSpec.sourceScenes. The storyboard MUST contain exactly the same number of scenes as sourceModelingSpec.scenes, with storyboard sceneNumber values 1..N in the same source order. Do not merge, split, add or remove scenes. If storyboard sourceSceneId is present, it must match the corresponding sourceModelingSpec.scenes sourceSceneId. Every sourceModelingSpec.scenes item MUST include a non-empty string subjectPosition describing the observed subject placement, even when the value is "center" or "uncertain"; do not omit it and do not invent a new action. sourceStartTime and sourceEndTime must be JSON numbers in seconds, not quoted strings or clock text; duration must also be a JSON number in seconds, not a quoted string or unit-suffixed value; relativeObjectPositions must be an array of non-empty strings, with [] allowed. If relativeObjectPositions was one string, represent the same spatial meaning as a one-element array and do not add/remove objects. actionSequence must be an array of at least one non-empty string per scene; if it was one string or numbered prose, return a new array preserving the exact action content and chronological order. Do not add, remove, or reorder action beats. cameraType, shotSize, cameraAngle and framing must be non-empty JSON strings; cameraMovement must be a JSON string or null. Do not map synonyms in the application. Preserve each timing value exactly, keep sourceEndTime greater than sourceStartTime, and keep duration consistent with sourceEndTime - sourceStartTime under the authoritative schema tolerance. Do not change start/end times to hide a duration error. Preserve exactly the scene count, scene order, scene text, actionSequence content/order, camera constraints/intent, timing, character/source mapping, and all other content. Do not add creative content. Return one complete corrected JSON object only. ORIGINAL PARSED JSON: ${rawResponse}`
       : "Your previous response was incomplete or invalid JSON. Return one complete STRICT_MODELING JSON object with sourceModelingSpec.scenes (array), schemaVersion, deconstruction, artDirection, characterDesign, backgroundDesign, storyboard and safetyReview. No Markdown or commentary.";
     return redactDesktopRuntime(await runGeminiJsonCommandWithFormatRetry({
       window,
@@ -2637,6 +2667,13 @@ async function runBrowserDevelopedIdeaJobUnlocked(payload) {
         : !Array.isArray(result.sourceModelingSpec?.scenes)
           ? "CONTENT_PROJECT_SCHEMA_INVALID: sourceModelingSpec.scenes must be an array; sourceScenes is not canonical"
           : (() => {
+            const sourceScenes = [...result.sourceModelingSpec.scenes].sort((left, right) => Number(left?.order ?? 0) - Number(right?.order ?? 0));
+            const generatedScenes = [...result.storyboard].sort((left, right) => Number(left?.sceneNumber ?? 0) - Number(right?.sceneNumber ?? 0));
+            if (generatedScenes.length !== sourceScenes.length) return `CONTENT_PROJECT_SCHEMA_INVALID: storyboard scene count/order must match sourceModelingSpec.scenes exactly; sourceCount=${sourceScenes.length}, generatedCount=${generatedScenes.length}`;
+            const invalidSceneNumberIndex = generatedScenes.findIndex((scene, index) => scene?.sceneNumber !== index + 1);
+            if (invalidSceneNumberIndex >= 0) return `CONTENT_PROJECT_SCHEMA_INVALID: storyboard sceneNumber must be continuous 1..${sourceScenes.length} in source order; received ${JSON.stringify(generatedScenes.map((scene) => scene?.sceneNumber))}`;
+            const invalidSourceSceneIdIndex = generatedScenes.findIndex((scene, index) => scene?.sourceSceneId && scene.sourceSceneId !== sourceScenes[index]?.sourceSceneId);
+            if (invalidSourceSceneIdIndex >= 0) return `CONTENT_PROJECT_SCHEMA_INVALID: storyboard sourceSceneId/order does not match sourceModelingSpec.scenes at index ${invalidSourceSceneIdIndex}`;
             const invalidStartIndex = result.sourceModelingSpec.scenes.findIndex((scene) => typeof scene?.sourceStartTime !== "number" || !Number.isFinite(scene.sourceStartTime) || scene.sourceStartTime < 0);
             if (invalidStartIndex >= 0) return `CONTENT_PROJECT_SCHEMA_INVALID: sourceModelingSpec.scenes[${invalidStartIndex}].sourceStartTime must be a finite non-negative JSON number in seconds; received ${JSON.stringify(result.sourceModelingSpec.scenes[invalidStartIndex]?.sourceStartTime)}`;
             const invalidEndIndex = result.sourceModelingSpec.scenes.findIndex((scene) => typeof scene?.sourceEndTime !== "number" || !Number.isFinite(scene.sourceEndTime) || scene.sourceEndTime <= 0);
@@ -3208,6 +3245,27 @@ function findChannelMainCharacterImagePath(channelId) {
   }
   return null;
 }
+
+ipcMain.handle("desktop-images:validate-project", async (_event, value) => {
+  const projectId = value?.projectId;
+  const sceneNumbers = Array.isArray(value?.sceneNumbers) ? value.sceneNumbers : [];
+  if (typeof projectId !== "string" || !/^[A-Za-z0-9_-]+$/.test(projectId) || sceneNumbers.some((number) => !Number.isInteger(number) || number < 1)) {
+    throw new Error("DESKTOP_IMAGE_VALIDATION_INPUT_INVALID");
+  }
+  const describe = (kind, sceneNumber) => {
+    try {
+      const target = findGeneratedImagePath(projectId, kind, sceneNumber);
+      const stat = fs.statSync(target);
+      if (!stat.isFile() || stat.size < 1024) return { exists: false, sha256: null };
+      return { exists: true, sha256: crypto.createHash("sha256").update(fs.readFileSync(target)).digest("hex") };
+    } catch {
+      return { exists: false, sha256: null };
+    }
+  };
+  const images = { "background-0": describe("background", 0) };
+  for (const sceneNumber of sceneNumbers) images[`scene-${sceneNumber}`] = describe("scene", sceneNumber);
+  return { images };
+});
 
 async function attachGeminiModelingCharacterReference(window, channelId, stage) {
   const characterReferencePath = typeof channelId === "string" ? findChannelMainCharacterImagePath(channelId) : null;

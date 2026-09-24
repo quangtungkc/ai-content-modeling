@@ -240,15 +240,42 @@ export function reconcileStaleRunningRun(run: ResumableRunInput, now = new Date(
   const persisted = buildAuthoritativePersistencePatch({ existing: run, steps: run.steps });
   if (persisted.status !== "OK") return { status: "NEEDS_REVIEW", reason: persisted.reason };
   const state = persisted.state;
-  if (state.lastCompletedStage !== 1 || state.failedStage !== 2 || state.resumeTarget !== "CONTENT_PROJECT_CREATION" || !state.modelingIdeaId || !state.sourceVideoId || !state.channelId) {
+  const derived = deriveStageStateFromSteps(run.steps);
+  const interruptedStage2 = derived.status === "OK"
+    && derived.runningStage === 2
+    && state.lastCompletedStage === 1
+    && state.failedStage === null
+    && state.resumeTarget === null;
+  const recoverableStage2 = state.lastCompletedStage === 1
+    && state.failedStage === 2
+    && state.resumeTarget === "CONTENT_PROJECT_CREATION";
+  if ((!recoverableStage2 && !interruptedStage2) || !state.modelingIdeaId || !state.sourceVideoId || !state.channelId) {
     return { status: "NEEDS_REVIEW", reason: "STALE_RUNNING_CHECKPOINT_AMBIGUOUS" };
   }
   const timestamp = now.toISOString();
   const steps = (run.steps ?? []).map((step) => step.key === "content-project" && step.status === "running"
     ? { ...step, status: "failed", detail: "Execution bị gián đoạn; có thể tiếp tục từ Content Project.", error: "RUN_INTERRUPTED", completedAt: timestamp }
     : step);
-  const checkpoint: AutomationCheckpoint = { ...persisted.checkpoint, executionLease: null };
-  return { status: "RECOVERED", checkpoint, patch: { ...persisted.patch, status: "PAUSED", steps, checkpoint } };
+  const checkpoint: AutomationCheckpoint = {
+    ...persisted.checkpoint,
+    lastCompletedStage: 1,
+    failedStage: 2,
+    resumeTarget: "CONTENT_PROJECT_CREATION",
+    executionLease: null,
+  };
+  return {
+    status: "RECOVERED",
+    checkpoint,
+    patch: {
+      ...persisted.patch,
+      status: "PAUSED",
+      lastCompletedStage: 1,
+      failedStage: 2,
+      resumeTarget: "CONTENT_PROJECT_CREATION",
+      steps,
+      checkpoint,
+    },
+  };
 }
 
 export function buildAuthoritativePersistencePatch(input: { existing: ResumableRunInput; steps?: ResumableRunInput["steps"]; fields?: AutomationPersistenceFields }): AutomationPersistenceResult {

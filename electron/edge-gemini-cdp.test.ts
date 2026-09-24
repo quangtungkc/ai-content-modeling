@@ -19,6 +19,13 @@ describe("external Edge Gemini runtime", () => {
     expect(edge.discoverEdgeExecutable()).toBeTruthy();
   });
 
+  it("keeps deterministic Program Files fallbacks when Windows env vars are incomplete", () => {
+    const source = readFileSync("electron/edge-gemini-cdp.cjs", "utf8");
+    expect(source).toContain('const systemDrive = env.SystemDrive || "C:";');
+    expect(source).toContain('"C:\\\\Program Files (x86)\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe"');
+    expect(source).toContain('"C:\\\\Program Files\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe"');
+  });
+
   it("uses a dedicated profile path", () => {
     expect(edge.DEFAULT_PROFILE.toLowerCase()).toContain("modelingai");
     expect(edge.DEFAULT_PROFILE.toLowerCase()).not.toContain("microsoft\\edge\\user data");

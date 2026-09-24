@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 const dbMock = vi.hoisted(() => ({
   $executeRawUnsafe: vi.fn(async () => undefined),
@@ -14,6 +16,14 @@ import { hashPrompt, markPromptSent, verifyPersistedPromptByScene, verifyPersist
 
 describe("Prompt Fidelity runtime hash enforcement", () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it("sanitizes provider-only URLs and named style triggers before sealing prompts", () => {
+    const source = readFileSync(path.resolve(process.cwd(), "src/modules/prompt-fidelity/service.ts"), "utf8");
+    expect(source).toContain("function sanitizeConsumerStyleReferences");
+    expect(source).toContain("function sanitizeProviderPrompt");
+    expect(source).toContain("source URL omitted; use the authoritative scene evidence above");
+    expect(source).toContain("const providerDraftPrompt = sanitizeProviderPrompt(input.draftPrompt);");
+  });
 
   it("CASE 33 verifies a persisted prompt belongs to the current project/scene/type", async () => {
     const prompt = "validated prompt";

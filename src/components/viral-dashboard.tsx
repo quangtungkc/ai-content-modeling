@@ -56,6 +56,7 @@ type DesktopGemini = {
   analyzeSource: (video: Record<string, unknown>, channelDNA?: Record<string, unknown>, runId?: string) => Promise<VideoAnalysisResult["analysis"]>;
   generateIdea: (video: Record<string, unknown>, analysis: VideoAnalysisResult["analysis"], channelDNA?: Record<string, unknown>, artStyle?: string, runId?: string) => Promise<{ schemaVersion: "1.0"; modelingDirections: ModelingIdeaResult[] }>;
   developProject: (video: Record<string, unknown>, analysis: VideoAnalysisResult["analysis"], idea: ModelingIdeaResult, channelDNA?: Record<string, unknown>, aspectRatio?: string, runId?: string) => Promise<Record<string, unknown>>;
+  validateProjectImages: (projectId: string, sceneNumbers: number[]) => Promise<{ images: Record<string, { exists: boolean; sha256: string | null }> }>;
 };
 type ImageSlot = { kind: "background" | "scene"; sceneNumber?: number; label: string; prompt: string; aspectRatio: string; promptId?: string; validatedPrompt?: string; validatedPromptHash?: string };
 type VideoSlot = { sceneNumber: number; sceneId?: string; label: string; visualBlock: string; actionBlock: string; audioBlock: string; englishPrompt: string; aspectRatio: string; promptId?: string; validatedPrompt?: string; validatedPromptHash?: string };
@@ -792,13 +793,21 @@ export function ViralDashboard() {
     }
     if (!onlySceneNumbers?.length) {
       const imageHashes = new Map<string, string>();
+      const desktopGemini = (window as Window & { desktopGemini?: DesktopGemini }).desktopGemini;
+      const localImageValidation = desktopGemini ? await desktopGemini.validateProjectImages(project.id, project.scenes.map((scene) => scene.sceneNumber)) : null;
       for (const scene of project.scenes.sort((left, right) => left.sceneNumber - right.sceneNumber)) {
         const imageUrl = images[`scene-${scene.sceneNumber}`];
         if (!imageUrl) throw new Error(`IMAGE_CONTINUITY_GATE: thiếu ảnh cảnh ${scene.sceneNumber}.`);
-        const response = await fetch(imageUrl, { cache: "no-store" });
-        if (!response.ok) throw new Error(`IMAGE_CONTINUITY_GATE: không đọc được ảnh cảnh ${scene.sceneNumber}.`);
-        const digest = await crypto.subtle.digest("SHA-256", await response.arrayBuffer());
-        const hash = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+        const response = await fetch(imageUrl, { cache: "no-store", credentials: "include" });
+        let hash: string | null = null;
+        if (response.ok) {
+          const digest = await crypto.subtle.digest("SHA-256", await response.arrayBuffer());
+          hash = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+        } else {
+          const local = localImageValidation?.images[`scene-${scene.sceneNumber}`];
+          if (!local?.exists || !local.sha256) throw new Error(`IMAGE_CONTINUITY_GATE: không đọc được ảnh cảnh ${scene.sceneNumber}.`);
+          hash = local.sha256;
+        }
         const previousScene = imageHashes.get(hash);
         if (previousScene) {
           throw new Error(`IMAGE_CONTINUITY_GATE: ảnh cảnh ${scene.sceneNumber} trùng hoàn toàn ảnh cảnh ${previousScene}; chưa được phép chạy Stage 4.`);
@@ -864,10 +873,16 @@ export function ViralDashboard() {
   async function loadPersistedProjectImages(projectId: string, scenes: Array<{ sceneNumber: number }>) {
     const slots = [{ key: "background-0", url: `/api/v1/projects/${projectId}/images?kind=background&sceneNumber=0` }, ...scenes.map((scene) => ({ key: `scene-${scene.sceneNumber}`, url: `/api/v1/projects/${projectId}/images?kind=scene&sceneNumber=${scene.sceneNumber}` }))];
     const loaded = await Promise.all(slots.map(async (slot) => {
-      const response = await fetch(slot.url, { cache: "no-store" });
+      const response = await fetch(slot.url, { cache: "no-store", credentials: "include" });
       return response.ok ? [slot.key, slot.url] as const : null;
     }));
-    return Object.fromEntries(loaded.filter((entry): entry is readonly [string, string] => Boolean(entry)));
+    const persisted = Object.fromEntries(loaded.filter((entry): entry is readonly [string, string] => Boolean(entry)));
+    if (Object.keys(persisted).length === slots.length) return persisted;
+    const desktopGemini = (window as Window & { desktopGemini?: DesktopGemini }).desktopGemini;
+    const local = desktopGemini ? await desktopGemini.validateProjectImages(projectId, scenes.map((scene) => scene.sceneNumber)) : null;
+    const fallback = { ...persisted } as Record<string, string>;
+    for (const slot of slots) if (!fallback[slot.key] && local?.images[slot.key]?.exists) fallback[slot.key] = slot.url;
+    return fallback;
   }
 
   async function loadPersistedProjectVideos(projectId: string, scenes: Array<{ sceneNumber: number }>) {

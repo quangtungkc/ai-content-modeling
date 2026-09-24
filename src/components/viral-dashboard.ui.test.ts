@@ -148,4 +148,10 @@ describe("Video Modeling automatic-only UI", () => {
     expect(source).toContain("disabled={isAutomaticRunning || isGeneratingVideos}");
     expect(source).toContain("providerAtStart");
   });
+
+  it("CASE 22: validates local generated images when the renderer API cannot read them", () => {
+    expect(source).toContain("validateProjectImages");
+    expect(source).toContain('credentials: "include"');
+    expect(source).toContain("localImageValidation?.images");
+  });
 });

@@ -32,10 +32,15 @@ function normalizePath(value) {
 }
 
 function discoverEdgeExecutable(env = process.env) {
+  const systemDrive = env.SystemDrive || "C:";
+  const programFilesX86 = env["ProgramFiles(x86)"] || path.join(systemDrive, "Program Files (x86)");
+  const programFiles = env.ProgramFiles || path.join(systemDrive, "Program Files");
   const candidates = [
     env.EDGE_EXECUTABLE_PATH,
-    env.ProgramFiles && path.join(env.ProgramFiles, "Microsoft", "Edge", "Application", "msedge.exe"),
-    env["ProgramFiles(x86)"] && path.join(env["ProgramFiles(x86)"], "Microsoft", "Edge", "Application", "msedge.exe"),
+    path.join(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe"),
+    path.join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe"),
+    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
     env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, "Microsoft", "Edge", "Application", "msedge.exe"),
   ].filter(Boolean);
   return candidates.find((candidate) => fs.existsSync(candidate)) || null;

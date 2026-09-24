@@ -74,6 +74,12 @@ describe("ISSUE-002 send/response boundary", () => {
     expect(mainSource).toContain("const failureCode = confirmation.confirmationTimeout ? \"GEMINI_SUBMISSION_NOT_CONFIRMED\" : \"GEMINI_SUBMISSION_FAILED\";");
     expect(mainSource).toContain("primaryFailurePreserved: true");
   });
+
+  it("requires the Gemini video composer to clear after the CDP/DOM send", () => {
+    expect(mainSource).toContain("gemini-video-send-pointer-recovery");
+    expect(mainSource).toContain("videoComposerStillContainsPromptAfterRecovery");
+    expect(mainSource).toContain("GEMINI_SUBMISSION_NOT_CONFIRMED: video composer");
+  });
 });
 
 describe("ISSUE-004 structured Stage-2 error transport", () => {

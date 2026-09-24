@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.10 — 2026-09-24
+
+### Fixed
+
+- Enforced exact Stage 2 storyboard parity: the generated storyboard must keep the source scene count, order, continuous scene numbers, and source-scene mapping.
+- Hardened Gemini video submission through CDP: after the DOM send and one pointer recovery, the composer must no longer contain the prompt; otherwise the run stops with `GEMINI_SUBMISSION_NOT_CONFIRMED` instead of waiting for a false generation.
+- Added deterministic Edge executable fallbacks for Windows installations where `ProgramFiles` environment variables are incomplete.
+- Added an Electron-side local image validation fallback for packaged/runtime cases where the renderer cannot read generated image URLs; continuity checks still hash the actual project files and reject duplicate scene images.
+- Sanitized provider-only source URLs and named third-party style triggers before prompt sealing while preserving the authoritative scene constraints.
+- Recovered a killed Stage 2 execution persisted as `running` into the existing paused/resume checkpoint instead of treating it as ambiguous.
+- Increased the timeout of the FFmpeg-backed exact-text regression case so the full suite remains stable under parallel load; production behavior is unchanged.
+
+### Validation
+
+- End-to-end run `cmuevtc5q0002k5tcbox0a2t4` completed Stages 1–5 with `SUCCEEDED`.
+- The run created one source-faithful scene, two images, one scene video, and a final MP4.
+- Final media validation: H.264, 720×1280, 9:16, 10.01 seconds; project video storage retained only `final.mp4` after cleanup.
+- Full test, typecheck, lint, syntax, build, packaged-content, and installer checks are required before publication.
+
 ## 1.0.8 — 2026-09-23
 
 ### Fixed
