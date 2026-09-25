@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.24 — 2026-09-25
+
+### Fixed
+
+- Facebook source-video capture now binds the captured element to the requested reel identity and visible target, so a preloaded neighboring video cannot be uploaded by mistake.
+- Page-scan duration is no longer treated as authoritative; the duration is recorded only after the identity-bound source file is attached and analyzed.
+- Failed or ambiguous source-video binding stops safely instead of selecting a video by approximate duration.
+
+### Validation
+
+- Full regression suite: 92 test files, 949/949 tests passed.
+- Live CDP validation on the affected reel selected the 10.4-second target and rejected the neighboring 6.7-second video.
+
 ## 1.0.23 — 2026-09-25
 
 ### Fixed

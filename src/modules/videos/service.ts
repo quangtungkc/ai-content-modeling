@@ -30,7 +30,9 @@ export async function saveManualCompetitorVideo(competitorId: string, userId: st
   }
   const externalId = `manual:${createHash("sha256").update(data.url).digest("hex")}`;
   const existingVideo = await db.competitorVideo.findUnique({ where: { competitorId_externalId: { competitorId, externalId } }, select: { duration: true } });
-  const duration = data.durationSec ?? existingVideo?.duration ?? null;
+  // Page-list media duration is not identity-bound. A fresh scan must clear
+  // legacy guessed durations; only source-reel capture may restore one.
+  const duration = data.scanSource === "FACEBOOK_PAGE_SCAN" ? null : data.durationSec ?? existingVideo?.duration ?? null;
   const video = await db.competitorVideo.upsert({
     where: { competitorId_externalId: { competitorId, externalId } },
     create: { competitorId, externalId, url: data.url, caption: data.caption || null, publishedAt: data.publishedAt, duration },

@@ -54,6 +54,10 @@ export async function storeCompetitorVideoAnalysis(videoId: string, userId: stri
   const video = await ownedVideo(videoId, userId);
   const analysis = videoAnalysisSchema.parse(value);
   const latestAnalysis = await db.sourceAnalysis.findFirst({ where: { sourceVideoId: video.id }, orderBy: { version: "desc" }, select: { version: true } });
+  const observedDuration = analysis.analysisEvidence?.sourceVideoAttached === true ? analysis.analysisEvidence.observedDurationSec : null;
+  if (providerName.startsWith("gemini-browser") && typeof observedDuration === "number" && Number.isFinite(observedDuration) && observedDuration > 0) {
+    await db.competitorVideo.update({ where: { id: video.id }, data: { duration: observedDuration } });
+  }
   const stored = await db.sourceAnalysis.create({ data: { sourceVideoId: video.id, version: (latestAnalysis?.version ?? 0) + 1, provider: providerName, schemaVersion: analysis.schemaVersion, content: analysis } });
   return { id: stored.id, createdAt: stored.createdAt, analysis };
 }

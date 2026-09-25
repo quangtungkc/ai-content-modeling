@@ -11,6 +11,7 @@ const { initializeUserData } = require("./user-data.cjs");
 const { cleanupManagedTemporaryFiles, cleanupCompletedProjectArtifacts } = require("./temp-cleanup.cjs");
 const { validateFinalVideoProbe } = require("./final-video-validation.cjs");
 const { findFacebookVideoCard, verifiedFacebookPublishedAt } = require("./facebook-video-date.cjs");
+const { facebookVideoIdentity, isVideoBoundToFacebookReel, selectFacebookSourceVideo } = require("./facebook-source-selection.cjs");
 initializeUserData(app);
 if (app.isPackaged) {
   process.env.MODELING_RUNTIME_REVISION ||= `v${app.getVersion()}`;
@@ -2006,24 +2007,21 @@ function isFacebookSourceUrl(value) {
   }
 }
 
-async function captureFacebookVideoFromPage(browser, expectedDurationSec = null) {
-  const expected = Number.isFinite(expectedDurationSec) && expectedDurationSec > 0 ? expectedDurationSec : null;
+async function captureFacebookVideoFromPage(browser) {
+  const sourceUrl = browser.sourceUrl;
   const captured = await browser.webContents.executeJavaScript(`(async () => {
-    const expectedDurationSec = ${JSON.stringify(expected)};
-    const visible = (element) => {
-      const rect = element?.getBoundingClientRect?.();
-      const style = element ? getComputedStyle(element) : null;
-      return Boolean(element && element.isConnected && rect && rect.width > 0 && rect.height > 0 && style?.display !== "none" && style?.visibility !== "hidden" && style?.opacity !== "0");
-    };
-    const candidates = [...document.querySelectorAll("video")]
-      .filter((video) => visible(video) && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0 && typeof video.captureStream === "function")
-      .sort((left, right) => {
-        const leftDistance = expectedDurationSec === null ? 0 : Math.abs((Number(left.duration) || 0) - expectedDurationSec);
-        const rightDistance = expectedDurationSec === null ? 0 : Math.abs((Number(right.duration) || 0) - expectedDurationSec);
-        return leftDistance - rightDistance || (right.videoWidth * right.videoHeight) - (left.videoWidth * left.videoHeight);
-      });
-    const video = candidates[0];
-    if (!video) return { error: "FACEBOOK_VIDEO_CAPTURE_NOT_READY", candidates: [...document.querySelectorAll("video")].map((item) => ({ duration: item.duration, width: item.videoWidth, height: item.videoHeight, readyState: item.readyState })) };
+    const facebookVideoIdentity = ${facebookVideoIdentity.toString()};
+    const isVideoBoundToFacebookReel = ${isVideoBoundToFacebookReel.toString()};
+    const sourceId = facebookVideoIdentity(${JSON.stringify(sourceUrl)});
+    const videos = [...document.querySelectorAll("video")];
+    const candidates = videos.map((video, index) => {
+      const rect = video.getBoundingClientRect();
+      const style = getComputedStyle(video);
+      return { index, connected: video.isConnected, visible: style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && !video.closest('[aria-hidden="true"]'), boundToReel: isVideoBoundToFacebookReel(video, sourceId), ready: video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0 && typeof video.captureStream === "function", durationSec: Number.isFinite(video.duration) && video.duration > 0 ? video.duration : null, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, viewportWidth: innerWidth, viewportHeight: innerHeight };
+    });
+    const selection = (${selectFacebookSourceVideo.toString()})(candidates, location.href, ${JSON.stringify(sourceUrl)});
+    if (selection.error) return { error: selection.error, candidates: candidates.map(({ index, ready, durationSec, rect }) => ({ index, ready, durationSec, rect })) };
+    const video = videos[selection.index];
     const mimeTypes = ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm"];
     const mimeType = mimeTypes.find((value) => MediaRecorder.isTypeSupported(value));
     if (!mimeType) return { error: "FACEBOOK_VIDEO_CAPTURE_MIME_UNSUPPORTED" };
@@ -2040,10 +2038,15 @@ async function captureFacebookVideoFromPage(browser, expectedDurationSec = null)
     try {
       video.muted = true;
       video.currentTime = 0;
-      await video.play();
-      const durationSec = Number.isFinite(video.duration) && video.duration > 0 ? Math.min(video.duration, 60) : Math.min(expectedDurationSec || 12, 60);
+      const durationSec = Math.min(video.duration, 60);
       recorder.start(250);
-      await new Promise((resolve) => setTimeout(resolve, Math.ceil(durationSec * 1_000) + 750));
+      await video.play();
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => { video.removeEventListener("ended", onEnded, true); resolve(); }, Math.ceil(durationSec * 1_000) + 250);
+        const onEnded = () => { clearTimeout(timer); resolve(); };
+        video.addEventListener("ended", onEnded, { once: true, capture: true });
+      });
+      video.pause();
       recorder.stop();
       await stopped;
       const blob = new Blob(chunks, { type: mimeType });
@@ -2057,8 +2060,9 @@ async function captureFacebookVideoFromPage(browser, expectedDurationSec = null)
         };
         reader.readAsDataURL(blob);
       });
-      return { base64, mimeType, durationSec, width: video.videoWidth, height: video.videoHeight, bytes: blob.size };
+      return { base64, mimeType, durationSec, width: video.videoWidth, height: video.videoHeight, bytes: blob.size, selectedVideoIndex: selection.index };
     } finally {
+      if (recorder.state === "recording") recorder.stop();
       stream.getTracks().forEach((track) => track.stop());
       video.muted = originalMuted;
       try { video.currentTime = originalTime; } catch { /* Best effort. */ }
@@ -2173,39 +2177,44 @@ async function createManagedCocCocFacebookBrowser(sourceUrl) {
 
 async function discoverFacebookSourceMedia(browser, sourceUrl, expectedDurationSec = null, options = {}) {
   if (!isFacebookSourceUrl(sourceUrl)) throw new Error("SOURCE_VIDEO_URL_INVALID: Chỉ hỗ trợ URL video Facebook đã xác thực.");
+  browser.sourceUrl = sourceUrl;
   await browser.loadURL(sourceUrl);
   const deadline = Date.now() + FACEBOOK_MEDIA_DISCOVERY_TIMEOUT_MS;
   let diagnostic = null;
   while (Date.now() <= deadline) {
     diagnostic = await browser.webContents.executeJavaScript(`(() => {
-      const visible = (element) => {
-        const rect = element?.getBoundingClientRect?.();
-        const style = element ? getComputedStyle(element) : null;
-        return Boolean(element && element.isConnected && rect && rect.width > 0 && rect.height > 0 && style?.display !== "none" && style?.visibility !== "hidden" && style?.opacity !== "0");
-      };
+      const facebookVideoIdentity = ${facebookVideoIdentity.toString()};
+      const isVideoBoundToFacebookReel = ${isVideoBoundToFacebookReel.toString()};
+      const sourceId = facebookVideoIdentity(${JSON.stringify(sourceUrl)});
       const sourceFor = (video) => [video?.currentSrc, video?.src, ...(video?.querySelectorAll?.("source[src]") || [])].map((value) => typeof value === "string" ? value : value?.src || value?.getAttribute?.("src")).filter(Boolean);
-      const videos = [...document.querySelectorAll("video")].filter(visible).map((video) => {
+      const videos = [...document.querySelectorAll("video")];
+      const candidates = videos.map((video, index) => {
         const rect = video.getBoundingClientRect();
-        const sources = [...new Set(sourceFor(video))];
-        return { sources, durationSec: Number.isFinite(video.duration) && video.duration > 0 ? video.duration : null, area: rect.width * rect.height, readyState: video.readyState };
+        const style = getComputedStyle(video);
+        return { index, connected: video.isConnected, visible: style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && !video.closest('[aria-hidden="true"]'), boundToReel: isVideoBoundToFacebookReel(video, sourceId), ready: video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0, durationSec: Number.isFinite(video.duration) && video.duration > 0 ? video.duration : null, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, viewportWidth: innerWidth, viewportHeight: innerHeight };
       });
+      const selection = (${selectFacebookSourceVideo.toString()})(candidates, location.href, ${JSON.stringify(sourceUrl)});
+      const selected = selection.error ? null : videos[selection.index];
+      const sources = selected ? [...new Set(sourceFor(selected))] : [];
       const currentUrl = location.href;
       const body = String(document.body?.innerText || "").slice(0, 5000);
       const authRequired = /accounts\\.google\\.com|facebook\\.com\\/login/i.test(currentUrl) || /log in to facebook|log in|đăng nhập/i.test(body);
-      const direct = videos.flatMap((item) => item.sources.filter((source) => /^https?:\\/\\//i.test(source)).map((source) => ({ source, ...item }))).sort((left, right) => (right.area || 0) - (left.area || 0));
-      const blob = videos.some((item) => item.sources.some((source) => /^blob:/i.test(source)));
-      const captureReady = videos.some((item) => item.readyState >= 2 && item.area > 0 && item.durationSec > 0);
-      return { currentUrl, authRequired, direct, blob, captureReady, visibleVideoCount: videos.length };
+      const direct = sources.filter((source) => /^https?:\\/\\//i.test(source)).map((source) => ({ source, durationSec: selection.durationSec, selectedVideoIndex: selection.index }));
+      const blob = sources.some((source) => /^blob:/i.test(source));
+      return { currentUrl, authRequired, direct, blob, captureReady: !selection.error, selectionError: selection.error, selectedVideoIndex: selection.index, selectedDurationSec: selection.durationSec || null, visibleVideoCount: videos.length };
     })()`, true).catch(() => null);
     if (diagnostic?.authRequired) throw new Error("FACEBOOK_AUTH_REQUIRED: Hãy đăng nhập Facebook trong cùng cửa sổ rồi chạy lại phân tích.");
+    if (diagnostic?.selectionError === "SOURCE_VIDEO_PAGE_MISMATCH" || diagnostic?.selectionError === "SOURCE_VIDEO_VISIBLE_AMBIGUOUS") throw new Error(diagnostic.selectionError);
     if (diagnostic?.direct?.length && options.preferCapture !== true) {
       const selected = diagnostic.direct[0];
       return { ...selected, currentUrl: diagnostic.currentUrl, visibleVideoCount: diagnostic.visibleVideoCount };
     }
+    if (diagnostic?.captureReady) break;
     await delay(FACEBOOK_MEDIA_POLL_INTERVAL_MS * 5);
   }
+  if (!diagnostic?.captureReady) throw new Error(diagnostic?.selectionError || "SOURCE_VIDEO_TARGET_NOT_READY");
   try {
-    const captured = await captureFacebookVideoFromPage(browser, expectedDurationSec);
+    const captured = await captureFacebookVideoFromPage(browser);
     return { ...captured, capture: true, currentUrl: diagnostic?.currentUrl || sourceUrl, visibleVideoCount: diagnostic?.visibleVideoCount || 0 };
   } catch (captureError) {
     if (diagnostic?.blob || diagnostic?.captureReady) throw new Error(`SOURCE_VIDEO_DOWNLOAD_UNAVAILABLE: Facebook chỉ cung cấp luồng blob/MSE và không thể ghi lại video trong phiên này (${captureError instanceof Error ? captureError.message : String(captureError)}).`);
@@ -2249,7 +2258,7 @@ async function downloadFacebookSourceVideo(sourceUrl, runId = null, expectedDura
       if (bytes.length > FACEBOOK_SOURCE_VIDEO_MAX_BYTES) throw new Error("SOURCE_VIDEO_FILE_TOO_LARGE");
       fs.writeFileSync(filePath, bytes, { mode: 0o600 });
       const normalized = await normalizeSourceVideoForGemini(filePath, downloadRoot, discovered.durationSec);
-      recordBrowserAction({ action: "facebook-source-video-capture", success: true, runId, sourceUrl: redactNetworkUrl(sourceUrl), fileName: path.basename(normalized.filePath), sourceFormat: "mp4", bytes: normalized.size, durationSec: normalized.durationSec, width: discovered.width, height: discovered.height, visibleVideoCount: discovered.visibleVideoCount });
+      recordBrowserAction({ action: "facebook-source-video-capture", success: true, runId, sourceUrl: redactNetworkUrl(sourceUrl), fileName: path.basename(normalized.filePath), sourceFormat: "mp4", bytes: normalized.size, durationSec: normalized.durationSec, width: discovered.width, height: discovered.height, visibleVideoCount: discovered.visibleVideoCount, selectedVideoIndex: discovered.selectedVideoIndex });
       return { filePath: normalized.filePath, downloadRoot, fileName: path.basename(normalized.filePath), mediaUrl: null, durationSec: normalized.durationSec, size: normalized.size };
     }
     const controller = new AbortController();
@@ -2427,10 +2436,11 @@ async function scanFacebookPages(entries, onProgress) {
               const likes = metricFromText(text, "reactions|likes|lượt thích|thích", container);
               const comments = metricFromText(text, "comments|bình luận", container);
               const shares = metricFromText(text, "shares|lượt chia sẻ|chia sẻ", container);
-              const discovery = await waitForBoundMediaDiscovery(href);
-              const mediaBinding = discovery.bindingResolved && discovery.durationSec === null ? await waitForBoundDuration(href, discovery) : discovery;
               const cleanUrl = (() => { try { const url = new URL(href); url.hash = ''; url.search = url.pathname.includes('/reel/') ? '' : url.search; return url.toString(); } catch { return href; } })();
-              found.set(videoId, { url: cleanUrl, caption: text.slice(0, 1000), publishedAt, views, likes, comments, shares, durationSec: mediaBinding.durationSec, mediaBinding });
+              // A Page listing can preload an unrelated reel; its <video>
+              // duration is not evidence for this link. The source reel page
+              // supplies authoritative duration after identity-bound capture.
+              found.set(videoId, { url: cleanUrl, caption: text.slice(0, 1000), publishedAt, views, likes, comments, shares, durationSec: null });
             }
             if (found.size >= 10) break;
             const height = document.documentElement.scrollHeight;

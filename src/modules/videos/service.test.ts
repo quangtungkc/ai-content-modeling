@@ -56,6 +56,21 @@ describe("manual Facebook video duration persistence", () => {
     expect(vi.mocked(db.competitorVideo.upsert).mock.calls.every(([arg]) => (arg as { create: { duration: unknown } }).create.duration === null)).toBe(true);
   });
 
+  it("clears an unverified duration inherited from an earlier Facebook Page scan", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-25T06:00:00.000Z"));
+    try {
+      const { db } = await import("@/lib/db");
+      vi.mocked(db.competitor.findFirst).mockResolvedValue({ id: "competitor-1" } as never);
+      vi.mocked(db.competitorVideo.findUnique).mockResolvedValue({ duration: 25.4 } as never);
+      vi.mocked(db.competitorVideo.upsert).mockResolvedValue({ id: "video-1" } as never);
+      vi.mocked(db.videoMetricSnapshot.create).mockResolvedValue({} as never);
+      const { saveManualCompetitorVideo } = await import("./service");
+      await saveManualCompetitorVideo("competitor-1", "user-1", { url: "https://www.facebook.com/reel/2330591501077995/", publishedAt: "2026-09-24T06:00:00.000Z", views: 100, scanSource: "FACEBOOK_PAGE_SCAN", durationSec: null });
+      expect(db.competitorVideo.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ duration: null }), update: expect.objectContaining({ duration: null }) }));
+    } finally { vi.useRealTimers(); }
+  });
+
   it("rejects a scanned reel outside seven days before writing it", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-25T06:00:00.000Z"));
