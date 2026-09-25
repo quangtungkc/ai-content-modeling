@@ -2,7 +2,7 @@ import { db } from "@/lib/db";
 import { Prisma } from "@prisma/client";
 import { AppError } from "@/lib/errors";
 import { AIService } from "@/services/ai/service";
-import { developedIdeaSchema, videoAnalysisSchema, modelingIdeasSchema } from "@/services/ai/schemas";
+import { developedIdeaSchema, normalizeDevelopedIdeaResponse, videoAnalysisSchema, modelingIdeasSchema } from "@/services/ai/schemas";
 import type { ModelingDirection } from "@/services/ai/types";
 import { decryptSecret } from "@/lib/secrets";
 import { GeminiProvider } from "@/services/ai/gemini";
@@ -125,7 +125,7 @@ export async function storeDevelopedIdeaFromBrowser(id: string, userId: string, 
   if (existingProject) return existingProject;
   const video = await db.competitorVideo.findUnique({ where: { id: idea.sourceVideoId }, include: { competitor: { include: { channel: true } } } });
   if (!video) throw new AppError("VIDEO_NOT_FOUND", "Không tìm thấy source video của idea.", 404);
-  const result = developedIdeaSchema.parse(value);
+  const result = developedIdeaSchema.parse(normalizeDevelopedIdeaResponse(value));
   assertModelingSafetyReview(result);
   const storyboard = result.storyboard as Prisma.InputJsonValue;
   const productionPrompts = result.storyboard.map((scene) => ({ sceneNumber: scene.sceneNumber, startFramePrompt: scene.startFramePrompt, englishPrompt: scene.englishPrompt })) as Prisma.InputJsonValue;

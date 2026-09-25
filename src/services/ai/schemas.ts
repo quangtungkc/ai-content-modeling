@@ -9,3 +9,27 @@ export const videoAnalysisSchema = z.object({
 const modelingDirectionSchema = z.object({ title: z.string(), coreConcept: z.string(), script: z.string(), characterDesign: z.string(), setting: z.string(), artStyle: z.string(), sourceMechanism: z.string(), whatIsPreserved: z.array(z.string()), whatIsChanged: z.array(z.string()), targetMarketAdaptation: z.string(), similarityRisk: z.enum(["low", "medium", "high"]), whyWorthDeveloping: z.string(), postText: z.string().transform(stripHashtagsFromPostText).pipe(z.string().min(1).max(500)) });
 export const modelingIdeasSchema = z.object({ schemaVersion: z.literal("1.0"), modelingDirections: z.array(modelingDirectionSchema).length(1) });
 export const developedIdeaSchema = z.object({ schemaVersion: z.literal("1.0"), deconstruction: z.record(z.string(), z.unknown()), artDirection: z.record(z.string(), z.unknown()), characterDesign: z.record(z.string(), z.unknown()), backgroundDesign: z.record(z.string(), z.unknown()), sourceModelingSpec: z.record(z.string(), z.unknown()).optional(), storyboard: z.array(z.object({ sceneNumber: z.number().int().positive(), sourceSceneId: z.string().trim().min(1).optional(), sourceBeat: z.string().trim().min(1).optional(), actionSequence: z.array(z.string().trim().min(1)).min(1).optional(), cameraSpec: z.record(z.string(), z.unknown()).optional(), spatialSpec: z.record(z.string(), z.unknown()).optional(), startState: z.string().trim().min(1).optional(), endState: z.string().trim().min(1).optional(), targetDuration: z.number().finite().positive().optional(), visualBlock: z.string(), actionBlock: z.string(), audioBlock: z.string(), startFramePrompt: z.string(), englishPrompt: z.string() })), safetyReview: z.object({ description: z.string(), safetyStatus: z.enum(["PASS", "BLOCKED"]), blockedReasons: z.array(z.string()), safeAlternative: z.string() }) });
+
+// Gemini sometimes omits the explanatory text and serializes an empty reasons list as "".
+// Preserve its safety decision and any stated reason; never infer PASS from missing data.
+export function normalizeDevelopedIdeaResponse(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const response = value as Record<string, unknown>;
+  const review = response.safetyReview;
+  if (!review || typeof review !== "object" || Array.isArray(review)) return value;
+  const safetyReview = review as Record<string, unknown>;
+  if (safetyReview.safetyStatus !== "PASS" && safetyReview.safetyStatus !== "BLOCKED") return value;
+  const blockedReasons = typeof safetyReview.blockedReasons === "string"
+    ? (safetyReview.blockedReasons.trim() ? [safetyReview.blockedReasons.trim()] : [])
+    : safetyReview.blockedReasons;
+  return {
+    ...response,
+    safetyReview: {
+      ...safetyReview,
+      description: safetyReview.description === undefined
+        ? (safetyReview.safetyStatus === "PASS" ? "Gemini đánh dấu nội dung PASS." : "Gemini đánh dấu nội dung BLOCKED.")
+        : safetyReview.description,
+      blockedReasons,
+    },
+  };
+}

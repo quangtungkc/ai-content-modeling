@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.25 — 2026-09-25
+
+### Fixed
+
+- Stage 2 Gemini browser responses are now checked against the complete Content Project contract before the browser bridge reports success.
+- Gemini is explicitly required to return all `safetyReview` fields with the correct types; malformed responses trigger a format retry.
+- The server normalizes an empty safety-reason string to an empty array and preserves the reported PASS/BLOCKED decision before saving.
+
+### Validation
+
+- Replayed the exact failed Gemini response and successfully saved a Content Project with 10 scenes on an isolated database copy.
+- 12 focused tests passed, typecheck passed, production build passed, and Electron syntax validation passed.
+
 ## 1.0.24 — 2026-09-25
 
 ### Fixed
