@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import { AppError } from "@/lib/errors";
 import { createHash } from "node:crypto";
 import { manualCompetitorVideoSchema, metricSnapshotSchema } from "./schema";
+import { isRecentVideoPublishedAt } from "./recent-window";
 
 async function assertVideoOwner(videoId: string, userId: string) {
   const video = await db.competitorVideo.findFirst({ where: { id: videoId, competitor: { channel: { userId } } }, select: { id: true } });
@@ -24,6 +25,9 @@ export async function saveManualCompetitorVideo(competitorId: string, userId: st
   if (!competitor) throw new AppError("COMPETITOR_NOT_FOUND", "Không tìm thấy đối thủ đang hoạt động.", 404);
 
   const data = manualCompetitorVideoSchema.parse(input);
+  if (data.scanSource === "FACEBOOK_PAGE_SCAN" && !isRecentVideoPublishedAt(data.publishedAt)) {
+    throw new AppError("VIDEO_OUTSIDE_RECENT_WINDOW", "Video quét từ Page phải được đăng trong 7 ngày gần nhất.", 422);
+  }
   const externalId = `manual:${createHash("sha256").update(data.url).digest("hex")}`;
   const existingVideo = await db.competitorVideo.findUnique({ where: { competitorId_externalId: { competitorId, externalId } }, select: { duration: true } });
   const duration = data.durationSec ?? existingVideo?.duration ?? null;

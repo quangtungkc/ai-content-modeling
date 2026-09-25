@@ -7,6 +7,7 @@ import { recordUsage } from "@/modules/usage/service";
 import { decryptSecret } from "@/lib/secrets";
 import { markCompetitorProcessed } from "./sync-progress";
 import { reportRuntimeFailure } from "@/modules/codex-orchestrator/runtime-failure";
+import { isRecentVideoPublishedAt } from "./recent-window";
 
 export const MAX_RECENT_VIDEOS_PER_COMPETITOR = 10;
 
@@ -41,6 +42,7 @@ export async function syncChannelVideos(channelId: string, syncId?: string) {
       const videos = await provider.getRecentVideos(channel);
       void recordUsage({ userId: competitor.channel.userId, channelId, metric: UsageMetric.COMPETITOR_REQUEST, quantity: 1, idempotencyKey: `competitor:recent:${competitor.id}:${Date.now()}` });
       const uniqueVideos = [...new Map(videos.map((video) => [video.externalId, video])).values()]
+        .filter((video) => isRecentVideoPublishedAt(video.publishedAt))
         .sort((left, right) => right.publishedAt.getTime() - left.publishedAt.getTime())
         .slice(0, MAX_RECENT_VIDEOS_PER_COMPETITOR);
       const videoErrors: string[] = [];

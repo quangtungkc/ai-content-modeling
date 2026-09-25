@@ -8,20 +8,26 @@ function jsonResponse(body: unknown) {
   return { ok: true, status: 200, json: async () => body };
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe("Facebook competitor provider", () => {
-  it("requests and returns at most the ten newest videos", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: Array.from({ length: 12 }, (_, index) => ({ id: `video-${index}`, permalink_url: `https://www.facebook.com/watch/?v=video-${index}`, created_time: new Date(Date.UTC(2026, 8, 19, index, 0)).toISOString() })) }));
+  it("selects up to ten verified videos from the past seven days", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-25T06:00:00.000Z"));
+    const entries = [
+      ...Array.from({ length: 10 }, (_, index) => ({ id: `old-${index}`, permalink_url: `https://www.facebook.com/watch/?v=old-${index}`, created_time: "2026-09-17T06:00:00.000Z" })),
+      ...Array.from({ length: 12 }, (_, index) => ({ id: `recent-${index}`, permalink_url: `https://www.facebook.com/watch/?v=recent-${index}`, created_time: new Date(Date.UTC(2026, 8, 19, index, 0)).toISOString() })),
+    ];
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: entries }));
     vi.stubGlobal("fetch", fetchMock);
 
     const videos = await new FacebookProvider("token").getRecentVideos(channel);
     const requestUrl = new URL(String(fetchMock.mock.calls[0]?.[0]));
 
-    expect(requestUrl.searchParams.get("limit")).toBe("10");
+    expect(requestUrl.searchParams.get("limit")).toBe("100");
     expect(videos).toHaveLength(10);
-    expect(videos[0]?.externalId).toBe("video-11");
-    expect(videos[9]?.externalId).toBe("video-2");
+    expect(videos[0]?.externalId).toBe("recent-11");
+    expect(videos[9]?.externalId).toBe("recent-2");
   });
 
   it("reads lifetime views from video insights when the video object omits views", async () => {

@@ -10,6 +10,7 @@ const path = require("node:path");
 const { initializeUserData } = require("./user-data.cjs");
 const { cleanupManagedTemporaryFiles, cleanupCompletedProjectArtifacts } = require("./temp-cleanup.cjs");
 const { validateFinalVideoProbe } = require("./final-video-validation.cjs");
+const { findFacebookVideoCard, verifiedFacebookPublishedAt } = require("./facebook-video-date.cjs");
 initializeUserData(app);
 if (app.isPackaged) {
   process.env.MODELING_RUNTIME_REVISION ||= `v${app.getVersion()}`;
@@ -2401,42 +2402,47 @@ async function scanFacebookPages(entries, onProgress) {
           };
           const waitForBoundMediaDiscovery = async (href) => { const startedAt = Date.now(); const deadline = startedAt + ${FACEBOOK_MEDIA_DISCOVERY_TIMEOUT_MS}; let pollCount = 0; let diagnostic = readBoundMedia(href); while (Date.now() <= deadline) { diagnostic = { ...readBoundMedia(href), discoveryPollCount: ++pollCount, discoveryElapsedMs: Date.now() - startedAt }; if (diagnostic.bindingResolved) return { ...diagnostic, discoveryTimedOut: false }; await new Promise((resolve) => setTimeout(resolve, ${FACEBOOK_MEDIA_POLL_INTERVAL_MS})); } return { ...diagnostic, discoveryTimedOut: true, failureCode: diagnostic.finalMediaCandidateCount > 1 ? 'FACEBOOK_REEL_MEDIA_BINDING_AMBIGUOUS' : 'FACEBOOK_REEL_MEDIA_NOT_FOUND' }; };
           const waitForBoundDuration = async (href, discovery) => { const startedAt = Date.now(); const deadline = startedAt + 2000; let pollCount = 0; let diagnostic = discovery; while (Date.now() <= deadline) { diagnostic = { ...readBoundMedia(href), discoveryPollCount: discovery.discoveryPollCount, discoveryElapsedMs: discovery.discoveryElapsedMs, durationPollCount: ++pollCount, durationElapsedMs: Date.now() - startedAt }; if (!diagnostic.bindingResolved && (diagnostic.failureCode === 'FACEBOOK_REEL_MEDIA_BINDING_AMBIGUOUS' || diagnostic.failureCode === 'FACEBOOK_REEL_MEDIA_NOT_FOUND')) return { ...diagnostic, durationTimedOut: false }; if (diagnostic.bindingResolved && diagnostic.durationSec !== null) return { ...diagnostic, durationTimedOut: false }; await new Promise((resolve) => setTimeout(resolve, 100)); } return { ...diagnostic, durationTimedOut: true }; };
-          const relativeDate = (text) => {
-            const match = text.match(/\\b(\\d+)\\s*(h|giờ|m|phút|d|ngày)\\b/i);
-            if (!match) return null;
-            const amount = Number(match[1]);
-            const unit = match[2].toLowerCase();
-            const minutes = unit === "m" || unit === "phút" ? amount : unit === "h" || unit === "giờ" ? amount * 60 : amount * 1440;
-            return new Date(Date.now() - minutes * 60_000).toISOString();
-          };
+          const cardForReel = ${findFacebookVideoCard.toString()};
+          const publishedAtForCard = ${verifiedFacebookPublishedAt.toString()};
           const found = new Map();
-          for (const anchor of document.querySelectorAll("a[href]")) {
-            // Facebook renders many duplicate links per card. The /videos
-            // page is ordered newest-first, so stop after the first ten
-            // unique candidates instead of waiting on every historical reel.
-            if (found.size >= 10) break;
-            const href = anchor.href;
-            if (!/\\/(reel|videos|posts)\\//.test(href) && !/watch\\/?\\?v=/.test(href) && !/\\/share\\/r\\//.test(href)) continue;
-            if (found.has(href)) continue;
-            let container = anchor.closest('[role="article"]');
-            if (!container) {
-              container = anchor;
-              for (let level = 0; level < 6 && container.parentElement; level += 1) {
-                if (container.innerText && container.innerText.length > 30) break;
-                container = container.parentElement;
-              }
+          let unchangedRounds = 0;
+          let reachedEnd = false;
+          let previousHeight = -1;
+          let previousLinkCount = -1;
+          for (let round = 0; round < 15 && found.size < 10; round += 1) {
+            for (const anchor of document.querySelectorAll("a[href]")) {
+              if (found.size >= 10) break;
+              const href = anchor.href;
+              if (!/\\/(reel|videos|posts)\\//.test(href) && !/watch\\/?\\?v=/.test(href) && !/\\/share\\/r\\//.test(href)) continue;
+              const videoId = (() => { try { return new URL(href).pathname.match(/\\/(?:reel|videos|posts)\\/(\\d+)\\/?$/i)?.[1] || href; } catch { return href; } })();
+              if (found.has(videoId)) continue;
+              const container = cardForReel(anchor);
+              if (!container) continue;
+              const text = (container?.innerText || anchor.innerText || "").trim();
+              if (!text) continue;
+              const publishedAt = publishedAtForCard(container);
+              if (!publishedAt) continue;
+              const views = metricFromText(text, "views|lượt xem|view|đã xem", container, true);
+              if (views === null) continue;
+              const likes = metricFromText(text, "reactions|likes|lượt thích|thích", container);
+              const comments = metricFromText(text, "comments|bình luận", container);
+              const shares = metricFromText(text, "shares|lượt chia sẻ|chia sẻ", container);
+              const discovery = await waitForBoundMediaDiscovery(href);
+              const mediaBinding = discovery.bindingResolved && discovery.durationSec === null ? await waitForBoundDuration(href, discovery) : discovery;
+              const cleanUrl = (() => { try { const url = new URL(href); url.hash = ''; url.search = url.pathname.includes('/reel/') ? '' : url.search; return url.toString(); } catch { return href; } })();
+              found.set(videoId, { url: cleanUrl, caption: text.slice(0, 1000), publishedAt, views, likes, comments, shares, durationSec: mediaBinding.durationSec, mediaBinding });
             }
-            const text = (container?.innerText || anchor.innerText || "").trim();
-            if (!text) continue;
-            const views = metricFromText(text, "views|lượt xem|view|đã xem", container, true);
-            const likes = metricFromText(text, "reactions|likes|lượt thích|thích", container);
-            const comments = metricFromText(text, "comments|bình luận", container);
-            const shares = metricFromText(text, "shares|lượt chia sẻ|chia sẻ", container);
-            const discovery = await waitForBoundMediaDiscovery(href);
-            const mediaBinding = discovery.bindingResolved && discovery.durationSec === null ? await waitForBoundDuration(href, discovery) : discovery;
-            found.set(href, { url: href, caption: text.slice(0, 1000), publishedAt: relativeDate(text), views, likes, comments, shares, durationSec: mediaBinding.durationSec, mediaBinding });
+            if (found.size >= 10) break;
+            const height = document.documentElement.scrollHeight;
+            const linkCount = document.querySelectorAll('a[href]').length;
+            unchangedRounds = height === previousHeight && linkCount === previousLinkCount ? unchangedRounds + 1 : 0;
+            if (unchangedRounds >= 6) { reachedEnd = true; break; }
+            previousHeight = height;
+            previousLinkCount = linkCount;
+            window.scrollTo(0, height);
+            await new Promise((resolve) => setTimeout(resolve, 900));
           }
-          return { needsLogin: false, items: [...found.values()].slice(0, 10) };
+          return { needsLogin: false, items: [...found.values()], ...(found.size < 10 && !reachedEnd ? { error: "FACEBOOK_VIDEO_SCAN_INCOMPLETE" } : {}) };
         })()
       `, true);
         for (const item of page.items || []) {

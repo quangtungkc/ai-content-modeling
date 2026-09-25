@@ -5,6 +5,7 @@ import { notifyRuntimeFailure } from "@/components/runtime-error-monitor";
 import { stripHashtagsFromPostText } from "@/lib/post-text";
 import { assertStrictModelingReady, compileStrictModelingConstraints } from "@/modules/modeling/strict-source-modeling";
 import { assertNoWrongStageRestart, checkpointPatch, prepareResumeSteps, resolveResumableRun, resumeTargetForStage, type AutomationPersistenceFields, type ResumeDecision, type ResumableRunInput } from "@/modules/automations/resume";
+import { isRecentVideoPublishedAt } from "@/modules/videos/recent-window";
 
 type Dashboard = {
   channel: { id: string; name: string } | null;
@@ -512,7 +513,7 @@ export function ViralDashboard() {
       const scanErrors = results.filter((result) => result.error).length;
       for (const result of results) {
         for (const item of result.items) {
-          if (!item.publishedAt || item.views === null) { skipped += 1; continue; }
+          if (!isRecentVideoPublishedAt(item.publishedAt) || item.views === null) { skipped += 1; continue; }
           const response = await fetch(`/api/v1/competitors/${result.competitorId}/manual-video`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -520,6 +521,7 @@ export function ViralDashboard() {
               url: item.url,
               caption: item.caption,
               publishedAt: item.publishedAt,
+              scanSource: "FACEBOOK_PAGE_SCAN",
               views: item.views,
               likes: item.likes ?? 0,
               comments: item.comments ?? 0,
@@ -533,10 +535,10 @@ export function ViralDashboard() {
       }
       setAppliedFilters((current) => ({ ...current }));
       setMessage(stored
-        ? `Đã quét và lưu ${stored} video từ ${facebookCompetitors.length} đối thủ. ${skipped ? `${skipped} mục chưa đủ số liệu nên bỏ qua.` : ""}`
+        ? `Đã quét và lưu ${stored} video đăng trong 7 ngày gần nhất từ ${facebookCompetitors.length} đối thủ. ${skipped ? `${skipped} mục thiếu ngày đăng, ngoài 7 ngày hoặc thiếu lượt xem đã bỏ qua.` : ""}${scanErrors ? ` ${scanErrors} Page quét chưa hoàn tất hoặc không thể mở.` : ""}`
         : discovered
-          ? `Đã tìm thấy ${discovered} video nhưng Facebook chưa hiển thị đủ thời gian đăng hoặc lượt xem để lưu. ${scanErrors ? `${scanErrors} Trang không thể mở.` : ""}`
-          : `Chưa tải được video từ các Trang. ${scanErrors ? `${scanErrors} Trang không thể mở.` : "Kiểm tra lại phiên đăng nhập Facebook rồi thử lại."}`);
+          ? `Đã tìm thấy ${discovered} video trong 7 ngày nhưng thiếu lượt xem để lưu. ${scanErrors ? `${scanErrors} Page quét chưa hoàn tất hoặc không thể mở.` : ""}`
+          : `Chưa tìm được video đủ điều kiện trong 7 ngày gần nhất. ${scanErrors ? `${scanErrors} Page quét chưa hoàn tất hoặc không thể mở.` : "Kiểm tra lại phiên đăng nhập Facebook rồi thử lại."}`);
     } catch (caught) {
       notifyRuntimeFailure(caught, { operation: "facebook-browser-scan" });
       setError(caught instanceof Error ? caught.message : "Không thể quét Facebook.");

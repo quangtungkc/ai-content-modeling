@@ -17,4 +17,5 @@ export const manualCompetitorVideoSchema = z.object({
   shares: z.number().int().nonnegative().default(0),
   caption: z.string().trim().max(1_000).optional(),
   durationSec: z.preprocess((value) => value === undefined ? undefined : typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null, z.number().finite().positive().nullable().optional()),
+  scanSource: z.literal("FACEBOOK_PAGE_SCAN").optional(),
 });

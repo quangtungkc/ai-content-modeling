@@ -1,6 +1,6 @@
 {
   "name": "ai-content-modeling",
-  "version": "1.0.22",
+  "version": "1.0.23",
   "private": true,
   "description": "Desktop AI content modeling pipeline with CDP-controlled Gemini and Flow workflows",
   "author": "Quang Tung",
@@ -67,10 +67,11 @@
     "productName": "Modeling AI",
     "artifactName": "Modeling.AI.Setup.${version}.${ext}",
     "directories": {
-      "output": "release/1.0.22-production"
+      "output": "release/1.0.23-production"
     },
     "files": [
     "electron/main.cjs",
+    "electron/facebook-video-date.cjs",
     "electron/user-data.cjs",
     "electron/sqlite-release-schema.cjs",
     "electron/edge-gemini-cdp.cjs",

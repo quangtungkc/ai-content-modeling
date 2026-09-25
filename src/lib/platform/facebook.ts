@@ -1,5 +1,6 @@
 import { PlatformProviderError, PlatformProviderNotConfiguredError } from "./errors";
 import type { CompetitorChannel, CompetitorPlatformProvider, RecentVideo, VideoMetrics } from "./types";
+import { isRecentVideoPublishedAt } from "@/modules/videos/recent-window";
 
 const HOSTS = new Set(["facebook.com", "www.facebook.com", "m.facebook.com"]);
 
@@ -38,10 +39,12 @@ export class FacebookProvider implements CompetitorPlatformProvider {
   }
 
   async getRecentVideos(channel: CompetitorChannel): Promise<RecentVideo[]> {
-    const body = await this.graph(`/${encodeURIComponent(channel.externalId)}/videos`, { fields: "id,permalink_url,description,created_time,picture", limit: String(MAX_RECENT_VIDEOS) });
+    const body = await this.graph(`/${encodeURIComponent(channel.externalId)}/videos`, { fields: "id,permalink_url,description,created_time,picture", limit: "100" });
     return (body.data ?? []).flatMap((item) => {
       if (typeof item.id !== "string" || typeof item.permalink_url !== "string" || typeof item.created_time !== "string") return [];
-      return [{ platform: this.platform, externalId: item.id, url: item.permalink_url, caption: typeof item.description === "string" ? item.description : undefined, thumbnail: typeof item.picture === "string" ? item.picture : undefined, publishedAt: new Date(item.created_time) }];
+      const publishedAt = new Date(item.created_time);
+      if (!isRecentVideoPublishedAt(publishedAt)) return [];
+      return [{ platform: this.platform, externalId: item.id, url: item.permalink_url, caption: typeof item.description === "string" ? item.description : undefined, thumbnail: typeof item.picture === "string" ? item.picture : undefined, publishedAt }];
     }).sort((left, right) => right.publishedAt.getTime() - left.publishedAt.getTime()).slice(0, MAX_RECENT_VIDEOS);
   }
 

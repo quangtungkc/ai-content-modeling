@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.23 — 2026-09-25
+
+### Fixed
+
+- Facebook Page scanning now verifies each video's own publication time before selecting up to ten distinct videos from the past seven days.
+- Older, undated, and future-dated videos are rejected at browser scan, desktop ingestion, and Graph API sync boundaries. A Page scan that cannot reach the end reports its incomplete state.
+- Timestamp extraction is scoped to the video's card, so dates in captions or nearby cards cannot make an old reel appear new.
+- The incorrectly dated reel `1121765030409934` was verified as three weeks old on its Page and its false publication date was cleared in local app data.
+
+### Validation
+
+- Focused date, provider, sync, and persistence tests passed; direct CDP scan on live Facebook Pages accepted recent reels and excluded the three-week-old example.
+- Typecheck and production build passed.
+
 ## 1.0.22 — 2026-09-25
 
 ### Fixed

@@ -55,4 +55,20 @@ describe("manual Facebook video duration persistence", () => {
     }
     expect(vi.mocked(db.competitorVideo.upsert).mock.calls.every(([arg]) => (arg as { create: { duration: unknown } }).create.duration === null)).toBe(true);
   });
+
+  it("rejects a scanned reel outside seven days before writing it", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-25T06:00:00.000Z"));
+    const { db } = await import("@/lib/db");
+    vi.mocked(db.competitor.findFirst).mockResolvedValue({ id: "competitor-1" } as never);
+    const { saveManualCompetitorVideo } = await import("./service");
+    await expect(saveManualCompetitorVideo("competitor-1", "user-1", {
+      url: "https://www.facebook.com/reel/1121765030409934",
+      publishedAt: "2026-09-17T00:00:00.000Z",
+      views: 100,
+      scanSource: "FACEBOOK_PAGE_SCAN",
+    })).rejects.toThrow("7 ngày gần nhất");
+    expect(db.competitorVideo.upsert).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
 });
