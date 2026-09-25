@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getRequiredSession } from "@/lib/auth/provider";
 import { AppError, toErrorResponse } from "@/lib/errors";
 import { createCodexJob, listCodexJobs } from "@/modules/codex-orchestrator/service";
+import { stripHashtagsFromPostText } from "@/lib/post-text";
 
 const createSchema = z.object({
   sourceVideoId: z.string().min(1),
@@ -10,7 +11,7 @@ const createSchema = z.object({
   settings: z.object({
     artStyle: z.string().trim().min(1).max(100),
     aspectRatio: z.enum(["9:16", "16:9", "1:1", "4:5"]),
-    postText: z.string().max(500).optional(),
+    postText: z.string().transform(stripHashtagsFromPostText).pipe(z.string().max(500)).optional(),
     hashtags: z.string().max(500).optional(),
     language: z.string().max(80).optional(),
     targetCountry: z.string().max(120).optional(),

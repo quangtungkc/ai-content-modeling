@@ -2,6 +2,7 @@
 /* eslint-disable @next/next/no-img-element */
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { notifyRuntimeFailure } from "@/components/runtime-error-monitor";
+import { stripHashtagsFromPostText } from "@/lib/post-text";
 import { assertStrictModelingReady, compileStrictModelingConstraints } from "@/modules/modeling/strict-source-modeling";
 import { assertNoWrongStageRestart, checkpointPatch, prepareResumeSteps, resolveResumableRun, resumeTargetForStage, type AutomationPersistenceFields, type ResumeDecision, type ResumableRunInput } from "@/modules/automations/resume";
 
@@ -1167,7 +1168,7 @@ export function ViralDashboard() {
         const selectedChannel = channels.find((channel) => channel.id === selectedChannelId);
         const publishingSettings: AutomationSettings = {
           ...settings,
-          postText: currentIdea.postText,
+          postText: stripHashtagsFromPostText(currentIdea.postText),
           hashtags: selectedChannel?.hashtags?.trim() ?? "",
           language: selectedChannel?.language ?? "",
           targetCountry: selectedChannel?.targetCountry ?? "",

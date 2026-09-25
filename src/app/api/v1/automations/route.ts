@@ -8,6 +8,7 @@ import { hasProjectFinalVideo } from "@/modules/assets/image-generation-service"
 import { buildAuthoritativePersistencePatch, reconcileStaleRunningRun, type AutomationPersistenceFields, type ResumableRunInput } from "@/modules/automations/resume";
 import { deleteAutomationRunWithProject } from "@/modules/projects/deletion-service";
 import { ensureCodexStorage } from "@/modules/codex-orchestrator/storage";
+import { stripHashtagsFromPostText } from "@/lib/post-text";
 
 const stepSchema = z.object({
   key: z.string().min(1).max(80),
@@ -22,7 +23,7 @@ const settingsSchema = z.object({
   artStyle: z.string().trim().min(1).max(100),
   aspectRatio: z.enum(["9:16", "16:9", "1:1", "4:5"]),
   videoProvider: z.enum(["flow", "gemini"]).optional(),
-  postText: z.string().trim().max(500).optional(),
+  postText: z.string().transform(stripHashtagsFromPostText).pipe(z.string().max(500)).optional(),
   hashtags: z.string().trim().max(500).optional(),
   language: z.string().trim().max(80).optional(),
   targetCountry: z.string().trim().max(120).optional(),

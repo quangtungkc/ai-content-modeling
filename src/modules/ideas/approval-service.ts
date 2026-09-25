@@ -52,6 +52,11 @@ async function getOwnedIdea(id: string, userId: string) {
   return idea;
 }
 
+function assertModelingSafetyReview(result: { safetyReview: { safetyStatus: "PASS" | "BLOCKED"; blockedReasons: string[]; safeAlternative: string } }) {
+  if (result.safetyReview.safetyStatus === "PASS") return;
+  throw new AppError("CONTENT_SAFETY_BLOCKED", "Modeling bị dừng vì Gemini đánh dấu nội dung có nguy cơ vi phạm an toàn. Hãy chỉnh source/prompt theo phương án an toàn rồi chạy lại.", 422, { blockedReasons: result.safetyReview.blockedReasons, safeAlternative: result.safetyReview.safeAlternative });
+}
+
 export async function getAuthoritativeSourceModelingSpec(sourceVideoId: string) {
   const priorProjects = await db.contentProject.findMany({
     where: { sourceVideoId, modelingPolicy: CANONICAL_DEFAULT_MODELING_POLICY },
@@ -105,6 +110,7 @@ export async function developApprovedIdea(id: string, userId: string, ai?: AISer
   }
   const mainCharacterImage = await readChannelMainCharacterImage(channel);
   const result = await aiService.developIdea({ channelDNA: { name: channel.name, topic: channel.topic, subTopic: channel.subTopic, targetCountry: channel.targetCountry, language: channel.language, audience: channel.audience, contentStyle: channel.contentStyle, visualStyle: channel.visualStyle, videoDuration: channel.videoDurationSec, hasDialogue: channel.hasDialogue, creativeInstructions: channel.creativeInstructions, hashtags: channel.hashtags, mainCharacterImageAvailable: Boolean(channel.mainCharacterImageKey), mainCharacterImageName: channel.mainCharacterImageName, timezone: channel.timezone }, video: { id: video.id, url: video.url, caption: video.caption, thumbnailUrl: video.thumbnailUrl, publishedAt: video.publishedAt?.toISOString(), duration: video.duration }, analysis, idea: rawContent, aspectRatio, mainCharacterImage });
+  assertModelingSafetyReview(result);
   const storyboard = result.storyboard as Prisma.InputJsonValue;
   const productionPrompts = result.storyboard.map((scene) => ({ sceneNumber: scene.sceneNumber, startFramePrompt: scene.startFramePrompt, englishPrompt: scene.englishPrompt })) as Prisma.InputJsonValue;
   const strict = strictSourceFields(video, result, result.storyboard);
@@ -120,6 +126,7 @@ export async function storeDevelopedIdeaFromBrowser(id: string, userId: string, 
   const video = await db.competitorVideo.findUnique({ where: { id: idea.sourceVideoId }, include: { competitor: { include: { channel: true } } } });
   if (!video) throw new AppError("VIDEO_NOT_FOUND", "Không tìm thấy source video của idea.", 404);
   const result = developedIdeaSchema.parse(value);
+  assertModelingSafetyReview(result);
   const storyboard = result.storyboard as Prisma.InputJsonValue;
   const productionPrompts = result.storyboard.map((scene) => ({ sceneNumber: scene.sceneNumber, startFramePrompt: scene.startFramePrompt, englishPrompt: scene.englishPrompt })) as Prisma.InputJsonValue;
   const strict = strictSourceFields(video, result, result.storyboard);

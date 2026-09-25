@@ -5,9 +5,12 @@ import { finalReviewSchema } from "./review-schemas";
 import { assetValidationSchema } from "./asset-schemas";
 import type { AIInput, AIProvider, ModelingDirection, VideoAnalysis, VideoUnderstandingInput, VisualBreakdown, FinalReviewInput, FinalReview, AssetValidationInput, AssetValidation, DevelopedIdea } from "./types";
 import { STRICT_GEMINI_PROMPT_COMPILER_SYSTEM_INSTRUCTION } from "@/modules/prompt-fidelity/validator";
+import { MODELING_SAFETY_POLICY } from "@/modules/modeling/safety-policy";
 
 function modelingIdeaInstruction(artStyle?: string) {
   return `Bạn đang ở bước TẠO MODELING IDEA cho một video hài hình ảnh ngắn. Hãy "bắt mạch" bản gốc trước khi sáng tạo, dựa trên dữ liệu phân tích được cung cấp.
+
+${MODELING_SAFETY_POLICY}
 
 BƯỚC 1 — PHÂN TÍCH VÀ BẮT MẠCH BẢN GỐC (DECONSTRUCTION):
 - Xác định rõ điểm gây cười cốt lõi (The Gag): tiếng cười đến từ sự ngớ ngẩn, tương tác vật lý lố bịch, biểu cảm vô tri, hay khoảng lặng chưng hửng.
@@ -40,6 +43,8 @@ Phong cách mỹ thuật được chọn: ${artStyle ?? "Dùng phong cách hiệ
 
 function developedIdeaInstruction(aspectRatio?: string) {
   return `${STRICT_GEMINI_PROMPT_COMPILER_SYSTEM_INSTRUCTION}
+
+${MODELING_SAFETY_POLICY}
 
 Phát triển Modeling Idea này thành gói sẵn sàng triển khai cho video hài hình ảnh ngắn. Trong vai trò prompt compiler, không viết lại câu chuyện và không thêm sáng tạo ngoài source evidence. Trước khi viết storyboard, bắt buộc thực hiện đủ ba bước sau:
 
@@ -231,7 +236,6 @@ const developedIdeaResponseSchema: Record<string, unknown> = {
     sourceModelingSpec: { type: "OBJECT" },
     storyboard: {
       type: "ARRAY",
-      minItems: 1,
       items: {
         type: "OBJECT",
         properties: {
@@ -253,7 +257,7 @@ const developedIdeaResponseSchema: Record<string, unknown> = {
         required: ["sceneNumber", "sourceSceneId", "sourceBeat", "actionSequence", "cameraSpec", "spatialSpec", "startState", "endState", "targetDuration", "visualBlock", "actionBlock", "audioBlock", "startFramePrompt", "englishPrompt"],
       },
     },
-    safetyReview: { type: "OBJECT" },
+    safetyReview: { type: "OBJECT", properties: { description: { type: "STRING" }, safetyStatus: { type: "STRING", enum: ["PASS", "BLOCKED"] }, blockedReasons: { type: "ARRAY", items: { type: "STRING" } }, safeAlternative: { type: "STRING" } }, required: ["description", "safetyStatus", "blockedReasons", "safeAlternative"] },
   },
   required: ["schemaVersion", "deconstruction", "artDirection", "characterDesign", "backgroundDesign", "sourceModelingSpec", "storyboard", "safetyReview"],
 };

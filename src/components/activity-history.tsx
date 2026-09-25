@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { stripHashtagsFromPostText } from "@/lib/post-text";
 
 type ActivityStep = {
   key: string;
@@ -106,12 +107,14 @@ export function ActivityHistory() {
   }
 
   async function copyPublishingContent(run: AutomationRun) {
-    const content = [run.settings.postText?.trim(), run.settings.hashtags?.trim()].filter(Boolean).join("\n\n");
+    const content = [run.settings.postText ? stripHashtagsFromPostText(run.settings.postText) : "", run.settings.hashtags?.trim()].filter(Boolean).join("\n\n");
     if (!content) return;
     await navigator.clipboard.writeText(content);
     setCopiedRunId(run.id);
     window.setTimeout(() => setCopiedRunId((id) => id === run.id ? "" : id), 1800);
   }
+
+  const selectedPostText = selectedRun?.settings.postText ? stripHashtagsFromPostText(selectedRun.settings.postText) : "";
 
   return (
     <section className="mx-auto max-w-[1150px]">
@@ -193,10 +196,10 @@ export function ActivityHistory() {
                           {selectedRun.sourceVideoUrl && <a href={selectedRun.sourceVideoUrl} target="_blank" rel="noreferrer" className="rounded-lg border border-emerald-300 px-3 py-2 text-xs font-bold text-emerald-800">Mở video gốc</a>}
                           <a href={`${selectedRun.finalVideoUrl}&download=1`} download="video-modeling.mp4" className="rounded-lg border border-emerald-300 px-3 py-2 text-xs font-bold text-emerald-800">Tải video</a>
                         </div>
-                        {(selectedRun.settings.postText || selectedRun.settings.hashtags) && <div className="mt-4 rounded-lg border border-emerald-200 bg-white p-3">
+                        {(selectedPostText || selectedRun.settings.hashtags) && <div className="mt-4 rounded-lg border border-emerald-200 bg-white p-3">
                           <div>
                             <p className="text-xs font-extrabold uppercase tracking-wide text-[#6883aa]">Text ngắn đăng kèm video</p>
-                            <p className="mt-1 whitespace-pre-wrap text-sm text-[#0b3262]">{selectedRun.settings.postText || "Chưa có nội dung."}</p>
+                            <p className="mt-1 whitespace-pre-wrap text-sm text-[#0b3262]">{selectedPostText || "Chưa có nội dung."}</p>
                             {(selectedRun.settings.language || selectedRun.settings.targetCountry) && <p className="mt-1 text-xs text-[#7990b0]">{[selectedRun.settings.language, selectedRun.settings.targetCountry].filter(Boolean).join(" · ")}</p>}
                           </div>
                           <div className="mt-3">

@@ -77,7 +77,7 @@ describe("OpenAI Responses API", () => {
         startFramePrompt: "A single frozen vertical 9:16 bedroom still.",
         englishPrompt: "Animate one 4-second alarm-clock reaction from the exact still.",
       }],
-      safetyReview: { description: "An toàn" },
+      safetyReview: { description: "An toàn", safetyStatus: "PASS", blockedReasons: [], safeAlternative: "Không cần thay thế." },
     };
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       status: "completed",
