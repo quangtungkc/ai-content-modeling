@@ -6,6 +6,7 @@ export async function requestStage2GeminiBrowser(input: {
   purpose: "MODELING_IDEA" | "CONTENT_PROJECT_DEVELOP";
   video: Record<string, unknown>; analysis: unknown; channelDNA: unknown;
   idea?: unknown; artStyle?: string; aspectRatio?: string;
+  authoritativeSourceModelingSpec?: unknown;
   codexJobId?: string;
 }, onProgress?: (detail: string, payload?: Record<string, unknown>) => Promise<void>) {
   const queued = await new LocalJobQueue().enqueue("desktop.flow.quality", {

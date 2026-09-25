@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { getRequiredSession } from "@/lib/auth/provider";
 import { db } from "@/lib/db";
 import { AppError, toErrorResponse } from "@/lib/errors";
-import { setIdeaStatus } from "@/modules/ideas/approval-service";
+import { getAuthoritativeSourceModelingSpec, setIdeaStatus } from "@/modules/ideas/approval-service";
 import { ProductionRuntimeIncidentBridge, type StandaloneRuntimeBridgeResult } from "@/modules/troubleshooting/runtime-bridge";
 
 type ApprovalRequestBody = { automationRunId?: string };
@@ -59,7 +59,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     userId = session.userId;
     ideaId = (await context.params).id;
     body = await request.json().catch(() => ({})) as ApprovalRequestBody;
-    return Response.json({ data: await setIdeaStatus(ideaId, userId, "APPROVED"), requestId });
+    const data = await setIdeaStatus(ideaId, userId, "APPROVED");
+    const sourceVideoId = await sourceVideoForIdea(ideaId, userId);
+    const authoritativeSourceModelingSpec = sourceVideoId ? await getAuthoritativeSourceModelingSpec(sourceVideoId) : null;
+    return Response.json({ data, authoritativeSourceModelingSpec, requestId });
   } catch (error) {
     if (error instanceof Error && error.message === "AUTHENTICATION_REQUIRED") return toErrorResponse(new AppError("AUTHENTICATION_REQUIRED", "Yêu cầu đăng nhập.", 401), requestId);
     if (!userId || !ideaId) return toErrorResponse(structuredFailure(error, { bridge: "not-run", requestId }), requestId);
@@ -82,7 +85,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       troubleshooting = clientTroubleshooting(result);
       if (result.disposition === "RESUME") {
         try {
-          return Response.json({ data: await setIdeaStatus(ideaId, userId, "APPROVED"), requestId, troubleshooting }, { status: 200 });
+          const data = await setIdeaStatus(ideaId, userId, "APPROVED");
+          const retrySourceVideoId = await sourceVideoForIdea(ideaId, userId);
+          const authoritativeSourceModelingSpec = retrySourceVideoId ? await getAuthoritativeSourceModelingSpec(retrySourceVideoId) : null;
+          return Response.json({ data, authoritativeSourceModelingSpec, requestId, troubleshooting }, { status: 200 });
         } catch (retryError) {
           troubleshooting = { ...record(troubleshooting), retryError: errorInfo(retryError), recoveryRetry: "FAILED" };
           error = retryError;

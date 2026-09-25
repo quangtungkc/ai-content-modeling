@@ -14,6 +14,23 @@ export const CANONICAL_MODELING_DIFFERENCE_POLICY = [
   "ALLOWED DIFFERENCE 2 — BACKGROUND/ENVIRONMENT: redesign the background or environment appearance only; preserve source spatial relationships, composition, prop logic and action affordances.",
   "ALLOWED DIFFERENCE 3 — ART/RENDERING STYLE: apply the selected art or rendering style only; do not change the source meaning, action, camera, timing, gag or ending.",
 ] as const;
+
+export function assertStrictModelingIdeaChangeScope(direction: { whatIsChanged?: unknown }) {
+  const changes = Array.isArray(direction.whatIsChanged)
+    ? direction.whatIsChanged.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  if (changes.length !== 3) throw new StrictModelingError("STRICT_MODELING_ILLEGAL_CHANGE_SCOPE", "whatIsChanged phải chỉ có đúng ba khác biệt được phép: bối cảnh, nhân vật chính và phong cách mỹ thuật.", { changes });
+  const categories = changes.map((item) => {
+    const value = item.toLocaleLowerCase("vi");
+    if (/bối cảnh|môi trường|background|environment|nền/.test(value)) return "environment";
+    if (/nhân vật|character|identity|nhận diện/.test(value)) return "character";
+    if (/phong cách|mỹ thuật|rendering|art style|visual style/.test(value)) return "style";
+    return "illegal";
+  });
+  if (categories.includes("illegal") || new Set(categories).size !== 3) {
+    throw new StrictModelingError("STRICT_MODELING_ILLEGAL_CHANGE_SCOPE", "Modeling idea đang cho phép thay đổi đạo cụ, vật thể hoặc diễn biến ngoài phạm vi strict.", { changes });
+  }
+}
 export const MODELING_POLICIES = [CANONICAL_DEFAULT_MODELING_POLICY, "BALANCED_MODELING", "LOOSE_ADAPTATION"] as const;
 export const modelingPolicySchema = z.enum(MODELING_POLICIES);
 export type ModelingPolicy = z.infer<typeof modelingPolicySchema>;

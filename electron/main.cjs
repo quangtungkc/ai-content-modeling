@@ -2576,15 +2576,116 @@ async function runBrowserSourceAnalysisJobUnlocked(payload) {
   throw new Error("SOURCE_ANALYSIS_BROWSER_RESPONSE_TIMEOUT: Gemini browser không trả kết quả phân tích.");
 }
 
+function findResolvedSourceUncertainty(candidate, sourceAnalysis) {
+  const sourceText = JSON.stringify(sourceAnalysis || "");
+  const candidateText = JSON.stringify(candidate || "");
+  if (!sourceText || !candidateText) return null;
+  const uncertainFragments = sourceText.match(/.{0,120}(?:có vẻ|có thể|không rõ|không chắc|chưa xác định|maybe|possibly|uncertain)[\s\S]{0,120}/giu) || [];
+  for (const fragment of uncertainFragments) {
+    const termMatch = fragment.match(/(?:có vẻ|có thể|maybe|possibly|uncertain)[\s\S]{0,60}?(?:là|la|is|a|an)\s+([a-zà-ỹ][a-zà-ỹ0-9_-]{2,})/iu);
+    const term = termMatch?.[1]?.toLocaleLowerCase("vi");
+    if (!term) continue;
+    const candidateLower = candidateText.toLocaleLowerCase("vi");
+    const sourceUncertainty = /có vẻ|có thể|không rõ|không chắc|chưa xác định|maybe|possibly|uncertain|looks like|appears to be|seems|similar to|or similar/iu;
+    const termPattern = new RegExp("\\b" + term + "\\b", "iu");
+    let searchFrom = 0;
+    while (true) {
+      const match = candidateLower.slice(searchFrom).match(termPattern);
+      if (!match || match.index === undefined) break;
+      const absoluteIndex = searchFrom + match.index;
+      const context = candidateLower.slice(Math.max(0, absoluteIndex - 70), absoluteIndex);
+      if (!sourceUncertainty.test(context)) {
+        return `STRICT_SOURCE_UNCERTAINTY_RESOLVED: source ghi nhận chi tiết chưa chắc chắn (${term}); không được biến nó thành một vật thể/loại quả xác định trong modeling hoặc storyboard.`;
+      }
+      searchFrom = absoluteIndex + Math.max(1, match[0].length);
+    }
+  }
+  return null;
+}
+
+function canonicalizeSourceUncertainty(candidate, sourceAnalysis) {
+  if (!candidate || !sourceAnalysis) return candidate;
+  const sourceText = JSON.stringify(sourceAnalysis || "");
+  const uncertainFragments = sourceText.match(/.{0,120}(?:có vẻ|có thể|không rõ|không chắc|chưa xác định|maybe|possibly|uncertain|looks like|appears to be|seems|similar to|or similar)[\s\S]{0,120}/giu) || [];
+  const rules = [];
+  for (const fragment of uncertainFragments) {
+    const termMatch = fragment.match(/(?:có vẻ|có thể|maybe|possibly|uncertain|looks like|appears to be|seems|similar to|or similar)[\s\S]{0,60}?(?:là|la|is|a|an)\s+([a-zà-ỹ][a-zà-ỹ0-9_-]{2,})/iu);
+    const term = termMatch?.[1]?.toLocaleLowerCase("vi");
+    if (!term || rules.some((rule) => rule.term === term)) continue;
+    const replacement = /[à-ỹ]/iu.test(term) ? `có vẻ là ${term}` : `a fruit that appears to be an ${term}`;
+    const aliases = [term];
+    if (term === "táo") aliases.push("apple", "apples");
+    rules.push({ term, aliases, replacement });
+  }
+  if (!rules.length) return candidate;
+  const rewrite = (value) => {
+    if (typeof value === "string") {
+      let output = value;
+      for (const rule of rules) {
+        for (const alias of rule.aliases) {
+          const pattern = new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\b`, "giu");
+          output = output.replace(pattern, (match, offset, full) => {
+            const context = full.slice(Math.max(0, offset - 80), offset).toLocaleLowerCase("vi");
+            return /có vẻ|có thể|không rõ|không chắc|chưa xác định|maybe|possibly|uncertain|looks like|appears to be|seems|similar to|or similar/iu.test(context)
+              ? match
+              : rule.replacement;
+          });
+        }
+      }
+      return output;
+    }
+    if (Array.isArray(value)) return value.map(rewrite);
+    if (value && typeof value === "object") {
+      for (const [key, item] of Object.entries(value)) value[key] = rewrite(item);
+    }
+    return value;
+  };
+  return rewrite(candidate);
+}
+
+function sanitizeAllowedTransformations(result) {
+  const scenes = Array.isArray(result?.sourceModelingSpec?.scenes) ? result.sourceModelingSpec.scenes : [];
+  const defaults = [
+    "Thay đổi diện mạo background/environment, giữ nguyên props và chức năng không gian nguồn",
+    "Sử dụng nhận diện nhân vật chính đã được phê duyệt",
+    "Áp dụng phong cách mỹ thuật/kết xuất đã chọn",
+  ];
+  for (const scene of scenes) {
+    const items = Array.isArray(scene?.allowedTransformations) ? scene.allowedTransformations.filter((item) => typeof item === "string" && /bối cảnh|môi trường|background|environment|nền|nhân vật|character|identity|nhận diện|phong cách|mỹ thuật|rendering|art style|visual style/i.test(item)) : [];
+    scene.allowedTransformations = items.length ? items : [...defaults];
+  }
+  return result;
+}
+
+function validateAuthoritativeSourceContract(result, authoritativeSourceModelingSpec) {
+  const authoritativeScenes = Array.isArray(authoritativeSourceModelingSpec?.scenes)
+    ? [...authoritativeSourceModelingSpec.scenes].sort((left, right) => Number(left?.order ?? 0) - Number(right?.order ?? 0))
+    : [];
+  if (!authoritativeScenes.length) return null;
+  const generatedScenes = Array.isArray(result?.sourceModelingSpec?.scenes)
+    ? [...result.sourceModelingSpec.scenes].sort((left, right) => Number(left?.order ?? 0) - Number(right?.order ?? 0))
+    : [];
+  if (generatedScenes.length !== authoritativeScenes.length) return `CONTENT_PROJECT_SOURCE_CONTRACT_MISMATCH: source scene count is locked to ${authoritativeScenes.length}; generated ${generatedScenes.length}`;
+  const exactFields = ["sourceSceneId", "order", "sourceStartTime", "sourceEndTime", "duration", "storyBeat", "cameraType", "shotSize", "cameraAngle", "cameraMovement", "framing", "subjectPosition", "relativeObjectPositions", "characterAction", "actionSequence", "startState", "endState", "transitionIn", "transitionOut", "timingNotes", "rhythmNotes", "mustPreserve"];
+  for (let index = 0; index < authoritativeScenes.length; index += 1) {
+    const expected = authoritativeScenes[index] || {};
+    const actual = generatedScenes[index] || {};
+    for (const field of exactFields) {
+      if (JSON.stringify(actual[field]) !== JSON.stringify(expected[field])) return `CONTENT_PROJECT_SOURCE_CONTRACT_MISMATCH: sourceModelingSpec.scenes[${index}].${field} must copy the authoritative source contract exactly`;
+    }
+  }
+  return null;
+}
+
 async function runBrowserModelingIdeaJobUnlocked(payload) {
     const window = await createGeminiWindow();
   await preflightGeminiForRun(window, payload.runId, "MODELING_IDEA");
   const characterReferencePath = await attachGeminiModelingCharacterReference(window, payload.channelId || payload.channelDNA?.channel?.id || payload.channelDNA?.id, "MODELING_IDEA");
   await delay(3_000);
-  const prompt = `The attached canonical main-character reference image is mandatory visual evidence for this modeling step. Inspect it before writing and use it as the authority for the protagonist's face, identity, body proportions, age appearance, distinctive traits and core character design language. Do not replace, redesign or invent a different main character. Create exactly ONE faithful modeling idea from the source analysis below using the Gemini browser session. Preserve the source content, progression, mechanism, gag, sequence, character roles, key props, camera intent, timing/rhythm and ending. The only allowed differences are exactly: background/environment appearance, the approved main-character identity reference, and the selected art/rendering style. Do not add, remove, reorder or merge beats; do not add characters, props, actions, camera movement, timing changes, a new gag or a new ending. Return ONE complete JSON object only, no Markdown and no commentary. The top-level shape MUST be {"schemaVersion":"1.0","modelingDirections":[{...}]}; modelingDirections MUST be an array, never an object, and MUST contain exactly one object. That one object MUST contain these fields: title, coreConcept, script, characterDesign, setting, artStyle, sourceMechanism, whatIsPreserved (array), whatIsChanged (array), targetMarketAdaptation, similarityRisk (low|medium|high), whyWorthDeveloping, postText. Write descriptive fields in Vietnamese and postText in the channel language. Do not invent details that are absent from the analysis. Attached character reference filename: ${JSON.stringify(path.basename(characterReferencePath))}. Source video: ${JSON.stringify(payload.video)}. Channel DNA: ${JSON.stringify(payload.channelDNA)}. Source analysis: ${JSON.stringify(payload.analysis)}. Requested art style: ${JSON.stringify(payload.artStyle || "Giữ phong cách của kênh")}.`;
+  const prompt = `The attached canonical main-character reference image is mandatory visual evidence for this modeling step. Inspect it before writing and use it as the authority for the protagonist's face, identity, body proportions, age appearance, distinctive traits and core character design language. Do not replace, redesign or invent a different main character. Create exactly ONE faithful modeling idea from the source analysis below using the Gemini browser session. Preserve the source content, progression, mechanism, gag, sequence, character roles, every key prop and its identity, camera intent, timing/rhythm and ending. The only allowed differences are exactly three: (1) the visual appearance of the background/environment, without replacing source props or spatial/action affordances; (2) the approved main-character identity reference; and (3) the selected art/rendering style. Do not change any object, food, animal, prop, setting function, action, dialogue, camera, timing, gag or ending. Do not add, remove, reorder or merge beats; do not add characters, props, actions, camera movement, timing changes, a new gag or a new ending. whatIsChanged MUST contain exactly three entries, one for each allowed difference above; it MUST NOT mention a prop, food, animal, object, location-function, action, camera, timing or plot change. If the source analysis is uncertain about a detail, preserve the exact uncertainty wording in coreConcept/script/whatIsPreserved and never resolve it into a named object, food or action. For example, “có vẻ là X” must remain “có vẻ là X”, not “X”. Return ONE complete JSON object only, no Markdown and no commentary. The top-level shape MUST be {"schemaVersion":"1.0","modelingDirections":[{...}]}; modelingDirections MUST be an array, never an object, and MUST contain exactly one object. That one object MUST contain these fields: title, coreConcept, script, characterDesign, setting, artStyle, sourceMechanism, whatIsPreserved (array), whatIsChanged (array), targetMarketAdaptation, similarityRisk (low|medium|high), whyWorthDeveloping, postText. Write descriptive fields in Vietnamese and postText in the channel language. Do not invent details that are absent from the analysis. Attached character reference filename: ${JSON.stringify(path.basename(characterReferencePath))}. Source video: ${JSON.stringify(payload.video)}. Channel DNA: ${JSON.stringify(payload.channelDNA)}. Source analysis: ${JSON.stringify(payload.analysis)}. Requested art style: ${JSON.stringify(payload.artStyle || "Giữ phong cách của kênh")}.`;
   {
     const beforeCount = await countGeminiResponseNodes(window);
-    const formatPrompt = "Your previous response used the wrong schema. Return one complete JSON object only, with no Markdown or commentary, exactly in this shape: {\"schemaVersion\":\"1.0\",\"modelingDirections\":[{\"title\":\"...\",\"coreConcept\":\"...\",\"script\":\"...\",\"characterDesign\":\"...\",\"setting\":\"...\",\"artStyle\":\"...\",\"sourceMechanism\":\"...\",\"whatIsPreserved\":[\"...\"],\"whatIsChanged\":[\"...\"],\"targetMarketAdaptation\":\"...\",\"similarityRisk\":\"low\",\"whyWorthDeveloping\":\"...\",\"postText\":\"...\"}]}. modelingDirections MUST be an array with exactly one item, never an object. All required fields must be present.";
+    const formatPrompt = ({ error }) => `Your previous modeling idea violated STRICT_MODELING: ${error}. Return a complete corrected JSON object only, with no Markdown or commentary, in exactly this shape: {"schemaVersion":"1.0","modelingDirections":[{"title":"...","coreConcept":"...","script":"...","characterDesign":"...","setting":"...","artStyle":"...","sourceMechanism":"...","whatIsPreserved":["..."],"whatIsChanged":["Only background/environment appearance; preserve all source props and spatial/action affordances.","Only approved main-character identity reference.","Only selected art/rendering style."],"targetMarketAdaptation":"...","similarityRisk":"medium","whyWorthDeveloping":"...","postText":"..."}]}. Preserve the source analysis exactly: same content, plot, characters/roles, props, actions, camera intent, timing/rhythm, gag and ending. Do not name any prop, food, animal, object, action, camera, timing or plot change inside whatIsChanged. If the source uses uncertainty such as “có vẻ là X”, keep that qualifier and do not output a categorical “X”. Keep descriptive values in Vietnamese and postText in the channel language.`;
     return redactDesktopRuntime(await runGeminiJsonCommandWithFormatRetry({
       window,
       prompt,
@@ -2595,7 +2696,20 @@ async function runBrowserModelingIdeaJobUnlocked(payload) {
       timeoutMs: 180_000,
       runId: payload.runId || null,
       stage: "MODELING_IDEA",
-      validate: (result) => result && Array.isArray(result.modelingDirections) && result.modelingDirections.length === 1 ? null : "MODELING_IDEA_SCHEMA_INVALID",
+      validate: (result) => {
+        if (!result || !Array.isArray(result.modelingDirections) || result.modelingDirections.length !== 1) return "MODELING_IDEA_SCHEMA_INVALID";
+        const direction = result.modelingDirections[0] || {};
+        const changes = Array.isArray(direction.whatIsChanged) ? direction.whatIsChanged.filter((item) => typeof item === "string" && item.trim()) : [];
+        if (changes.length !== 3) return `MODELING_IDEA_STRICT_CHANGE_SCOPE_INVALID: whatIsChanged must contain exactly 3 allowed differences; received ${changes.length}`;
+        const categories = changes.map((item) => {
+          const value = item.toLowerCase();
+          return /bối cảnh|môi trường|background|environment|nền/.test(value) ? "environment" : /nhân vật|character|identity|nhận diện/.test(value) ? "character" : /phong cách|mỹ thuật|rendering|art style|visual style/.test(value) ? "style" : "illegal";
+        });
+        if (categories.includes("illegal") || new Set(categories).size !== 3) return "MODELING_IDEA_STRICT_CHANGE_SCOPE_INVALID: whatIsChanged may contain only background/environment, approved main-character identity, and art/rendering style; props and plot are locked";
+        const uncertaintyError = findResolvedSourceUncertainty(direction, payload.analysis);
+        if (uncertaintyError) return uncertaintyError;
+        return null;
+      },
     }));
   }
   let beforeCount = await window.webContents.executeJavaScript("document.querySelectorAll('model-response').length", true);
@@ -2646,15 +2760,17 @@ async function runBrowserDevelopedIdeaJobUnlocked(payload) {
   await preflightGeminiForRun(window, payload.runId, "CONTENT_PROJECT");
   const characterReferencePath = await attachGeminiModelingCharacterReference(window, payload.channelId || payload.channelDNA?.channel?.id || payload.channelDNA?.id, "CONTENT_PROJECT");
   const characterReferenceInstruction = `The attached canonical main-character reference image is mandatory visual evidence for this modeling script and storyboard. Inspect it before writing and use it as the authority for the protagonist's face, identity, body proportions, age appearance, distinctive traits and core character design language. Do not replace, redesign or invent a different main character. Attached character reference filename: ${JSON.stringify(path.basename(characterReferencePath))}.`;
-  const prompt = `Develop the approved modeling idea into a production-ready Content Project and storyboard using the Gemini browser session under STRICT_MODELING. Preserve the source gag, sequence, meaning, character count, camera intent, action order, timing and continuity. Return ONE complete JSON object only, no Markdown or commentary, with schemaVersion "1.0", sourceModelingSpec (object), deconstruction (object), artDirection (object), characterDesign (object), backgroundDesign (object), storyboard (array with at least one item), and safetyReview (object). CANONICAL JSON CONTRACT: sourceModelingSpec MUST contain exactly the array key "scenes". Never use "sourceScenes". sourceModelingSpec.scenes contains one ordered source scene per actual major shot/beat with sourceSceneId, order, sourceStartTime, sourceEndTime, duration, storyBeat, cameraType, shotSize, cameraAngle, cameraMovement, framing, subjectPosition, relativeObjectPositions, characterAction, ordered actionSequence, startState, endState, transitionIn, transitionOut, timingNotes, rhythmNotes, mustPreserve and allowedTransformations. sourceStartTime MUST be a JSON number in seconds (examples 0, 1.5, 4.25); never return a quoted string, clock-formatted text such as 00:03, or a value with a unit suffix. sourceEndTime MUST be a JSON number in seconds (examples 3, 6.5, 13.5); never return a quoted string such as \"3\" or \"00:03\", clock-formatted text, or a value with a unit suffix. sourceEndTime must be greater than sourceStartTime. duration MUST be a JSON number in seconds (examples 3, 3.5, 0.75); never return \"3\", \"00:03\", \"3s\" or any other string/unit-suffixed representation. Keep duration consistent with sourceEndTime - sourceStartTime under the authoritative schema tolerance; do not change start/end times to hide a duration error. relativeObjectPositions MUST be a JSON array of strings; [] is allowed when no relative object evidence exists. Each element must be a non-empty string. Never return one string, a semicolon/comma-delimited string, an object, or null. actionSequence MUST be a JSON array of non-empty strings with at least one item. Each item is one action beat in exact chronological order inside that scene. Never return the whole sequence as one string, numbered prose, an object, null, or an empty array. CAMERA CONTRACT: cameraType, shotSize, cameraAngle and framing MUST each be non-empty JSON strings describing the source camera intent; cameraMovement MUST be a JSON string or null describing source camera motion, and may be omitted only when the schema default null applies. Do not return objects, arrays or numbers for these fields. Do not invent missing evidence. Every storyboard item must contain sceneNumber (positive integer), visualBlock, actionBlock, audioBlock, startFramePrompt and englishPrompt. Write descriptive fields in Vietnamese; write startFramePrompt and englishPrompt in English. Each scene must contain one primary action and connect to the previous scene. Do not add or remove scenes compared with sourceModelingSpec.scenes. Source video: ${JSON.stringify(payload.video)}. Channel DNA: ${JSON.stringify(payload.channelDNA)}. Source analysis: ${JSON.stringify(payload.analysis)}. Approved modeling idea: ${JSON.stringify(payload.idea)}. Aspect ratio: ${JSON.stringify(payload.aspectRatio || "9:16")}.`;
+  const prompt = `Develop the approved modeling idea into a production-ready Content Project and storyboard using the Gemini browser session under STRICT_MODELING. Preserve the source content, plot meaning, character roles, every key prop/object/food/animal and its identity, sequence, camera intent, action order, timing/rhythm, gag and ending. The only allowed differences are exactly: background/environment appearance, the approved main-character identity reference, and selected art/rendering style. Do not replace, rename or substitute any source prop, food, animal, object or location function; do not turn an uncertain source detail into a new object. If the source analysis says “có vẻ là X”, “có thể là X”, “không rõ” or similar, copy that uncertainty into the storyboard and prompts; never turn it into a definite X. Do not add or remove a plot, character, prop, action, camera movement, timing change, gag or ending. In sourceModelingSpec.scenes, allowedTransformations may describe only those three approved categories, never a prop/object/food/animal/action/camera/timing/plot change. Return ONE complete JSON object only, no Markdown or commentary, with schemaVersion "1.0", sourceModelingSpec (object), deconstruction (object), artDirection (object), characterDesign (object), backgroundDesign (object), storyboard (array with at least one item), and safetyReview (object). CANONICAL JSON CONTRACT: sourceModelingSpec MUST contain exactly the array key "scenes". Never use "sourceScenes". sourceModelingSpec.scenes contains one ordered source scene per actual major shot/beat with sourceSceneId, order, sourceStartTime, sourceEndTime, duration, storyBeat, cameraType, shotSize, cameraAngle, cameraMovement, framing, subjectPosition, relativeObjectPositions, characterAction, ordered actionSequence, startState, endState, transitionIn, transitionOut, timingNotes, rhythmNotes, mustPreserve and allowedTransformations. sourceStartTime MUST be a JSON number in seconds (examples 0, 1.5, 4.25); never return a quoted string, clock-formatted text such as 00:03, or a value with a unit suffix. sourceEndTime MUST be a JSON number in seconds (examples 3, 6.5, 13.5); never return a quoted string such as \"3\" or \"00:03\", clock-formatted text, or a value with a unit suffix. sourceEndTime must be greater than sourceStartTime. duration MUST be a JSON number in seconds (examples 3, 3.5, 0.75); never return \"3\", \"00:03\", \"3s\" or any other string/unit-suffixed representation. Keep duration consistent with sourceEndTime - sourceStartTime under the authoritative schema tolerance; do not change start/end times to hide a duration error. relativeObjectPositions MUST be a JSON array of strings; [] is allowed when no relative object evidence exists. Each element must be a non-empty string. Never return one string, a semicolon/comma-delimited string, an object, or null. actionSequence MUST be a JSON array of non-empty strings with at least one item. Each item is one action beat in exact chronological order inside that scene. Never return the whole sequence as one string, numbered prose, an object, null, or an empty array. CAMERA CONTRACT: cameraType, shotSize, cameraAngle and framing MUST each be non-empty JSON strings describing the source camera intent; cameraMovement MUST be a JSON string or null describing source camera motion, and may be omitted only when the schema default null applies. Do not return objects, arrays or numbers for these fields. Do not invent missing evidence. Every storyboard item must contain sceneNumber (positive integer), visualBlock, actionBlock, audioBlock, startFramePrompt and englishPrompt. Write descriptive fields in Vietnamese; write startFramePrompt and englishPrompt in English. Each scene must contain one primary action and connect to the previous scene. Do not add or remove scenes compared with sourceModelingSpec.scenes. Source video: ${JSON.stringify(payload.video)}. Channel DNA: ${JSON.stringify(payload.channelDNA)}. Source analysis: ${JSON.stringify(payload.analysis)}. Approved modeling idea: ${JSON.stringify(payload.idea)}. Aspect ratio: ${JSON.stringify(payload.aspectRatio || "9:16")}.`;
   {
     const beforeCount = await countGeminiResponseNodes(window);
-    const formatPrompt = ({ rawResponse, error }) => String(error || "").startsWith("CONTENT_PROJECT_SCHEMA_INVALID")
+    const formatPrompt = ({ rawResponse, error }) => String(error || "").startsWith("CONTENT_PROJECT_STRICT_CHANGE_SCOPE_INVALID")
+      ? `Your previous JSON violated STRICT_MODELING: ${error}. Repair the JSON semantically, not just its shape. Preserve the source video's exact plot, content, characters/roles, props/objects/food/animals, action order, camera intent, timing/rhythm, gag and ending. The only allowed differences are background/environment appearance, the approved main-character identity reference, and art/rendering style. Remove every allowedTransformations entry that changes a prop, object, food, animal, action, camera, timing or plot. If the source contains an uncertainty qualifier such as “có vẻ là X”, preserve that qualifier in every relevant scene/prompt and never state X as certain. Do not replace an uncertain source detail with a new object. Return one complete corrected JSON object only. ORIGINAL PARSED JSON: ${rawResponse}`
+      : String(error || "").startsWith("CONTENT_PROJECT_SCHEMA_INVALID")
       ? `Your previous response was valid JSON but failed the authoritative Content Project contract: ${error}. Repair ONLY the JSON structure. The canonical field is sourceModelingSpec.scenes (array); do not use sourceModelingSpec.sourceScenes. The storyboard MUST contain exactly the same number of scenes as sourceModelingSpec.scenes, with storyboard sceneNumber values 1..N in the same source order. Do not merge, split, add or remove scenes. If storyboard sourceSceneId is present, it must match the corresponding sourceModelingSpec.scenes sourceSceneId. Every sourceModelingSpec.scenes item MUST include a non-empty string subjectPosition describing the observed subject placement, even when the value is "center" or "uncertain"; do not omit it and do not invent a new action. sourceStartTime and sourceEndTime must be JSON numbers in seconds, not quoted strings or clock text; duration must also be a JSON number in seconds, not a quoted string or unit-suffixed value; relativeObjectPositions must be an array of non-empty strings, with [] allowed. If relativeObjectPositions was one string, represent the same spatial meaning as a one-element array and do not add/remove objects. actionSequence must be an array of at least one non-empty string per scene; if it was one string or numbered prose, return a new array preserving the exact action content and chronological order. Do not add, remove, or reorder action beats. cameraType, shotSize, cameraAngle and framing must be non-empty JSON strings; cameraMovement must be a JSON string or null. Do not map synonyms in the application. Preserve each timing value exactly, keep sourceEndTime greater than sourceStartTime, and keep duration consistent with sourceEndTime - sourceStartTime under the authoritative schema tolerance. Do not change start/end times to hide a duration error. Preserve exactly the scene count, scene order, scene text, actionSequence content/order, camera constraints/intent, timing, character/source mapping, and all other content. Do not add creative content. Return one complete corrected JSON object only. ORIGINAL PARSED JSON: ${rawResponse}`
       : "Your previous response was incomplete or invalid JSON. Return one complete STRICT_MODELING JSON object with sourceModelingSpec.scenes (array), schemaVersion, deconstruction, artDirection, characterDesign, backgroundDesign, storyboard and safetyReview. No Markdown or commentary.";
     return redactDesktopRuntime(await runGeminiJsonCommandWithFormatRetry({
       window,
-      prompt: `${characterReferenceInstruction}\n${prompt}`,
+      prompt: `${characterReferenceInstruction}\n${prompt}\nAUTHORITATIVE SOURCE SCENE CONTRACT (when present): ${JSON.stringify(payload.authoritativeSourceModelingSpec || null)}. When present, copy sourceModelingSpec.scenes fields exactly; do not infer, redivide or alter timestamps, scene order, props, actionSequence, camera intent, transitions or ending.`,
       purpose: "CONTENT_PROJECT_DEVELOP",
       formatPrompt,
       missingCode: "CONTENT_PROJECT_BROWSER_INPUT_MISSING",
@@ -2686,6 +2802,24 @@ async function runBrowserDevelopedIdeaJobUnlocked(payload) {
             if (invalidActionIndex >= 0) return `CONTENT_PROJECT_SCHEMA_INVALID: sourceModelingSpec.scenes[${invalidActionIndex}].actionSequence must be a non-empty array of non-empty strings; received ${JSON.stringify(result.sourceModelingSpec.scenes[invalidActionIndex]?.actionSequence)}`;
             const invalidSubjectPositionIndex = result.sourceModelingSpec.scenes.findIndex((scene) => typeof scene?.subjectPosition !== "string" || !scene.subjectPosition.trim());
             if (invalidSubjectPositionIndex >= 0) return `CONTENT_PROJECT_SCHEMA_INVALID: sourceModelingSpec.scenes[${invalidSubjectPositionIndex}].subjectPosition must be a non-empty string; received ${JSON.stringify(result.sourceModelingSpec.scenes[invalidSubjectPositionIndex]?.subjectPosition)}`;
+            canonicalizeSourceUncertainty(result, payload.analysis);
+            const authoritativeSourceModelingSpec = payload.authoritativeSourceModelingSpec
+              ? canonicalizeSourceUncertainty(JSON.parse(JSON.stringify(payload.authoritativeSourceModelingSpec)), payload.analysis)
+              : null;
+            const uncertaintyError = findResolvedSourceUncertainty(result, payload.analysis);
+            if (uncertaintyError) return uncertaintyError;
+            const sourceContractError = validateAuthoritativeSourceContract(result, authoritativeSourceModelingSpec);
+            if (sourceContractError) {
+              result.sourceModelingSpec = JSON.parse(JSON.stringify(authoritativeSourceModelingSpec));
+              console.warn("[CONTENT_PROJECT_SOURCE_CONTRACT_CANONICALIZED]", sourceContractError);
+            }
+            sanitizeAllowedTransformations(result);
+            const illegalTransformationIndex = result.sourceModelingSpec.scenes.findIndex((scene) => Array.isArray(scene?.allowedTransformations) && scene.allowedTransformations.some((item) => {
+              if (typeof item !== "string" || !item.trim()) return true;
+              const value = item.toLowerCase();
+              return !/bối cảnh|môi trường|background|environment|nền|nhân vật|character|identity|nhận diện|phong cách|mỹ thuật|rendering|art style|visual style/.test(value);
+            }));
+            if (illegalTransformationIndex >= 0) return `CONTENT_PROJECT_STRICT_CHANGE_SCOPE_INVALID: allowedTransformations may contain only background/environment, approved main-character identity, or art/rendering style; preserve all source props and plot at scene index ${illegalTransformationIndex}`;
             const invalidCameraIndex = result.sourceModelingSpec.scenes.findIndex((scene) => typeof scene?.cameraType !== "string" || !scene.cameraType.trim() || typeof scene?.shotSize !== "string" || !scene.shotSize.trim() || typeof scene?.cameraAngle !== "string" || !scene.cameraAngle.trim() || (scene?.cameraMovement !== undefined && scene.cameraMovement !== null && typeof scene.cameraMovement !== "string") || typeof scene?.framing !== "string" || !scene.framing.trim());
             return invalidCameraIndex >= 0 ? `CONTENT_PROJECT_SCHEMA_INVALID: sourceModelingSpec.scenes[${invalidCameraIndex}].cameraType/shotSize/cameraAngle/cameraMovement/framing have invalid camera contract types; received ${JSON.stringify({ cameraType: result.sourceModelingSpec.scenes[invalidCameraIndex]?.cameraType, shotSize: result.sourceModelingSpec.scenes[invalidCameraIndex]?.shotSize, cameraAngle: result.sourceModelingSpec.scenes[invalidCameraIndex]?.cameraAngle, cameraMovement: result.sourceModelingSpec.scenes[invalidCameraIndex]?.cameraMovement, framing: result.sourceModelingSpec.scenes[invalidCameraIndex]?.framing })}` : null;
           })(),
@@ -3960,15 +4094,17 @@ async function waitForGeminiToolPoint(window, labels, timeout = 15_000) {
         .filter(Boolean)
         .map((value) => String(value).replace(/\\s+/g, ' ').trim().toLowerCase())
         .filter((value) => value && value.length <= 240);
+      const isImagePreviewOrUploadControl = (labels) => labels.some((label) => /hiển thị hình ảnh đã tải lên|show uploaded images|uploaded image|image preview|lightbox|xem ảnh đã tải lên|tải ảnh lên|upload image|chia sẻ hình ảnh|share image|share this image|đường liên kết công khai|public link/i.test(label));
       const candidates = roots.flatMap((root) => [...root.querySelectorAll('*')]).filter((element) => visible(element) && !['SCRIPT','STYLE','SVG','PATH'].includes(element.tagName)).map((element) => {
         const labels = labelsFor(element);
         const exact = labels.some((label) => wanted.includes(label));
         const contains = labels.some((label) => wanted.some((value) => label.includes(value)));
         const textLength = String(element.textContent || '').replace(/\\s+/g, ' ').trim().length;
         const semantic = /^(BUTTON|A|MAT-LIST-ITEM|GEM-LIST-ITEM)$/.test(element.tagName) || /^(button|menuitem|option|radio)$/.test(element.getAttribute('role') || '');
-        return { element, exact, contains, textLength, semantic };
+        return { element, exact, contains, textLength, semantic, excluded: isImagePreviewOrUploadControl(labels) };
       }).filter((candidate) => {
         if (['HTML', 'HEAD', 'BODY', 'SCRIPT', 'STYLE', 'SVG', 'PATH'].includes(candidate.element.tagName)) return false;
+        if (candidate.excluded) return false;
         if (candidate.textLength > 240 && !candidate.exact) return false;
         return candidate.exact || candidate.contains;
       }).sort((left, right) => Number(right.exact) - Number(left.exact) || Number(right.semantic) - Number(left.semantic) || left.textLength - right.textLength);
@@ -3984,6 +4120,7 @@ async function waitForGeminiToolPoint(window, labels, timeout = 15_000) {
             const role = parent.getAttribute('role') || '';
             const semantic = /^(BUTTON|A|MAT-LIST-ITEM|GEM-LIST-ITEM)$/.test(parent.tagName) || /^(button|menuitem|menuitemcheckbox|option|radio)$/.test(role) || parent.hasAttribute('data-menu-item');
             const parentText = String(parent.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (isImagePreviewOrUploadControl(labelsFor(parent))) continue;
             if (visible(parent) && (semantic || parentText.length <= 240)) { selected = parent; break; }
           }
           if (selected) break;
@@ -4135,7 +4272,12 @@ async function renderFinalVideo(event, projectId, sceneNumbers, rawOptions = {})
       const availableDuration = sourceDuration - sceneOptions.trimStart - sceneOptions.trimEnd;
       if (availableDuration < 0.2) throw new Error(`FINAL_SCENE_DURATION_UNDERFLOW: cảnh ${sceneOptions.sceneNumber} còn quá ngắn sau khi cắt đầu/cuối.`);
       const targetDuration = sceneOptions.targetDuration === null ? availableDuration : Math.min(sceneOptions.targetDuration, availableDuration);
-      if (sceneOptions.targetDuration !== null && sceneOptions.targetDuration > availableDuration + 0.05) throw new Error(`FINAL_SCENE_DURATION_UNDERFLOW: video cảnh ${sceneOptions.sceneNumber} ngắn hơn thời lượng storyboard yêu cầu.`);
+      const durationShortfall = sceneOptions.targetDuration === null ? 0 : sceneOptions.targetDuration - availableDuration;
+      // Gemini may return a nominal 3-second clip for a storyboard target of
+      // 3.2 seconds. Clamp small provider-side shortfalls to the real media
+      // duration, but keep the hard failure for materially incomplete clips.
+      if (durationShortfall > 0.25) throw new Error(`FINAL_SCENE_DURATION_UNDERFLOW: video cảnh ${sceneOptions.sceneNumber} ngắn hơn thời lượng storyboard yêu cầu.`);
+      if (durationShortfall > 0.05) sendProgress(event, "video-editor:progress", { stage: "normalize", processed: index, total: sourceFiles.length, label: `Cảnh ${sceneOptions.sceneNumber} ngắn hơn storyboard ${durationShortfall.toFixed(2)} giây; dùng thời lượng thực tế để ghép.` });
       const target = path.join(temporaryRoot, `scene-${index + 1}.mp4`);
       await runFfmpeg(["-y", "-hide_banner", "-ss", sceneOptions.trimStart.toFixed(3), "-i", sourceFiles[index], "-t", targetDuration.toFixed(3), "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30", "-c:v", "h264_mf", "-b:v", "4500k", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", target]);
       normalized.push(target);
@@ -6186,6 +6328,13 @@ async function getGeminiImageDataUrl(window, source, captureRect) {
   }
 }
 
+const GEMINI_IMAGE_RESULT_TIMEOUT_MS = 360_000;
+const GEMINI_IMAGE_RESULT_POLL_MS = 1_500;
+
+function isGeminiImageResultTimeoutError(error) {
+  return /Gemini không tạo ảnh trong thời gian chờ \d+ giây/i.test(error instanceof Error ? error.message : String(error));
+}
+
 async function waitForGeminiImageResult(window, beforeSources, beforeCanvasCount) {
   const before = JSON.stringify(beforeSources);
   const snapshotExpression = `(async () => {
@@ -6194,7 +6343,10 @@ async function waitForGeminiImageResult(window, beforeSources, beforeCanvasCount
     const allImages = () => roots.flatMap((root) => [...root.querySelectorAll('img')]);
     const allCanvases = () => roots.flatMap((root) => [...root.querySelectorAll('canvas')]);
     const before = new Set(${before});
-    const isUsableImageSource = (source) => /^blob:|^data:image\\//i.test(source) || /^https:\\/\\/lh\\d+\\.googleusercontent\\.com\\//i.test(source);
+    // Gemini has used several authenticated image hosts over time. Restricting
+    // this to lh*.googleusercontent.com caused valid generated images on other
+    // Google/CDN hosts to be silently ignored until the timeout elapsed.
+    const isUsableImageSource = (source) => /^blob:|^data:image\\//i.test(source) || /^https?:\\/\\//i.test(source);
     const candidate = allImages().filter((image) => {
       const source = image.currentSrc || image.src;
       const className = String(image.className || '').toLowerCase();
@@ -6232,7 +6384,7 @@ async function waitForGeminiImageResult(window, beforeSources, beforeCanvasCount
       return await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(blob); });
     } catch { return null; }
   })()`;
-  for (let elapsed = 0; elapsed < 180_000; elapsed += 1_500) {
+  for (let elapsed = 0; elapsed < GEMINI_IMAGE_RESULT_TIMEOUT_MS; elapsed += GEMINI_IMAGE_RESULT_POLL_MS) {
     try {
       const snapshot = await window.webContents.executeJavaScript(snapshotExpression, true);
       if (snapshot?.kind === 'dataUrl') return { dataUrl: snapshot.dataUrl };
@@ -6248,9 +6400,9 @@ async function waitForGeminiImageResult(window, beforeSources, beforeCanvasCount
     } catch (error) {
       recordBrowserAction({ action: 'gemini-image-poll-error', reason: error instanceof Error ? error.message : String(error) });
     }
-    await delay(1_500);
+    await delay(GEMINI_IMAGE_RESULT_POLL_MS);
   }
-  return { error: 'Gemini không tạo ảnh trong thời gian chờ 180 giây.' };
+  return { error: `Gemini không tạo ảnh trong thời gian chờ ${Math.round(GEMINI_IMAGE_RESULT_TIMEOUT_MS / 1000)} giây.` };
 }
 
 ipcMain.handle("gemini-browser:run-job", async (event, value) => {
@@ -6267,6 +6419,7 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
   const geminiRunId = value?.runId || null;
   const imageCommandId = crypto.randomUUID();
   let primaryError = null;
+  let resetConversationAfterFailure = false;
   try {
   const imageConversationBinding = await preflightGeminiForRun(window, geminiRunId, "IMAGE");
   const images = {};
@@ -6404,8 +6557,8 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
       const allCanvases = () => collectRoots().flatMap((root) => [...root.querySelectorAll("canvas")]);
       const before = new Set(${JSON.stringify(prepared.beforeSources)});
       const beforeCanvasCount = ${prepared.beforeCanvasCount};
-      for (let elapsed = 0; elapsed < 180000; elapsed += 1500) {
-        await sleep(1500);
+      for (let elapsed = 0; elapsed < GEMINI_IMAGE_RESULT_TIMEOUT_MS; elapsed += GEMINI_IMAGE_RESULT_POLL_MS) {
+        await sleep(GEMINI_IMAGE_RESULT_POLL_MS);
       const candidates = allImages().filter((image) => {
         const source = image.currentSrc || image.src;
           const className = String(image.className || '').toLowerCase();
@@ -6437,7 +6590,7 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
           try { return { dataUrl: canvas.toDataURL("image/png") }; } catch { return { error: "Không thể đọc ảnh Gemini vừa tạo." }; }
         }
       }
-      return { error: "Gemini không tạo ảnh trong thời gian chờ 180 giây." };
+      return { error: "Gemini không tạo ảnh trong thời gian chờ " + Math.round(GEMINI_IMAGE_RESULT_TIMEOUT_MS / 1000) + " giây." };
     })()`;
     const result = await waitForGeminiImageResult(window, prepared.beforeSources, prepared.beforeCanvasCount);
     if (!result?.dataUrl && !result?.imageSource) throw new Error(result?.error ?? "Không thể tạo ảnh trên Gemini Ultra.");
@@ -6449,10 +6602,33 @@ ipcMain.handle("gemini-browser:run-job", async (event, value) => {
   return { status: "completed", images };
   } catch (error) {
     primaryError = error;
+    // A timed-out image generation can leave the shared Gemini conversation
+    // with a still-pending image turn. Reusing that conversation on resume
+    // causes the next prompt to be accepted by the composer but never to
+    // produce a new image. Mark it stale before the finalizer so the next
+    // resume opens a clean Gemini conversation while preserving the run and
+    // all already-saved images.
+    if (geminiRunId && isGeminiImageResultTimeoutError(error)) {
+      resetConversationAfterFailure = true;
+      try {
+        const binding = await getGeminiConversationForRun(geminiRunId);
+        if (binding?.geminiConversationId) {
+          await persistGeminiConversationCheckpoint(geminiRunId, {
+            ...binding,
+            geminiConversationState: "DELETED",
+            geminiConversationDeletedAt: new Date().toISOString(),
+            geminiConversationResetReason: "IMAGE_RESULT_TIMEOUT",
+          });
+          recordBrowserAction({ action: "gemini-shared-conversation-reset-after-image-timeout", runId: geminiRunId, stage: "IMAGE", result: "PASS", conversationId: binding.geminiConversationId });
+        }
+      } catch (resetError) {
+        recordBrowserAction({ action: "gemini-shared-conversation-reset-after-image-timeout", runId: geminiRunId, stage: "IMAGE", result: "FAIL", reason: resetError instanceof Error ? resetError.message : String(resetError) });
+      }
+    }
     throw error;
   } finally {
     try {
-      if (geminiRunId) await persistGeminiConversationAfterStep(window, { snapshot: () => ({ commandId: imageCommandId }) }, geminiRunId, "IMAGE");
+      if (geminiRunId && !resetConversationAfterFailure) await persistGeminiConversationAfterStep(window, { snapshot: () => ({ commandId: imageCommandId }) }, geminiRunId, "IMAGE");
     } catch (finalizerError) {
       recordBrowserAction({ action: "gemini-conversation-finalizer-error", commandId: imageCommandId, primaryError: primaryError instanceof Error ? primaryError.message : null, finalizerError: finalizerError instanceof Error ? finalizerError.message : String(finalizerError) });
       if (!primaryError) throw finalizerError;
@@ -6647,7 +6823,9 @@ async function geminiVideoUiState(window) {
     const videoLanding = videoRoute && /(?:^|\\n)Tạo video(?:\\n|$)|(?:^|\\n)Create video(?:\\n|$)/i.test(String(document.body?.innerText || ''));
     const videoComposer = videoPrompt || videoModeBadge || videoLanding;
     const toolsMenuOpen = has(/^(?:Tệp|Files?|Drive|Google Photos|Sổ ghi chú|Notebooks|Tạo hình ảnh|Create image|Tạo video|Create video|Tạo nhạc|Create music|Canvas)$/i);
-    return { url: location.href, videoRoute, videoMode: Boolean(input) && videoComposer, videoLanding, videoTool: has(/^(?:Tạo video|Create video)$/i), tools: has(/(?:Nội dung tải lên và công cụ|Uploads? and tools|Add files)/i), toolsMenuOpen, tryButton: has(/^(?:Dùng thử|Try it)$/i), upload: has(/^(?:Tệp|Files?|Tải tệp lên|Upload file|Thêm tệp|Add files?)$/i), inputReady: Boolean(input), videos, textTail: String(document.body?.innerText || '').slice(-1800) };
+    const pageText = String(document.body?.innerText || '');
+    const providerError = pageText.match(/(?:I couldn't do that because I'm getting a lot of requests right now\. Please try again later\.|too many requests|try again later|please try again later)/i)?.[0] || '';
+    return { url: location.href, videoRoute, videoMode: Boolean(input) && videoComposer, videoLanding, videoTool: has(/^(?:Tạo video|Create video)$/i), tools: has(/(?:Nội dung tải lên và công cụ|Uploads? and tools|Add files)/i), toolsMenuOpen, tryButton: has(/^(?:Dùng thử|Try it)$/i), upload: has(/^(?:Tệp|Files?|Tải tệp lên|Upload file|Thêm tệp|Add files?)$/i), inputReady: Boolean(input), videos, providerError, textTail: pageText.slice(-1800) };
   })()`, true);
 }
 
@@ -6761,7 +6939,8 @@ async function openGeminiVideoComposer(window) {
   throw new Error("GEMINI_VIDEO_PAGE_NOT_READY");
 }
 
-async function ensureGeminiVideoProPortrait(window, sceneNumber) {
+async function ensureGeminiVideoProPortrait(window, sceneNumber, options = {}) {
+  const allowModelSelection = options.allowModelSelection !== false;
   const composerUrl = window.webContents.getURL();
   const existingConversation = /^https:\/\/gemini\.google\.com\/app\/[^/]+/i.test(composerUrl);
   const controls = async () => window.webContents.executeJavaScript(`(() => {
@@ -6778,6 +6957,7 @@ async function ensureGeminiVideoProPortrait(window, sceneNumber) {
   }
   if (!model()) throw new Error("GEMINI_VIDEO_MODEL_CONTROL_NOT_READY");
   if (!model() || !/\bPro\b/i.test(`${model().label} ${model().text}`)) {
+    if (!allowModelSelection) throw new Error("GEMINI_VIDEO_PRO_NOT_CONFIRMED_AFTER_RELOAD");
     const proOption = () => found.some(item => /^(?:menuitem|menuitemradio|option)$/.test(item.role) && /\bPro\b/i.test(item.text));
     if (!proOption()) await clickGeminiVideoControl(window, ["Mở công cụ chọn chế độ", "Select model"]);
     for (let elapsed = 0; elapsed < 10_000; elapsed += 250) {
@@ -6802,8 +6982,10 @@ async function ensureGeminiVideoProPortrait(window, sceneNumber) {
   }
   if (!model() || !/\bPro\b/i.test(`${model().label} ${model().text}`)) throw new Error("GEMINI_VIDEO_PRO_NOT_CONFIRMED");
   // Changing the model can redirect Gemini's video landing page to bare
-  // /app. Reload the composer route captured before the model switch.
-  if (!existingConversation || modelChanged) await window.webContents.loadURL(composerUrl);
+  // /app. Reload the composer route captured before the model switch. The
+  // per-scene runner performs its own explicit one-time reload immediately
+  // before the reference upload; do not add an unconditional reload here.
+  if (modelChanged && allowModelSelection) await window.webContents.loadURL(composerUrl);
   for (let elapsed = 0; elapsed < 30_000; elapsed += 250) {
     const state = await geminiVideoUiState(window);
     found = await controls();
@@ -6825,7 +7007,20 @@ async function ensureGeminiVideoProPortrait(window, sceneNumber) {
   found = await controls();
   aspect = found.find(item => /(?:tỷ lệ khung hình|aspect ratio)/i.test(item.label));
   if (!aspect || !/9:16/.test(`${aspect.label} ${aspect.text}`)) throw new Error("GEMINI_VIDEO_PORTRAIT_NOT_CONFIRMED");
-  recordBrowserAction({ action: "gemini-video-pro-portrait-ready", provider: "EDGE_CDP", sceneNumber, route: window.webContents.getURL(), model: "Pro", aspectRatio: "9:16", reloaded: !existingConversation || modelChanged, result: "PASS" });
+  recordBrowserAction({ action: "gemini-video-pro-portrait-ready", provider: "EDGE_CDP", sceneNumber, route: window.webContents.getURL(), model: "Pro", aspectRatio: "9:16", reloaded: modelChanged, result: "PASS" });
+}
+
+async function reloadGeminiVideoBeforeUpload(window, sceneNumber) {
+  await window.webContents.reload();
+  for (let elapsed = 0; elapsed < 30_000; elapsed += 250) {
+    const state = await geminiVideoUiState(window);
+    if (/^https:\/\/gemini\.google\.com\/videos(?:[/?#]|$)/i.test(state.url) && state.videoMode && state.inputReady) {
+      recordBrowserAction({ action: "gemini-video-page-reload-before-upload", provider: "EDGE_CDP", sceneNumber, route: state.url, reloadCount: 1, result: "PASS" });
+      return state;
+    }
+    await delay(250);
+  }
+  throw new Error(`GEMINI_VIDEO_PAGE_RELOAD_NOT_READY: scene=${sceneNumber}`);
 }
 
 async function uploadGeminiVideoReference(window, imagePath) {
@@ -6921,55 +7116,59 @@ async function readGeminiVideoBuffer(window, source) {
   return buffer;
 }
 
+async function normalizeGeminiVideoBuffer(buffer, projectId, sceneNumber, sourceDuration, previousResponseDuration, targetDuration) {
+  const desiredDuration = Number.isFinite(Number(targetDuration)) && Number(targetDuration) > 0
+    ? Number(targetDuration)
+    : 3;
+  const priorDuration = Number.isFinite(Number(previousResponseDuration)) && Number(previousResponseDuration) > 0
+    ? Number(previousResponseDuration)
+    : 0;
+  const rawDuration = Number(sourceDuration);
+  const cumulative = priorDuration > 0 && Number.isFinite(rawDuration) && rawDuration > priorDuration + 1.25;
+  if (!cumulative) return { buffer, duration: rawDuration, trimmed: false };
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "modeling-gemini-video-"));
+  const rawPath = path.join(tempRoot, `scene-${sceneNumber}-raw.mp4`);
+  const clipPath = path.join(tempRoot, `scene-${sceneNumber}-clip.mp4`);
+  try {
+    fs.writeFileSync(rawPath, buffer);
+    const availableDuration = Math.max(0.2, rawDuration - priorDuration);
+    const clipDuration = Math.min(desiredDuration, availableDuration);
+    if (clipDuration < 0.2) throw new Error(`GEMINI_VIDEO_CUMULATIVE_SEGMENT_TOO_SHORT: scene=${sceneNumber}`);
+    await runFfmpeg(["-y", "-hide_banner", "-i", rawPath, "-ss", priorDuration.toFixed(3), "-t", clipDuration.toFixed(3), "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30", "-c:v", "h264_mf", "-b:v", "4500k", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", clipPath]);
+    const clipped = fs.readFileSync(clipPath);
+    if (clipped.length < 1024) throw new Error(`GEMINI_VIDEO_CUMULATIVE_SEGMENT_INVALID: scene=${sceneNumber}`);
+    recordBrowserAction({ action: "gemini-video-cumulative-response-trim", provider: "EDGE_CDP", projectId, sceneNumber, sourceDuration: rawDuration, previousResponseDuration: priorDuration, trimStart: priorDuration, targetDuration: clipDuration, result: "PASS" });
+    return { buffer: clipped, duration: clipDuration, trimmed: true };
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
 async function runGeminiVideoJobUnlocked(event, projectId, channelId, slots) {
   const window = await createGeminiWindow();
   const videos = {};
-  const conversationCheckpointPath = path.join(generatedMediaRoot(), "generated-videos", projectId, "gemini-conversation.json");
-  const savedConversation = fs.existsSync(conversationCheckpointPath) ? JSON.parse(fs.readFileSync(conversationCheckpointPath, "utf8")) : null;
-  let sharedVideoConversationRoute = null;
-  let sharedVideoRuntimeSessionId = geminiSessionId || null;
   for (let index = 0; index < slots.length; index++) {
     const slot = slots[index];
     if (!Number.isInteger(slot?.sceneNumber) || typeof slot.englishPrompt !== "string" || !slot.englishPrompt.trim()) throw new Error("GEMINI_VIDEO_SLOT_INVALID");
     const sceneNumber = slot.sceneNumber;
     sendProgress(event, "gemini-browser:video-progress", { processed: index, total: slots.length, label: `Đang mở Gemini tạo video cảnh ${sceneNumber}...` });
-    // Gemini Video has its own first-party composer at /videos. Open it only
-    // once per Stage-4 job: every scene must stay in the same composer
-    // conversation/session instead of silently starting a new one.
-    let before;
-    if (index === 0) {
-      if (sceneNumber > 1) {
-        if (savedConversation?.url && window.webContents.getURL() !== savedConversation.url) await window.webContents.loadURL(savedConversation.url);
-        before = await geminiVideoUiState(window);
-        if (!/^https:\/\/gemini\.google\.com\/app\/[^/]+/i.test(before.url) || before.videos.length < 1) throw new Error("GEMINI_VIDEO_RESUME_CONVERSATION_NOT_CONFIRMED");
-      } else {
-        before = await openGeminiVideoComposer(window);
-      }
-      sharedVideoConversationRoute = new URL(window.webContents.getURL()).origin + new URL(window.webContents.getURL()).pathname;
-      sharedVideoRuntimeSessionId = geminiSessionId || sharedVideoRuntimeSessionId;
-      fs.mkdirSync(path.dirname(conversationCheckpointPath), { recursive: true });
-      if (sceneNumber > 1 && !savedConversation?.url) fs.writeFileSync(conversationCheckpointPath, JSON.stringify({ url: sharedVideoConversationRoute }), "utf8");
-      recordBrowserAction({ action: "gemini-video-shared-conversation-open", provider: "EDGE_CDP", sceneNumber, route: sharedVideoConversationRoute, runtimeSessionId: sharedVideoRuntimeSessionId, result: "PASS" });
-    } else {
-      const currentUrl = window.webContents.getURL();
-      const currentParsedUrl = new URL(currentUrl);
-      const currentRoute = currentParsedUrl.origin + currentParsedUrl.pathname;
-      if (currentRoute !== sharedVideoConversationRoute || (sharedVideoRuntimeSessionId && geminiSessionId && geminiSessionId !== sharedVideoRuntimeSessionId)) {
-        const error = new Error(`GEMINI_VIDEO_SHARED_CONVERSATION_CHANGED: scene=${sceneNumber}`);
-        error.code = "GEMINI_VIDEO_SHARED_CONVERSATION_CHANGED";
-        error.firstDivergence = "GEMINI_VIDEO_SHARED_CONVERSATION_SCOPE";
-        error.details = { sceneNumber, expectedRoute: sharedVideoConversationRoute, actualRoute: currentRoute, expectedRuntimeSessionId: sharedVideoRuntimeSessionId, actualRuntimeSessionId: geminiSessionId || null };
-        recordBrowserAction({ action: "gemini-video-shared-conversation-check", provider: "EDGE_CDP", sceneNumber, expectedRoute: sharedVideoConversationRoute, actualRoute: currentRoute, expectedRuntimeSessionId: sharedVideoRuntimeSessionId, actualRuntimeSessionId: geminiSessionId || null, result: "FAIL" });
-        throw error;
-      }
-      before = await geminiVideoUiState(window);
-      recordBrowserAction({ action: "gemini-video-shared-conversation-check", provider: "EDGE_CDP", sceneNumber, route: currentRoute, runtimeSessionId: geminiSessionId || null, result: "PASS" });
-    }
+    // Each scene intentionally starts a fresh Gemini Video conversation. A
+    // full navigation to /videos is used even when the previous scene ended
+    // on /videos so a prior user turn or generated clip cannot leak across
+    // scenes.
+    await window.webContents.loadURL("https://gemini.google.com/videos");
+    let before = await openGeminiVideoComposer(window);
+    recordBrowserAction({ action: "gemini-video-independent-conversation-open", provider: "EDGE_CDP", sceneNumber, route: new URL(window.webContents.getURL()).origin + new URL(window.webContents.getURL()).pathname, runtimeSessionId: geminiSessionId || null, conversationMode: "PER_SCENE", result: "PASS" });
     await ensureGeminiVideoProPortrait(window, sceneNumber);
+    before = await reloadGeminiVideoBeforeUpload(window, sceneNumber);
+    // Reloading Gemini can restore its default 16:9 value. Re-assert Pro and
+    // 9:16 after that one reload without allowing another navigation.
+    await ensureGeminiVideoProPortrait(window, sceneNumber, { allowModelSelection: false });
+    before = await geminiVideoUiState(window);
     const imagePath = findSceneImagePath(projectId, sceneNumber);
     await uploadGeminiVideoReference(window, imagePath);
     const readyToSend = await geminiVideoUiState(window);
-    if (!readyToSend.videoMode || !readyToSend.inputReady || !readyToSend.url.startsWith(sharedVideoConversationRoute)) {
+    if (!readyToSend.videoMode || !readyToSend.inputReady || !/^https:\/\/gemini\.google\.com\/videos(?:[/?#]|$)/i.test(readyToSend.url)) {
       throw new Error(`GEMINI_VIDEO_COMPOSER_CHANGED_BEFORE_SEND: scene=${sceneNumber}`);
     }
     const prompt = await validatedPromptForSend(slot, `video cảnh ${sceneNumber}`, { projectId, channelId, promptType: "VIDEO", sceneNumber });
@@ -7003,10 +7202,12 @@ async function runGeminiVideoJobUnlocked(event, projectId, channelId, slots) {
       // A fresh /videos page and one resend are permitted only when no user
       // turn was created, so this cannot duplicate a real video request.
       recordBrowserAction({ action: "gemini-video-submit-reload-recovery", sceneNumber, recoveryAttempt: 1, recoveryBudget: 1, result: "RETRY", reason: "BARE_APP_WITHOUT_CONFIRMED_USER_TURN" });
+      await window.webContents.loadURL("https://gemini.google.com/videos");
       before = await openGeminiVideoComposer(window);
-      const recoveryUrl = new URL(window.webContents.getURL());
-      const recoveryRoute = recoveryUrl.origin + recoveryUrl.pathname;
-      if (recoveryRoute !== sharedVideoConversationRoute) throw new Error(`GEMINI_VIDEO_SHARED_CONVERSATION_CHANGED: scene=${sceneNumber} recovery`);
+      await ensureGeminiVideoProPortrait(window, sceneNumber);
+      before = await reloadGeminiVideoBeforeUpload(window, sceneNumber);
+      await ensureGeminiVideoProPortrait(window, sceneNumber, { allowModelSelection: false });
+      before = await geminiVideoUiState(window);
       await uploadGeminiVideoReference(window, imagePath);
       command = await submitVideoPrompt().catch((recoveryError) => {
         if (recoveryError instanceof Error && recoveryError.message.startsWith("GEMINI_SUBMISSION_NOT_CONFIRMED") && isBareGeminiAppUrl(window.webContents.getURL())) {
@@ -7021,22 +7222,38 @@ async function runGeminiVideoJobUnlocked(event, projectId, channelId, slots) {
     let source = null;
     for (let elapsed = 0; elapsed < 600_000; elapsed += 2_000) {
       const state = await geminiVideoUiState(window);
-      if (/video.*(?:failed|couldn.t be generated)|không thể tạo video|video.*(?:not available|limit reached)/i.test(state.textTail)) throw new Error(`GEMINI_VIDEO_PROVIDER_FAILED: ${state.textTail.slice(-350)}`);
+      const providerText = `${state.providerError || ''}\n${state.textTail || ''}`;
+      const thirdPartyContentBlocked = /(?:third[- ]party content provider|interests of third[- ]party|can't generate (?:the )?video|cannot generate (?:the )?video)/i.test(providerText);
+      if (/video.*(?:failed|couldn.t be generated)|không thể tạo video|video.*(?:not available|limit reached)|(?:getting a lot of requests|too many requests|try again later|please try again later)|third[- ]party content provider|interests of third[- ]party|can't generate (?:the )?video|cannot generate (?:the )?video/i.test(providerText)) {
+        const rateLimited = /(?:getting a lot of requests|too many requests|try again later|please try again later)/i.test(providerText);
+        const providerBlocked = thirdPartyContentBlocked && !rateLimited;
+        const code = rateLimited ? "GEMINI_VIDEO_PROVIDER_RATE_LIMITED" : providerBlocked ? "GEMINI_VIDEO_PROVIDER_THIRD_PARTY_BLOCKED" : "GEMINI_VIDEO_PROVIDER_FAILED";
+        const error = new Error(`${code}: ${providerText.slice(-350)}`);
+        error.code = code;
+        error.firstDivergence = providerBlocked ? "GEMINI_VIDEO_PROVIDER_THIRD_PARTY_CONTENT_BLOCK" : code;
+        error.details = { stage: "STAGE_4_VIDEO_GENERATION", sceneNumber, autoRetryAllowed: false, providerText: providerText.slice(-350) };
+        recordBrowserAction({ action: "gemini-video-provider-error", provider: "EDGE_CDP", sceneNumber, code, autoRetryAllowed: false, result: "FAIL", providerText: providerText.slice(-350) });
+        throw error;
+      }
       source = state.videos.find(value => !before.videos.includes(value));
       if (source) break;
       await delay(2_000);
     }
     if (!source) throw new Error("GEMINI_VIDEO_RESULT_TIMEOUT");
-    // The first submission converts /videos to the persistent /app/<id> chat.
-    // Bind subsequent scenes to that concrete conversation, never to /videos.
-    if (index === 0) {
-      const completedUrl = new URL(window.webContents.getURL());
-      if (!/^\/app\/[^/]+/.test(completedUrl.pathname)) throw new Error("GEMINI_VIDEO_CONVERSATION_URL_NOT_CONFIRMED");
-      sharedVideoConversationRoute = completedUrl.origin + completedUrl.pathname;
-      fs.writeFileSync(conversationCheckpointPath, JSON.stringify({ url: sharedVideoConversationRoute }), "utf8");
+    const rawBuffer = await readGeminiVideoBuffer(window, source);
+    const rawRoot = fs.mkdtempSync(path.join(os.tmpdir(), "modeling-gemini-video-probe-"));
+    const rawPath = path.join(rawRoot, `scene-${sceneNumber}.mp4`);
+    let rawDuration;
+    try {
+      fs.writeFileSync(rawPath, rawBuffer);
+      rawDuration = await readMediaDuration(rawPath);
+    } finally {
+      fs.rmSync(rawRoot, { recursive: true, force: true });
     }
-    const buffer = await readGeminiVideoBuffer(window, source);
-    const url = saveGeminiVideo(projectId, sceneNumber, buffer);
+    // Conversations are independent per scene, so Gemini cannot return a
+    // cumulative timeline that needs trimming against a prior scene.
+    const normalized = await normalizeGeminiVideoBuffer(rawBuffer, projectId, sceneNumber, rawDuration, 0, slot.targetDuration);
+    const url = saveGeminiVideo(projectId, sceneNumber, normalized.buffer);
     videos[`scene-${sceneNumber}`] = url;
     sendProgress(event, "gemini-browser:video-progress", { processed: index + 1, total: slots.length, label: `Đã lưu video cảnh ${sceneNumber} từ Gemini.` });
   }

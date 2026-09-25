@@ -49,7 +49,7 @@ describe("Video Modeling automatic-only UI", () => {
   it("CASE 9: keeps all automatic pipeline stages internally wired", () => {
     expect(source).toContain("await generateModelingIdea(runId)");
     expect(source).toContain("await createContentProject(currentIdea, true, runId)");
-    expect(source).toContain("await generateAllProjectImages(project, undefined, generatedImages, runId)");
+    expect(source).toContain("await generateAllProjectImages(project, undefined, images, runId");
     expect(source).toContain("await generateAllProjectVideos(project, images, undefined, videos)");
     expect(source).toContain("await renderFinalProjectVideo(project, videos)");
   });

@@ -21,6 +21,7 @@ const stepSchema = z.object({
 const settingsSchema = z.object({
   artStyle: z.string().trim().min(1).max(100),
   aspectRatio: z.enum(["9:16", "16:9", "1:1", "4:5"]),
+  videoProvider: z.enum(["flow", "gemini"]).optional(),
   postText: z.string().trim().max(500).optional(),
   hashtags: z.string().trim().max(500).optional(),
   language: z.string().trim().max(80).optional(),

@@ -17,7 +17,7 @@ type AutomationRun = {
   ideaId: string | null;
   projectId: string | null;
   status: "RUNNING" | "SUCCEEDED" | "FAILED";
-  settings: { artStyle: string; aspectRatio: string; postText?: string; hashtags?: string; language?: string; targetCountry?: string };
+  settings: { artStyle: string; aspectRatio: string; videoProvider?: "flow" | "gemini"; postText?: string; hashtags?: string; language?: string; targetCountry?: string };
   steps: ActivityStep[];
   error: string | null;
   startedAt: string;
@@ -73,6 +73,9 @@ export function ActivityHistory() {
   const completedSteps = selectedRun?.steps.filter((step) => step.status === "completed").length ?? 0;
   const activeStep = selectedRun?.steps.find((step) => step.status === "running") ?? null;
   const postAssemblyQa = selectedRun ? getPostAssemblyQaSummary(selectedRun) : null;
+  const stepLabel = (step: ActivityStep) => step.key === "videos" && selectedRun?.settings.videoProvider === "gemini"
+    ? "Tạo video phân cảnh bằng Gemini qua CDP"
+    : step.label;
 
   useEffect(() => {
     if (!selectedRun) {
@@ -150,7 +153,7 @@ export function ActivityHistory() {
               </div>
               <div className="mt-4 rounded-lg border border-violet-100 bg-violet-50 px-4 py-3 text-sm text-violet-900">
                 <p className="font-extrabold">Tiến độ: {completedSteps}/{selectedRun.steps.length} bước đã hoàn tất</p>
-                {activeStep && <p className="mt-1">Đang thực hiện: {activeStep.label}</p>}
+                {activeStep && <p className="mt-1">Đang thực hiện: {stepLabel(activeStep)}</p>}
                 {selectedRun.status === "SUCCEEDED" && <p className="mt-1">Quy trình đã hoàn thành toàn bộ.</p>}
               </div>
               {selectedRun.codexAgent && <div className="mt-4 rounded-lg border border-teal-200 bg-teal-50 px-4 py-3 text-sm text-teal-950">
@@ -171,7 +174,7 @@ export function ActivityHistory() {
                     <button type="button" onClick={() => setExpandedStepKey((key) => key === step.key ? "" : step.key)} className="flex w-full items-center gap-3 p-3 text-left">
                       <div className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-extrabold ${step.status === "completed" ? "bg-emerald-100 text-emerald-700" : step.status === "failed" ? "bg-rose-100 text-rose-700" : step.status === "running" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-500"}`}>{step.status === "completed" ? "✓" : step.status === "failed" ? "!" : index + 1}</div>
                       <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center justify-between gap-2"><p className="font-bold text-[#0b3262]">{step.label}</p><span className="text-xs font-semibold text-[#6883aa]">{stepStatusLabel(step.status)}</span></div>
+                        <div className="flex flex-wrap items-center justify-between gap-2"><p className="font-bold text-[#0b3262]">{stepLabel(step)}</p><span className="text-xs font-semibold text-[#6883aa]">{stepStatusLabel(step.status)}</span></div>
                         <p className="mt-1 text-xs font-semibold text-violet-600">{expandedStepKey === step.key ? "Thu gọn kết quả" : "Xem kết quả bước"}</p>
                       </div>
                       <span className="text-lg text-[#6883aa]" aria-hidden="true">{expandedStepKey === step.key ? "⌃" : "⌄"}</span>

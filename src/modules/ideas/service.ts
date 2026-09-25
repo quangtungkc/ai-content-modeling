@@ -8,6 +8,7 @@ import type { ChannelDNA, VideoContext } from "@/services/ai/types";
 import { readChannelMainCharacterImage } from "@/modules/channels/service";
 import { assertAttachedSourceVideoEvidence, selectBestAnalysis } from "@/modules/videos/analysis-service";
 import { requestStage2GeminiBrowser } from "@/modules/generation/browser-flow-bridge";
+import { assertStrictModelingIdeaChangeScope } from "@/modules/modeling/strict-source-modeling";
 
 export async function generateIdeasFromVideoBrowser(videoId: string, userId: string, artStyle: string, runId: string | null, execution?: { codexJobId: string; onProgress: (detail: string, payload?: Record<string, unknown>) => Promise<void> }) {
   const video = await db.competitorVideo.findFirst({ where: { id: videoId, competitor: { channel: { userId } } }, include: { competitor: { include: { channel: true } }, analyses: { orderBy: { version: "desc" }, take: 10 } } });
@@ -41,6 +42,7 @@ export async function generateIdeasFromVideo(videoId: string, userId: string, ar
   }
   const result = await aiService.generateIdeas({ channelDNA, video: videoContext, analysis, artStyle, mainCharacterImage });
   if (result.modelingDirections.length !== 1) throw new AppError("INVALID_IDEA_COUNT", "AI phải trả đúng 1 modeling idea.", 502);
+  assertStrictModelingIdeaChangeScope(result.modelingDirections[0]);
   const ideas = await db.$transaction(result.modelingDirections.map((content) => db.modelingIdea.create({ data: { sourceVideoId: video.id, analysisId: analysisRecord.id, title: content.title, content, status: "DRAFT" } })));
   return {
     sourceVideoId: video.id,
@@ -62,6 +64,7 @@ export async function storeModelingIdeasFromBrowser(videoId: string, userId: str
   assertAttachedSourceVideoEvidence(analysisRecord.content);
   const parsed = modelingIdeasSchema.parse(value);
   if (parsed.modelingDirections.length !== 1) throw new AppError("INVALID_IDEA_COUNT", "Browser Gemini phải trả đúng 1 modeling idea.", 502);
+  assertStrictModelingIdeaChangeScope(parsed.modelingDirections[0]);
   const ideas = await db.$transaction(parsed.modelingDirections.map((content) => db.modelingIdea.create({ data: { sourceVideoId: video.id, analysisId: analysisRecord.id, title: content.title, content, status: "DRAFT" } })));
   return {
     sourceVideoId: video.id,

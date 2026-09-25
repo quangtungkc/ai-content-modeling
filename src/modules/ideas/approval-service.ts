@@ -7,7 +7,7 @@ import type { ModelingDirection } from "@/services/ai/types";
 import { decryptSecret } from "@/lib/secrets";
 import { GeminiProvider } from "@/services/ai/gemini";
 import { readChannelMainCharacterImage } from "@/modules/channels/service";
-import { assembleSourceModelingSpec, CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS, CANONICAL_DEFAULT_MODELING_FIDELITY_TARGET, CANONICAL_DEFAULT_MODELING_POLICY, CANONICAL_DEFAULT_TIMING_TOLERANCE, sourceModelingSpecSchema, validateGeneratedSceneMapping, type GeneratedSceneMapping } from "@/modules/modeling/strict-source-modeling";
+import { assembleSourceModelingSpec, assertStrictModelingIdeaChangeScope, CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS, CANONICAL_DEFAULT_MODELING_FIDELITY_TARGET, CANONICAL_DEFAULT_MODELING_POLICY, CANONICAL_DEFAULT_TIMING_TOLERANCE, sourceModelingSpecSchema, validateGeneratedSceneMapping, type GeneratedSceneMapping } from "@/modules/modeling/strict-source-modeling";
 import { buildAuthoritativeStoryboardValidationPlans, validateStoryboardSource, type SourceValidationContext } from "@/modules/source-validation/multi-stage";
 
 function strictSourceFields(video: { id: string; url: string; caption?: string | null; thumbnailUrl?: string | null; publishedAt?: Date | null; duration?: number | null; competitor: { platform: string } }, result: { sourceModelingSpec?: unknown; storyboard: Array<{ sceneNumber: number; sourceSceneId?: string; sourceBeat?: string; actionSequence?: string[]; cameraSpec?: Record<string, unknown>; spatialSpec?: Record<string, unknown>; startState?: string; endState?: string; targetDuration?: number }> }, storyboard: Array<{ sceneNumber: number; sourceSceneId?: string; targetDuration?: number }>) {
@@ -52,6 +52,15 @@ async function getOwnedIdea(id: string, userId: string) {
   return idea;
 }
 
+export async function getAuthoritativeSourceModelingSpec(sourceVideoId: string) {
+  const priorProjects = await db.contentProject.findMany({
+    where: { sourceVideoId, modelingPolicy: CANONICAL_DEFAULT_MODELING_POLICY },
+    orderBy: { createdAt: "asc" },
+    select: { sourceModelingSpec: true },
+  });
+  return priorProjects.find((project) => project.sourceModelingSpec)?.sourceModelingSpec ?? null;
+}
+
 export async function setIdeaStatus(id: string, userId: string, status: "APPROVED" | "REJECTED") {
   await getOwnedIdea(id, userId);
   return db.modelingIdea.update({ where: { id }, data: { status } });
@@ -67,10 +76,11 @@ export async function developApprovedIdeaBrowser(id: string, userId: string, asp
   if (idea.status !== "APPROVED") throw new AppError("IDEA_APPROVAL_REQUIRED", "Idea phải được approve trước khi Develop.", 409);
   const existing = await db.contentProject.findUnique({ where: { ideaId: id } });
   if (existing) return existing;
+  assertStrictModelingIdeaChangeScope(modelingIdeasSchema.shape.modelingDirections.element.parse(idea.content));
   const video = await db.competitorVideo.findUnique({ where: { id: idea.sourceVideoId }, include: { competitor: { include: { channel: true } } } });
   if (!video) throw new AppError("VIDEO_NOT_FOUND", "Không tìm thấy source video.", 404);
   const { requestStage2GeminiBrowser } = await import("@/modules/generation/browser-flow-bridge");
-  const result = await requestStage2GeminiBrowser({ userId, channelId: video.competitor.channel.id, runId, codexJobId: execution?.codexJobId, purpose: "CONTENT_PROJECT_DEVELOP", video: { id: video.id, url: video.url, caption: video.caption, duration: video.duration, thumbnailUrl: video.thumbnailUrl, publishedAt: video.publishedAt?.toISOString() }, analysis: videoAnalysisSchema.parse(idea.analysis.content), idea: modelingIdeasSchema.shape.modelingDirections.element.parse(idea.content), channelDNA: { channel: video.competitor.channel }, aspectRatio }, execution?.onProgress);
+  const result = await requestStage2GeminiBrowser({ userId, channelId: video.competitor.channel.id, runId, codexJobId: execution?.codexJobId, purpose: "CONTENT_PROJECT_DEVELOP", video: { id: video.id, url: video.url, caption: video.caption, duration: video.duration, thumbnailUrl: video.thumbnailUrl, publishedAt: video.publishedAt?.toISOString() }, analysis: videoAnalysisSchema.parse(idea.analysis.content), idea: modelingIdeasSchema.shape.modelingDirections.element.parse(idea.content), channelDNA: { channel: video.competitor.channel }, aspectRatio, authoritativeSourceModelingSpec: await getAuthoritativeSourceModelingSpec(video.id) }, execution?.onProgress);
   return storeDevelopedIdeaFromBrowser(id, userId, result, aspectRatio);
 }
 
@@ -79,6 +89,7 @@ export async function developApprovedIdea(id: string, userId: string, ai?: AISer
   if (idea.status !== "APPROVED") throw new AppError("IDEA_APPROVAL_REQUIRED", "Idea phải được approve trước khi Develop.", 409);
   const existingProject = await db.contentProject.findUnique({ where: { ideaId: id } });
   if (existingProject) return existingProject;
+  assertStrictModelingIdeaChangeScope(modelingIdeasSchema.shape.modelingDirections.element.parse(idea.content));
   const video = await db.competitorVideo.findUnique({ where: { id: idea.sourceVideoId }, include: { competitor: { include: { channel: true } } } });
   if (!video) throw new AppError("VIDEO_NOT_FOUND", "Không tìm thấy source video của idea.", 404);
   const analysis = videoAnalysisSchema.parse(idea.analysis.content);

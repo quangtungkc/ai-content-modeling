@@ -55,11 +55,11 @@ type DesktopGemini = {
   runVideoJob: (projectId: string, channelId: string, slots: VideoSlot[], onProgress?: (progress: { processed: number; total: number; label: string }) => void) => Promise<{ status: string; videos: Record<string, string> }>;
   analyzeSource: (video: Record<string, unknown>, channelDNA?: Record<string, unknown>, runId?: string) => Promise<VideoAnalysisResult["analysis"]>;
   generateIdea: (video: Record<string, unknown>, analysis: VideoAnalysisResult["analysis"], channelDNA?: Record<string, unknown>, artStyle?: string, runId?: string) => Promise<{ schemaVersion: "1.0"; modelingDirections: ModelingIdeaResult[] }>;
-  developProject: (video: Record<string, unknown>, analysis: VideoAnalysisResult["analysis"], idea: ModelingIdeaResult, channelDNA?: Record<string, unknown>, aspectRatio?: string, runId?: string) => Promise<Record<string, unknown>>;
+  developProject: (video: Record<string, unknown>, analysis: VideoAnalysisResult["analysis"], idea: ModelingIdeaResult, channelDNA?: Record<string, unknown>, aspectRatio?: string, runId?: string, authoritativeSourceModelingSpec?: unknown) => Promise<Record<string, unknown>>;
   validateProjectImages: (projectId: string, sceneNumbers: number[]) => Promise<{ images: Record<string, { exists: boolean; sha256: string | null }> }>;
 };
 type ImageSlot = { kind: "background" | "scene"; sceneNumber?: number; label: string; prompt: string; aspectRatio: string; promptId?: string; validatedPrompt?: string; validatedPromptHash?: string };
-type VideoSlot = { sceneNumber: number; sceneId?: string; label: string; visualBlock: string; actionBlock: string; audioBlock: string; englishPrompt: string; aspectRatio: string; promptId?: string; validatedPrompt?: string; validatedPromptHash?: string };
+type VideoSlot = { sceneNumber: number; sceneId?: string; label: string; visualBlock: string; actionBlock: string; audioBlock: string; englishPrompt: string; aspectRatio: string; targetDuration?: number | null; promptId?: string; validatedPrompt?: string; validatedPromptHash?: string };
 type VideoProvider = "flow" | "gemini";
 type DesktopFlow = {
   open: () => Promise<{ status: string }>;
@@ -102,7 +102,7 @@ function SourceFidelityStatus({ project, promptFidelityStatus }: { project: Cont
   return <div className="mt-5 grid gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-[#0b3262] sm:grid-cols-4"><div><p className="font-bold">Character Fidelity</p><p className="mt-1 font-extrabold text-slate-600">NOT_EVALUATED</p><p className="text-xs text-[#6883aa]">Cần kiểm tra trên start-frame.</p></div><div><p className="font-bold">Source Fidelity</p><p className={`mt-1 font-extrabold ${sourceSetupReady ? "text-emerald-700" : "text-amber-700"}`}>{sourceSetupReady ? "PASS · spec/mapping" : "NEEDS_REVIEW"}</p><p className="text-xs text-[#6883aa]">Cấu trúc source được theo dõi riêng.</p></div><div><p className="font-bold">Technical Quality</p><p className="mt-1 font-extrabold text-slate-600">NOT_EVALUATED</p><p className="text-xs text-[#6883aa]">Chưa có output media để kiểm tra.</p></div><div><p className="font-bold">Prompt Fidelity</p><p className={`mt-1 font-extrabold ${promptFidelityStatus === "PASS" ? "text-emerald-700" : promptFidelityStatus === "FAIL" ? "text-rose-700" : "text-amber-700"}`}>{promptFidelityStatus}</p><p className="text-xs text-[#6883aa]">Gate bắt buộc trước khi gửi model.</p></div></div>;
 }
 type AutomationStep = { key: string; label: string; status: "pending" | "running" | "completed" | "failed"; detail?: string; error?: string; startedAt?: string; completedAt?: string };
-type AutomationSettings = { artStyle: string; aspectRatio: "9:16" | "16:9" | "1:1" | "4:5"; postText?: string; hashtags?: string; language?: string; targetCountry?: string };
+type AutomationSettings = { artStyle: string; aspectRatio: "9:16" | "16:9" | "1:1" | "4:5"; videoProvider?: VideoProvider; postText?: string; hashtags?: string; language?: string; targetCountry?: string };
 type AutomationRunResult = ResumableRunInput & { id: string; status: "RUNNING" | "SUCCEEDED" | "FAILED" | "PAUSED"; steps: AutomationStep[]; modelingIdea?: ModelingIdeaResult | null };
 type CodexStage = "ANALYSIS" | "MODELING" | "PROJECT" | "ASSETS" | "SCENES" | "FINAL_ASSEMBLY" | "FINAL_AUDIT" | "POST_RUN_REVIEW";
 type CodexAction = { name: string; stage?: CodexStage; targetIds?: string[]; strategy?: string; reason?: string };
@@ -640,7 +640,7 @@ export function ViralDashboard() {
     const sourceVideo = dashboard?.videos.find((video) => video.id === analysisVideoId);
     try {
       const approveResponse = await fetch(`/api/v1/ideas/${idea.id}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(recoveryRunId ? { automationRunId: recoveryRunId } : {}) });
-      const approveBody = await approveResponse.json() as { error?: { message?: string; details?: { troubleshooting?: unknown } }; troubleshooting?: unknown };
+      const approveBody = await approveResponse.json() as { data?: unknown; authoritativeSourceModelingSpec?: unknown; error?: { message?: string; details?: { troubleshooting?: unknown } }; troubleshooting?: unknown };
       if (approveBody.troubleshooting) applyContentProjectTroubleshooting(approveBody.troubleshooting);
       if (!approveResponse.ok) {
         if (approveBody.error?.details?.troubleshooting) applyContentProjectTroubleshooting(approveBody.error.details.troubleshooting);
@@ -658,6 +658,7 @@ export function ViralDashboard() {
             { channel: dashboard?.channel },
             aspectRatio,
             recoveryRunId,
+            approveBody.authoritativeSourceModelingSpec,
           );
           return fetch(`/api/v1/ideas/${idea.id}/develop`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: "gemini-browser", project, aspectRatio, ...requestContext }) });
         })()
@@ -731,14 +732,18 @@ export function ViralDashboard() {
       ...sceneSlots,
     ];
   }
-  async function generateAllProjectImages(project = contentProject, onlySceneNumbers?: number[], existingImages = generatedImages, runId?: string): Promise<Record<string, string> | null> {
+  async function generateAllProjectImages(project = contentProject, onlySceneNumbers?: number[], existingImages = generatedImages, runId?: string, onlyMissing = false): Promise<Record<string, string> | null> {
     if (!project) return null;
     setIsGeneratingImages(true);
     setContentProjectError("");
     try {
       const allSlots = buildGeminiImageSlots(project);
       const selected = onlySceneNumbers?.length ? new Set(onlySceneNumbers) : null;
-      const slots = selected ? allSlots.filter((slot) => slot.kind === "scene" && slot.sceneNumber !== undefined && selected.has(slot.sceneNumber)) : allSlots;
+      const slots = selected
+        ? allSlots.filter((slot) => slot.kind === "scene" && slot.sceneNumber !== undefined && selected.has(slot.sceneNumber))
+        : onlyMissing
+          ? allSlots.filter((slot) => slot.kind === "background" ? !existingImages["background-0"] : !existingImages[`scene-${slot.sceneNumber}`])
+          : allSlots;
       if (!slots.length) throw new Error("Không xác định được ảnh cần tạo lại.");
       const selectedChannelId = channelId || dashboard?.channel?.id || channels[0]?.id;
       if (!selectedChannelId) throw new Error("Hãy chọn kênh trước khi tạo ảnh.");
@@ -777,6 +782,7 @@ export function ViralDashboard() {
       visualBlock: scene.visualBlock,
       actionBlock: scene.actionBlock,
       audioBlock: scene.audioBlock,
+      targetDuration: scene.targetDuration,
       englishPrompt: `${identityPrompt}\n${videoAspectRatioDirective}\n${compileStrictModelingConstraints(strictSpec, scene.sourceSceneId ?? undefined)}\n${scene.englishPrompt?.trim() || `Create one 4-second video starting from the approved start image for scene ${scene.sceneNumber}. Preserve the character, background, composition, story meaning, and ending, and animate only the specified primary action with synchronized sound.`}`,
       aspectRatio,
     }));
@@ -1036,7 +1042,7 @@ export function ViralDashboard() {
       { key: "modeling-idea", label: "Tạo Modeling Idea", status: "pending" },
       { key: "content-project", label: "Tạo Content Project và phân cảnh", status: "pending" },
       { key: "images", label: "Tạo và kiểm tra ảnh Gemini bằng trình duyệt", status: "pending" },
-      { key: "videos", label: "Tạo video phân cảnh bằng Flow Veo 3", status: "pending" },
+      { key: "videos", label: videoProvider === "gemini" ? "Tạo video phân cảnh bằng Gemini qua CDP" : "Tạo video phân cảnh bằng Flow Veo 3", status: "pending" },
       { key: "final-video", label: "Ghép và xuất video hoàn chỉnh", status: "pending" },
     ];
   }
@@ -1060,7 +1066,7 @@ export function ViralDashboard() {
   async function runAutomaticPipeline() {
     if (!analysisVideoId || isAutomaticRunning || automaticRunLockRef.current) return;
     automaticRunLockRef.current = true;
-    const settings: AutomationSettings = { artStyle: ideaArtStyle.trim() || "Hoạt hình 3D", aspectRatio };
+    const settings: AutomationSettings = { artStyle: ideaArtStyle.trim() || "Hoạt hình 3D", aspectRatio, videoProvider };
     let currentSteps = createAutomationSteps();
     let runId = "";
     let activeStep = "";
@@ -1237,7 +1243,13 @@ export function ViralDashboard() {
       if (targetStage <= 3) {
         activeStep = "images";
         await changeStep(activeStep, "running", "Đang tạo ảnh bằng Gemini qua trình duyệt...");
-        const generated = await generateAllProjectImages(project, undefined, generatedImages, runId);
+        // A failed Stage 3 may already have persisted a subset of the image
+        // pack. Rehydrate it before resuming so we only submit missing slots
+        // and never regenerate successful references or reset continuity.
+        const persistedImages = await loadPersistedProjectImages(project.id, project.scenes);
+        images = { ...persistedImages, ...generatedImages };
+        setGeneratedImages(images);
+        const generated = await generateAllProjectImages(project, undefined, images, runId, resumedFromCheckpoint);
         if (!generated) throw new Error("Không tạo đủ ảnh bằng Gemini.");
         images = generated;
         await changeStep(activeStep, "completed", `Đã tạo ${Object.keys(images).length} ảnh và lưu vào app.`);

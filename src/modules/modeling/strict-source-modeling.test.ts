@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { assembleSourceModelingSpec, buildSourceVideoModelingSpec, CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS, CANONICAL_DEFAULT_MODELING_FIDELITY_TARGET, CANONICAL_DEFAULT_MODELING_POLICY, CANONICAL_DEFAULT_TIMING_TOLERANCE, CANONICAL_SPEC_VERSION, canonicalizeSourceModelingSpec, compileStrictModelingConstraints, computeTimingFidelity, sourceModelingEvidenceSchema, sourceModelingSceneSchema, sourceModelingSpecSchema, StrictModelingError, validateGeneratedSceneMapping, validateStrictModelingSetup } from "./strict-source-modeling";
+import { assembleSourceModelingSpec, assertStrictModelingIdeaChangeScope, buildSourceVideoModelingSpec, CANONICAL_ALLOWED_MODELING_TRANSFORMATIONS, CANONICAL_DEFAULT_MODELING_FIDELITY_TARGET, CANONICAL_DEFAULT_MODELING_POLICY, CANONICAL_DEFAULT_TIMING_TOLERANCE, CANONICAL_SPEC_VERSION, canonicalizeSourceModelingSpec, compileStrictModelingConstraints, computeTimingFidelity, sourceModelingEvidenceSchema, sourceModelingSceneSchema, sourceModelingSpecSchema, StrictModelingError, validateGeneratedSceneMapping, validateStrictModelingSetup } from "./strict-source-modeling";
 
 const sourceSpec = () => buildSourceVideoModelingSpec({
   specVersion: "1.0.0",
@@ -16,6 +16,16 @@ const sourceSpec = () => buildSourceVideoModelingSpec({
 });
 
 const candidateSceneRecords = (candidate: Record<string, unknown>) => candidate.scenes as Array<Record<string, unknown>>;
+
+describe("strict modeling idea change scope", () => {
+  it("accepts only the three approved difference categories", () => {
+    expect(() => assertStrictModelingIdeaChangeScope({ whatIsChanged: ["Bối cảnh/môi trường", "Nhân vật chính theo ảnh tham chiếu", "Phong cách mỹ thuật"] })).not.toThrow();
+  });
+
+  it("rejects prop or plot substitutions such as changing the shared food", () => {
+    expect(() => assertStrictModelingIdeaChangeScope({ whatIsChanged: ["Bối cảnh/môi trường", "Nhân vật chính", "Đổi quả ăn chung thành dâu tây"] })).toThrow("STRICT_MODELING_ILLEGAL_CHANGE_SCOPE");
+  });
+});
 
 // Keep production-shape assertions deterministic and independent from the user's
 // AppData evidence log. Raw evidence remains runtime diagnostic data, not a test

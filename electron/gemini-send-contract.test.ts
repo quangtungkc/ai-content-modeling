@@ -80,6 +80,13 @@ describe("ISSUE-002 send/response boundary", () => {
     expect(mainSource).toContain("videoComposerStillContainsPromptAfterRecovery");
     expect(mainSource).toContain("GEMINI_SUBMISSION_NOT_CONFIRMED: video composer");
   });
+
+  it("settles Gemini third-party-provider video refusals immediately", () => {
+    expect(mainSource).toContain("thirdPartyContentBlocked");
+    expect(mainSource).toContain("GEMINI_VIDEO_PROVIDER_THIRD_PARTY_BLOCKED");
+    expect(mainSource).toContain("autoRetryAllowed: false");
+    expect(mainSource).toContain("gemini-video-provider-error");
+  });
 });
 
 describe("ISSUE-004 structured Stage-2 error transport", () => {
@@ -225,6 +232,16 @@ describe("shared Gemini conversation across automation Stages 1-3", () => {
     expect(reloadBlock).toContain("assertConversationReady(expectedConversationBinding, runId, observedUrl)");
     expect(reloadBlock).toContain('result: "FAIL"');
     expect(reloadBlock).toContain("GEMINI_SHARED_CONVERSATION_MISMATCH");
+  });
+
+  it("does not mistake uploaded-image preview controls for the Gemini image-generation tool", () => {
+    const start = mainSource.indexOf("async function waitForGeminiToolPoint");
+    const end = mainSource.indexOf("function saveGeminiVideo", start);
+    const toolSelectionBlock = mainSource.slice(start, end);
+    expect(toolSelectionBlock).toContain("isImagePreviewOrUploadControl");
+    expect(toolSelectionBlock).toContain("hiển thị hình ảnh đã tải lên");
+    expect(toolSelectionBlock).toContain("chia sẻ hình ảnh");
+    expect(toolSelectionBlock).toContain("if (candidate.excluded) return false;");
   });
 });
 

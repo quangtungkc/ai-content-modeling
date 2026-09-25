@@ -67,16 +67,17 @@ describe("video provider routing", () => {
     expect(geminiJob).not.toContain("expectedConversationId: conversationId");
   });
 
-  it("keeps every Gemini Stage-4 scene in the same video conversation/session", () => {
+  it("starts every Gemini Stage-4 scene in its own conversation and reloads before upload", () => {
     const start = mainSource.indexOf("async function runGeminiVideoJobUnlocked");
     const end = mainSource.indexOf("async function runGeminiVideoJob(event", start);
     const geminiJob = mainSource.slice(start, end);
-    expect(geminiJob).toContain("let sharedVideoConversationRoute = null;");
-    expect(geminiJob).toContain("let sharedVideoRuntimeSessionId = geminiSessionId || null;");
-    expect(geminiJob).toContain("if (index === 0)");
-    expect(geminiJob).toContain("gemini-video-shared-conversation-open");
-    expect(geminiJob).toContain("GEMINI_VIDEO_SHARED_CONVERSATION_CHANGED");
-    expect(geminiJob).toContain("gemini-video-shared-conversation-check");
-    expect(geminiJob).toContain("const recoveryRoute = recoveryUrl.origin + recoveryUrl.pathname;");
+    expect(geminiJob).toContain('await window.webContents.loadURL("https://gemini.google.com/videos");');
+    expect(geminiJob).toContain('action: "gemini-video-independent-conversation-open"');
+    expect(geminiJob).toContain('conversationMode: "PER_SCENE"');
+    expect(geminiJob).toContain("reloadGeminiVideoBeforeUpload(window, sceneNumber)");
+    expect(geminiJob).toContain("ensureGeminiVideoProPortrait(window, sceneNumber, { allowModelSelection: false })");
+    expect(geminiJob).toContain("normalizeGeminiVideoBuffer(rawBuffer, projectId, sceneNumber, rawDuration, 0, slot.targetDuration)");
+    expect(geminiJob).not.toContain("GEMINI_VIDEO_SHARED_CONVERSATION_CHANGED");
+    expect(geminiJob).not.toContain("gemini-conversation.json");
   });
 });

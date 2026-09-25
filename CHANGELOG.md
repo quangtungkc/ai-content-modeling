@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.19 — 2026-09-25
+
+### Fixed
+
+- Stage 1 now preserves the attached source-video evidence and its authoritative source metadata through the complete run; analysis must report uncertainty instead of inventing inaccessible details.
+- Stage 2 now enforces source-faithful scene count/order, beat/action/camera/timing continuity, the canonical main-character reference, and exactly three allowed modeling differences: background, referenced protagonist identity, and selected art style.
+- Stage 3 now carries the channel protagonist reference into every scene-image request, rehydrates completed images on resume, generates only missing scenes, and rejects duplicate or discontinuous scene outputs.
+- Stage 4 Gemini-through-CDP now uses a fresh conversation per video, reloads before reference upload, reasserts Pro and 9:16, confirms the uploaded image and prompt submission, and settles provider blocks as structured non-retryable failures instead of creating false jobs.
+- Stage 5 now trims each scene to its approved storyboard duration before assembly, rejects short or mismatched outputs, validates the final H.264/AAC MP4, and cleans intermediate PC files while retaining the final video in app storage.
+- Resume now returns an existing completed Content Project before re-parsing legacy idea fixtures, preventing a finished run from failing on fields introduced by newer strict-modeling validation.
+
+### Validation
+
+- Full regression suite: 83 test files, 924/924 tests passed.
+- The release build output is versioned to `release/1.0.19-production` and includes all Electron/CDP helper modules required by the packaged main process.
+- Typecheck, lint, syntax checks, production resume validation, packaged-content checks, and installer validation are run before publication.
+
 ## 1.0.11 — 2026-09-24
 
 ### Fixed

@@ -74,7 +74,7 @@ contextBridge.exposeInMainWorld("desktopGemini", {
   copy: (prompt) => invoke("gemini-browser:copy", prompt),
   analyzeSource: (video, channelDNA, runId) => invoke("gemini-browser:analyze-source", { video, channelDNA, runId }),
   generateIdea: (video, analysis, channelDNA, artStyle, runId) => invoke("gemini-browser:generate-idea", { video, analysis, channelDNA, artStyle, runId }),
-  developProject: (video, analysis, idea, channelDNA, aspectRatio, runId) => invokeStructured("gemini-browser:develop-project", { video, analysis, idea, channelDNA, aspectRatio, runId }),
+  developProject: (video, analysis, idea, channelDNA, aspectRatio, runId, authoritativeSourceModelingSpec) => invokeStructured("gemini-browser:develop-project", { video, analysis, idea, channelDNA, aspectRatio, runId, authoritativeSourceModelingSpec }),
   importImages: (projectId, slots) => invoke("gemini-browser:import-images", { projectId, slots }),
   runJob: (projectId, slots, onProgress, runId) => {
     const handler = (_event, progress) => onProgress?.(progress);
