@@ -137,6 +137,9 @@ model Channel {
   hasDialogue           Boolean      @default(false)
   creativeInstructions  String?
   hashtags              String?
+  facebookPageUrl       String?
+  facebookPageName      String?
+  facebookPageExternalId String?
   mainCharacterImageKey String?
   mainCharacterImageName String?
   mainCharacterImageMimeType String?
@@ -200,6 +203,7 @@ model Competitor {
   status        RecordStatus @default(ACTIVE)
   lastSyncedAt  DateTime?
   syncError     String?
+  discoverySource String   @default("MANUAL")
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
   channel       Channel      @relation(fields: [channelId], references: [id])

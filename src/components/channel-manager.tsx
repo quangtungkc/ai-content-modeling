@@ -17,6 +17,9 @@ type Channel = {
   hasDialogue: boolean;
   creativeInstructions: string;
   hashtags: string;
+  facebookPageUrl: string;
+  facebookPageName: string;
+  facebookPageExternalId: string;
   timezone: string;
   mainCharacterImageUrl: string | null;
   mainCharacterImageName: string;
@@ -32,7 +35,13 @@ type Competitor = {
   displayName: string;
   avatar: string;
   status: "Active" | "Paused";
+  discoverySource: "MANUAL" | "FOLLOWING_PAGE";
   createdAt: string;
+};
+
+type DesktopFacebook = {
+  open: (pageUrl?: string) => Promise<{ status: string }>;
+  scanFollowing: (pageUrl: string) => Promise<{ needsLogin: boolean; items: Array<{ url: string; displayName: string }>; error?: string }>;
 };
 
 const emptyChannel: Omit<Channel, "id"> = {
@@ -49,6 +58,9 @@ const emptyChannel: Omit<Channel, "id"> = {
   hasDialogue: false,
   creativeInstructions: "",
   hashtags: "",
+  facebookPageUrl: "",
+  facebookPageName: "",
+  facebookPageExternalId: "",
   timezone: "UTC",
   mainCharacterImageUrl: null,
   mainCharacterImageName: "",
@@ -69,6 +81,7 @@ const fields: Array<
   ["visualStyle", "Phong cách hình ảnh", "Ví dụ: 3D cách điệu"],
   ["videoDuration", "Thời lượng video (giây)", "Ví dụ: 30"],
   ["hashtags", "Hashtag kênh", "Ví dụ: #funny #animation #shorts"],
+  ["facebookPageUrl", "Facebook Page liên kết", "https://www.facebook.com/ten-page"],
   ["timezone", "Timezone", "e.g. Asia/Ho_Chi_Minh"],
 ];
 
@@ -89,6 +102,9 @@ function toUiChannel(value: Record<string, unknown>): Channel {
     hasDialogue: Boolean(value.hasDialogue),
     creativeInstructions: String(value.creativeInstructions ?? ""),
     hashtags: String(value.hashtags ?? ""),
+    facebookPageUrl: String(value.facebookPageUrl ?? ""),
+    facebookPageName: String(value.facebookPageName ?? ""),
+    facebookPageExternalId: String(value.facebookPageExternalId ?? ""),
     timezone: String(value.timezone ?? "UTC"),
     mainCharacterImageUrl: typeof value.mainCharacterImageUrl === "string" ? value.mainCharacterImageUrl : null,
     mainCharacterImageName: String(value.mainCharacterImageName ?? ""),
@@ -120,6 +136,7 @@ function toUiCompetitor(value: Record<string, unknown>): Competitor {
     displayName: String(value.displayName ?? value.handle),
     avatar: String(value.avatar ?? ""),
     status: value.status === "ACTIVE" ? "Active" : "Paused",
+    discoverySource: value.discoverySource === "FOLLOWING_PAGE" ? "FOLLOWING_PAGE" : "MANUAL",
     createdAt: String(value.createdAt),
   };
 }
@@ -272,6 +289,25 @@ export function ChannelManager() {
     }
   }
 
+  async function openFacebookPage(channel: Channel) {
+    if (!channel.facebookPageUrl) {
+      openEdit(channel);
+      setFormError("Hãy nhập Facebook Page URL trước khi đăng nhập Page.");
+      return;
+    }
+    const browser = (window as Window & { desktopFacebook?: DesktopFacebook }).desktopFacebook;
+    if (!browser) {
+      setNotice("Đăng nhập Page chỉ chạy trong ứng dụng Desktop.");
+      return;
+    }
+    try {
+      await browser.open(channel.facebookPageUrl);
+      setNotice("Facebook đã mở đúng Page. Hãy đăng nhập Facebook và chuyển sang hồ sơ Page đó, sau đó mở mục Đối thủ để quét Page đang theo dõi.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể mở Facebook Page.");
+    }
+  }
+
   return (
     <section className="mx-auto max-w-6xl">
       <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
@@ -318,6 +354,7 @@ export function ChannelManager() {
                     <span className="text-[#9ab0c9]">•</span> {channel.topic}
                   </p>
                   <p className="mt-1 truncate text-xs text-[#8aa0bd]">{channel.characterIdentityPack ? `Identity Pack: LOCKED · ${channel.characterIdentityPack.referenceImages.length} reference` : "MAIN_CHARACTER_IDENTITY_MISSING"}</p>
+                  <p className="mt-1 truncate text-xs text-[#8aa0bd]">{channel.facebookPageUrl ? `Facebook Page: ${channel.facebookPageName || channel.facebookPageUrl}` : "Chưa liên kết Facebook Page"}</p>
                 </div>
               </div>
               <span className="rounded-full bg-[#dff7f4] px-2 py-1 text-[11px] text-[#078f86]">
@@ -342,6 +379,12 @@ export function ChannelManager() {
                 className="rounded-md px-3 py-2 text-xs text-[#008fbd] hover:bg-[#e8faff]"
               >
                 Đối thủ ({competitors[channel.id]?.length ?? 0})
+              </button>
+              <button
+                onClick={() => void openFacebookPage(channel)}
+                className="rounded-md px-3 py-2 text-xs text-[#008fbd] hover:bg-[#e8faff]"
+              >
+                {channel.facebookPageUrl ? "Đăng nhập Page" : "Gắn Facebook Page"}
               </button>
               <button
                 onClick={() => remove(channel)}
@@ -530,6 +573,7 @@ function ChannelDetails({
     ["Phong cách hình ảnh", channel.visualStyle],
     ["Thời lượng video", `${channel.videoDuration || "—"} giây`],
     ["Có lời thoại", channel.hasDialogue ? "Có" : "Không"],
+    ["Facebook Page", channel.facebookPageName || channel.facebookPageUrl || "Chưa liên kết"],
     ["Timezone", channel.timezone],
   ];
   return (
@@ -609,6 +653,7 @@ function CompetitorManager({
   const [error, setError] = useState("");
   const [bulkMessage, setBulkMessage] = useState("");
   const [isImporting, setIsImporting] = useState(false);
+  const [isScanningFollowing, setIsScanningFollowing] = useState(false);
   useEffect(() => {
     fetch(`/api/v1/channels/${channel.id}/competitors`)
       .then(async (response) => {
@@ -629,11 +674,40 @@ function CompetitorManager({
     // The parent callback is intentionally not a dependency: it is an inline state adapter.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channel.id]);
-  async function createCompetitor(value: string) {
-    const response = await fetch(`/api/v1/channels/${channel.id}/competitors`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: value }) });
+  async function createCompetitor(value: string, source: "MANUAL" | "FOLLOWING_PAGE" = "MANUAL") {
+    const response = await fetch(`/api/v1/channels/${channel.id}/competitors`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: value, source }) });
     const body = (await response.json()) as { data?: Record<string, unknown>; error?: { message?: string } };
     if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể thêm đối thủ.");
     return toUiCompetitor(body.data);
+  }
+  async function scanFollowingPages() {
+    const browser = (window as Window & { desktopFacebook?: DesktopFacebook }).desktopFacebook;
+    if (!browser) { setError("Quét Page đang theo dõi chỉ chạy trong ứng dụng Desktop."); return; }
+    if (!channel.facebookPageUrl) { setError("Channel chưa có Facebook Page URL. Hãy đóng cửa sổ này, bấm Sửa và nhập Page URL trước."); return; }
+    setError(""); setBulkMessage(""); setIsScanningFollowing(true);
+    try {
+      const result = await browser.scanFollowing(channel.facebookPageUrl);
+      if (result.needsLogin) {
+        setError("Facebook chưa đăng nhập đúng Page. Hãy bấm Đăng nhập Page, đăng nhập và chuyển sang hồ sơ Page rồi thử lại.");
+        return;
+      }
+      const nextItems = [...items];
+      const failures: string[] = [];
+      for (const item of result.items) {
+        try {
+          const created = await createCompetitor(item.url, "FOLLOWING_PAGE");
+          if (!nextItems.some((current) => current.id === created.id)) nextItems.push(created);
+        } catch (caught) {
+          failures.push(item.displayName || item.url);
+        }
+      }
+      onChange(nextItems);
+      setBulkMessage(`Đã phát hiện ${result.items.length} Page đang theo dõi, thêm mới ${nextItems.length - items.length} đối thủ.${failures.length ? ` Bỏ qua ${failures.length} mục trùng hoặc không hợp lệ.` : ""}${result.error ? ` ${result.error}` : ""}`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Không thể quét Page đang theo dõi.");
+    } finally {
+      setIsScanningFollowing(false);
+    }
   }
   async function addCompetitor(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -735,6 +809,18 @@ function CompetitorManager({
             Thêm URL đối thủ
           </button>
         </form>
+        <div className="mt-3 rounded-lg border border-cyan-200 bg-cyan-50 p-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <strong className="text-sm text-[#0b3262]">Đối thủ chính của Facebook Page</strong>
+              <span className="mt-1 block text-xs text-[#6883aa]">Quét các Page mà Page này đang theo dõi trong phiên Facebook đã đăng nhập.</span>
+            </div>
+            <button type="button" onClick={() => void scanFollowingPages()} disabled={isScanningFollowing} className="rounded-lg bg-[#07865f] px-3 py-2 text-xs font-bold text-white disabled:cursor-wait disabled:opacity-60">
+              {isScanningFollowing ? "Đang quét Page..." : "Quét Page đang theo dõi"}
+            </button>
+          </div>
+          {!channel.facebookPageUrl && <p className="mt-2 text-xs text-amber-700">Chưa có Facebook Page liên kết. Hãy nhập URL trong Sửa kênh.</p>}
+        </div>
         <div className="mt-3 rounded-lg border border-dashed border-white/15 bg-white/[.03] p-3">
           <label className="flex cursor-pointer items-center justify-between gap-3 text-sm text-slate-300"><span><strong className="text-white">Thêm hàng loạt từ file TXT</strong><span className="mt-1 block text-xs text-slate-500">Mỗi dòng một URL, tối đa 50 URL.</span></span><span className="rounded-lg border border-cyan-400/40 px-3 py-2 text-xs font-semibold text-cyan-300">{isImporting ? "Đang thêm..." : "Chọn file .txt"}</span><input type="file" accept=".txt,text/plain" className="sr-only" disabled={isImporting} onChange={(event) => void importTxt(event)} /></label>
         </div>
@@ -760,6 +846,7 @@ function CompetitorManager({
                     <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-slate-300">
                       {item.platform}
                     </span>
+                    {item.discoverySource === "FOLLOWING_PAGE" && <span className="rounded bg-cyan-400/15 px-1.5 py-0.5 text-[10px] text-cyan-300">Page đang theo dõi</span>}
                     <p className="font-medium text-white">{item.displayName}</p>
                   </div>
                   <p className="mt-1 truncate text-xs text-slate-500">

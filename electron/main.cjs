@@ -1722,8 +1722,23 @@ ipcMain.handle("runtime-error:report", async (_event, value) => {
   return { status: reported ? "reported" : "queued-locally" };
 });
 
-function createFacebookWindow() {
+const FACEBOOK_PAGE_HOSTS = new Set(["facebook.com", "www.facebook.com", "m.facebook.com"]);
+
+function normalizeFacebookPageUrl(value) {
+  if (typeof value !== "string" || !value.trim()) throw new Error("FACEBOOK_PAGE_URL_REQUIRED");
+  let parsed;
+  try { parsed = new URL(value.trim()); } catch { throw new Error("FACEBOOK_PAGE_URL_INVALID"); }
+  if (parsed.protocol !== "https:" || !FACEBOOK_PAGE_HOSTS.has(parsed.hostname.toLowerCase())) throw new Error("FACEBOOK_PAGE_URL_INVALID");
+  if (/\/(reel|watch|videos|share|groups|events)\b/i.test(parsed.pathname)) throw new Error("FACEBOOK_PAGE_URL_MUST_BE_PAGE");
+  parsed.search = "";
+  parsed.hash = "";
+  parsed.pathname = parsed.pathname.replace(/\/{2,}/g, "/").replace(/\/$/, "") || "/";
+  return parsed.toString().replace(/\/$/, "");
+}
+
+function createFacebookWindow(initialUrl = "https://www.facebook.com/") {
   if (facebookWindow && !facebookWindow.isDestroyed()) {
+    if (initialUrl && facebookWindow.webContents.getURL() !== initialUrl) void facebookWindow.loadURL(initialUrl);
     facebookWindow.show();
     facebookWindow.focus();
     return facebookWindow;
@@ -1740,7 +1755,7 @@ function createFacebookWindow() {
     },
   });
   facebookWindow.on("closed", () => { facebookWindow = undefined; });
-  void facebookWindow.loadURL("https://www.facebook.com/");
+  void facebookWindow.loadURL(initialUrl);
   return facebookWindow;
 }
 
@@ -2440,14 +2455,93 @@ async function scanFacebookPages(entries, onProgress) {
   return results;
 }
 
-ipcMain.handle("facebook-browser:open", () => {
-  createFacebookWindow();
+function readFacebookFollowingDocument(sourcePageUrl) {
+  const currentUrl = window.location.href;
+  const bodyText = String(document.body?.innerText || "");
+  if (currentUrl.includes("/login") || /\b(log in|đăng nhập)\b/i.test(bodyText)) return { needsLogin: true, items: [], currentUrl };
+  const reserved = new Set(["", "home", "pages", "groups", "events", "watch", "reels", "marketplace", "gaming", "friends", "notifications", "messages", "search", "photo", "photos", "story", "stories", "share", "permalink", "settings", "help", "login", "recover", "privacy", "policies", "business", "ads", "profile.php"]);
+  const canonical = (value) => {
+    try {
+      const parsed = new URL(value, window.location.origin);
+      if (!/^https?:$/.test(parsed.protocol) || !/^(www\.|m\.)?facebook\.com$/i.test(parsed.hostname)) return null;
+      parsed.search = parsed.pathname.toLowerCase() === "/profile.php" ? parsed.search : "";
+      parsed.hash = "";
+      parsed.pathname = parsed.pathname.replace(/\/{2,}/g, "/").replace(/\/$/, "") || "/";
+      return parsed.toString().replace(/\/$/, "");
+    } catch { return null; }
+  };
+  const sourceUrl = canonical(sourcePageUrl) || canonical(currentUrl);
+  const items = [];
+  const seen = new Set();
+  for (const anchor of document.querySelectorAll("a[href]")) {
+    const url = canonical(anchor.href);
+    if (!url || url === sourceUrl || seen.has(url)) continue;
+    const parsed = new URL(url);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const first = (parts[0] || "").toLowerCase();
+    const isProfileId = first === "profile.php" && /^\d+$/.test(parsed.searchParams.get("id") || "");
+    const isPagePath = parts.length === 1 && !reserved.has(first);
+    const isPgPath = parts.length === 2 && first === "pg" && !reserved.has(parts[1].toLowerCase());
+    if (!isProfileId && !isPagePath && !isPgPath) continue;
+    const displayName = String(anchor.getAttribute("aria-label") || anchor.getAttribute("title") || anchor.innerText || "").replace(/\s+/g, " ").trim();
+    if (!displayName || /^(following|đang theo dõi|facebook|see more|xem thêm)$/i.test(displayName)) continue;
+    seen.add(url);
+    items.push({ url, displayName: displayName.slice(0, 160) });
+    if (items.length >= 100) break;
+  }
+  return { needsLogin: false, items, currentUrl };
+}
+
+function clickFacebookFollowingTab() {
+  const candidates = [...document.querySelectorAll('a, [role="button"], div[role="button"]')];
+  const target = candidates.find((node) => /^(following|đang theo dõi|đang follow|following pages|trang đang theo dõi)$/i.test(String(node.innerText || node.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim()));
+  if (!target) return false;
+  target.click();
+  return true;
+}
+
+async function scanFacebookFollowing(pageUrl) {
+  const normalizedUrl = normalizeFacebookPageUrl(pageUrl);
+  const browser = createFacebookWindow(normalizedUrl);
+  let keepOpen = false;
+  const candidates = [`${normalizedUrl}/following`, `${normalizedUrl}/?sk=following`, normalizedUrl];
+  let last = { needsLogin: false, items: [], currentUrl: normalizedUrl };
+  try {
+    for (const url of candidates) {
+      await browser.loadURL(url);
+      await delay(3000);
+      let page = await browser.webContents.executeJavaScript(`(${readFacebookFollowingDocument.toString()})(${JSON.stringify(normalizedUrl)})`, true);
+      if (page.needsLogin) { keepOpen = true; return { ...page, error: "FACEBOOK_AUTH_REQUIRED" }; }
+      await browser.webContents.executeJavaScript(`(${clickFacebookFollowingTab.toString()})()`, true).catch(() => false);
+      await delay(1200);
+      for (let index = 0; index < 4; index += 1) {
+        await browser.webContents.executeJavaScript("window.scrollTo(0, Math.min(document.body.scrollHeight, window.scrollY + Math.max(window.innerHeight * 0.85, 700)));", true);
+        await delay(900);
+        page = await browser.webContents.executeJavaScript(`(${readFacebookFollowingDocument.toString()})(${JSON.stringify(normalizedUrl)})`, true);
+        if (page.needsLogin) { keepOpen = true; return { ...page, error: "FACEBOOK_AUTH_REQUIRED" }; }
+        if (page.items.length > 0) break;
+      }
+      last = page;
+      if (page.items.length > 0) return { ...page, sourcePageUrl: normalizedUrl };
+    }
+    return { ...last, sourcePageUrl: normalizedUrl, error: "FACEBOOK_FOLLOWING_PAGES_NOT_FOUND" };
+  } finally {
+    if (!keepOpen && !browser.isDestroyed()) browser.close();
+  }
+}
+
+ipcMain.handle("facebook-browser:open", (_event, pageUrl) => {
+  createFacebookWindow(typeof pageUrl === "string" && pageUrl.trim() ? normalizeFacebookPageUrl(pageUrl) : "https://www.facebook.com/");
   return { status: "opened" };
 });
 ipcMain.handle("facebook-browser:scan", async (_event, entries) => {
   if (!Array.isArray(entries)) throw new Error("Danh sách đối thủ không hợp lệ.");
   const validEntries = entries.filter((entry) => entry && typeof entry.id === "string" && typeof entry.url === "string");
   return scanFacebookPages(validEntries, (progress) => sendProgress(_event, "facebook-browser:scan-progress", progress));
+});
+ipcMain.handle("facebook-browser:scan-following", async (_event, payload) => {
+  if (!payload || typeof payload.pageUrl !== "string") throw new Error("FACEBOOK_PAGE_URL_REQUIRED");
+  return scanFacebookFollowing(payload.pageUrl);
 });
 
 ipcMain.handle("gemini-browser:open", async (_event, prompt) => {

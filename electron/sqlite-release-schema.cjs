@@ -41,6 +41,16 @@ const STORYBOARD_SCENE_COLUMNS = [
   ["allowedTransformations", "JSONB"],
 ];
 
+const CHANNEL_COLUMNS = [
+  ["facebookPageUrl", "TEXT"],
+  ["facebookPageName", "TEXT"],
+  ["facebookPageExternalId", "TEXT"],
+];
+
+const COMPETITOR_COLUMNS = [
+  ["discoverySource", "TEXT NOT NULL DEFAULT 'MANUAL'"],
+];
+
 const REQUIRED_TABLES = [
   `CREATE TABLE IF NOT EXISTS "AutomationRun" (
     "id" TEXT NOT NULL PRIMARY KEY,
@@ -429,6 +439,8 @@ async function ensureBaseTables(client) {
 }
 
 async function ensureBaseColumns(client) {
+  for (const [column, definition] of CHANNEL_COLUMNS) await ensureColumn(client, "Channel", column, definition);
+  for (const [column, definition] of COMPETITOR_COLUMNS) await ensureColumn(client, "Competitor", column, definition);
   for (const [column, definition] of AUTOMATION_RUN_COLUMNS) await ensureColumn(client, "AutomationRun", column, definition);
   for (const [column, definition] of CONTENT_PROJECT_COLUMNS) await ensureColumn(client, "ContentProject", column, definition);
   for (const [column, definition] of STORYBOARD_SCENE_COLUMNS) await ensureColumn(client, "StoryboardScene", column, definition);
@@ -454,4 +466,4 @@ async function ensureSqliteReleaseSchema(client) {
   return { automationRunComplete: AUTOMATION_RUN_COLUMNS.every(([column]) => automationColumns.some((item) => item.name === column)), repairedForeignKeys, durationTypes: { competitorVideo: (await tableInfo(client, "CompetitorVideo")).find((item) => item.name === "duration")?.type, contentProject: (await tableInfo(client, "ContentProject")).find((item) => item.name === "sourceDuration")?.type } };
 }
 
-module.exports = { ensureSqliteReleaseSchema, repairStaleForeignKeys, tableInfo, tableExists, AUTOMATION_RUN_COLUMNS, CONTENT_PROJECT_COLUMNS, STORYBOARD_SCENE_COLUMNS, REQUIRED_TABLES, INDEXES };
+module.exports = { ensureSqliteReleaseSchema, repairStaleForeignKeys, tableInfo, tableExists, CHANNEL_COLUMNS, COMPETITOR_COLUMNS, AUTOMATION_RUN_COLUMNS, CONTENT_PROJECT_COLUMNS, STORYBOARD_SCENE_COLUMNS, REQUIRED_TABLES, INDEXES };

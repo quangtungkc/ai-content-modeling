@@ -1,0 +1,1 @@
+ALTER TABLE "Competitor" ADD COLUMN "discoverySource" TEXT NOT NULL DEFAULT 'MANUAL';

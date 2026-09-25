@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.21 — 2026-09-25
+
+### Added
+
+- Channels can now store a linked Facebook Page URL and open that Page in the app's persistent Facebook browser session for user-controlled login and Page-profile switching.
+- Added CDP scanning of the linked Page's visible following list, with discovered competitors persisted as `FOLLOWING_PAGE` and manual competitors preserved as `MANUAL`.
+- Added Facebook Page URL validation, SQLite upgrade columns for existing installations, and UI labels for following-page discoveries.
+
+### Validation
+
+- Full regression suite: 88 test files, 934/934 tests passed.
+- Production Next.js build, typecheck, lint, Prisma generation/validation, and Electron/CDP syntax checks passed.
+- Direct CDP smoke test confirmed the new UI and IPC route; the scan stopped safely at `FACEBOOK_AUTH_REQUIRED` when the isolated Facebook session was not logged in.
+
 ## 1.0.19 — 2026-09-25
 
 ### Fixed

@@ -5,7 +5,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 // preload while the main process continues to use ipc-contract.cjs.
 const INVOKE_CHANNELS = Object.freeze([
   "desktop-app:version", "desktop-auth:clear", "desktop-auth:save", "desktop-update:check", "desktop-update:download", "desktop-update:install",
-  "facebook-browser:open", "facebook-browser:scan", "flow-browser:prepare-manual-submission", "flow-browser:resume-after-manual-submission", "flow-browser:run-image-job",
+  "facebook-browser:open", "facebook-browser:scan", "facebook-browser:scan-following", "flow-browser:prepare-manual-submission", "flow-browser:resume-after-manual-submission", "flow-browser:run-image-job",
   "gemini-browser:analyze-source", "gemini-browser:copy", "gemini-browser:develop-project", "gemini-browser:generate-idea", "gemini-browser:import-images", "gemini-browser:open", "gemini-browser:open-flow", "gemini-browser:run-job", "gemini-browser:run-video-job", "desktop-images:validate-project",
   "runtime-error:report", "video-editor:pick-audio", "video-editor:render-final",
 ]);
@@ -60,12 +60,13 @@ contextBridge.exposeInMainWorld("desktopUpdater", {
 });
 
 contextBridge.exposeInMainWorld("desktopFacebook", {
-  open: () => invoke("facebook-browser:open"),
+  open: (pageUrl) => invoke("facebook-browser:open", pageUrl),
   scan: (entries, onProgress) => {
     const handler = (_event, progress) => onProgress?.(progress);
     ipcRenderer.on("facebook-browser:scan-progress", handler);
     return invoke("facebook-browser:scan", entries).finally(() => ipcRenderer.removeListener("facebook-browser:scan-progress", handler));
   },
+  scanFollowing: (pageUrl) => invoke("facebook-browser:scan-following", { pageUrl }),
 });
 
 contextBridge.exposeInMainWorld("desktopGemini", {

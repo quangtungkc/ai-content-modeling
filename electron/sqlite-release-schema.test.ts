@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { PrismaClient } from "@prisma/client";
 import { describe, expect, it } from "vitest";
-import { AUTOMATION_RUN_COLUMNS, ensureSqliteReleaseSchema } from "./sqlite-release-schema.cjs";
+import { AUTOMATION_RUN_COLUMNS, CHANNEL_COLUMNS, COMPETITOR_COLUMNS, ensureSqliteReleaseSchema } from "./sqlite-release-schema.cjs";
 
 function clientFor(filePath: string) {
   return new PrismaClient({ datasources: { db: { url: `file:${filePath.replace(/\\/g, "/")}` } } });
@@ -35,6 +35,10 @@ describe("SQLite release schema reconciliation", () => {
     try {
       await createOldDb(client);
       await ensureSqliteReleaseSchema(client);
+      const channelColumns = await columns(client, "Channel");
+      const competitorColumns = await columns(client, "Competitor");
+      expect(CHANNEL_COLUMNS.every(([name]) => channelColumns.some((column) => column.name === name))).toBe(true);
+      expect(COMPETITOR_COLUMNS.every(([name]) => competitorColumns.some((column) => column.name === name))).toBe(true);
       const automation = await columns(client, "AutomationRun");
       expect(AUTOMATION_RUN_COLUMNS.every(([name]) => automation.some((column) => column.name === name))).toBe(true);
       expect((await columns(client, "CompetitorVideo")).find(column => column.name === "duration")?.type).toBe("REAL");
