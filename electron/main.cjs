@@ -2459,7 +2459,7 @@ function readFacebookFollowingDocument(sourcePageUrl) {
   const currentUrl = window.location.href;
   const bodyText = String(document.body?.innerText || "");
   if (currentUrl.includes("/login") || /\b(log in|đăng nhập)\b/i.test(bodyText)) return { needsLogin: true, items: [], currentUrl };
-  const reserved = new Set(["", "home", "pages", "groups", "events", "watch", "reels", "marketplace", "gaming", "friends", "notifications", "messages", "search", "photo", "photos", "story", "stories", "share", "permalink", "settings", "help", "login", "recover", "privacy", "policies", "business", "ads", "profile.php"]);
+  const reserved = new Set(["", "home", "pages", "groups", "events", "watch", "reel", "reels", "marketplace", "gaming", "friends", "notifications", "messages", "search", "photo", "photos", "story", "stories", "share", "permalink", "settings", "help", "login", "recover", "privacy", "policies", "business", "ads", "profile.php"]);
   const canonical = (value) => {
     try {
       const parsed = new URL(value, window.location.origin);
@@ -2489,7 +2489,15 @@ function readFacebookFollowingDocument(sourcePageUrl) {
     items.push({ url, displayName: displayName.slice(0, 160) });
     if (items.length >= 100) break;
   }
-  return { needsLogin: false, items, currentUrl };
+  const followingLink = [...document.querySelectorAll("a[href]")].find((anchor) => {
+    try {
+      const url = new URL(anchor.href);
+      return url.pathname.replace(/\/$/, "").toLowerCase() === new URL(sourcePageUrl).pathname.replace(/\/$/, "").toLowerCase() + "/following" && /\d/.test(anchor.innerText || "");
+    } catch { return false; }
+  });
+  const countText = String(followingLink?.innerText || "").replace(/[,\.\s]/g, "");
+  const expectedCount = Number.parseInt(countText.match(/^\d+/)?.[0] || "", 10);
+  return { needsLogin: false, items, currentUrl, expectedCount: Number.isFinite(expectedCount) ? expectedCount : null };
 }
 
 function clickFacebookFollowingTab() {
@@ -2505,7 +2513,7 @@ async function scanFacebookFollowing(pageUrl) {
   const browser = createFacebookWindow(normalizedUrl);
   let keepOpen = false;
   const candidates = [`${normalizedUrl}/following`, `${normalizedUrl}/?sk=following`, normalizedUrl];
-  let last = { needsLogin: false, items: [], currentUrl: normalizedUrl };
+  let last = { needsLogin: false, items: [], currentUrl: normalizedUrl, expectedCount: null };
   try {
     for (const url of candidates) {
       await browser.loadURL(url);
@@ -2514,17 +2522,32 @@ async function scanFacebookFollowing(pageUrl) {
       if (page.needsLogin) { keepOpen = true; return { ...page, error: "FACEBOOK_AUTH_REQUIRED" }; }
       await browser.webContents.executeJavaScript(`(${clickFacebookFollowingTab.toString()})()`, true).catch(() => false);
       await delay(1200);
-      for (let index = 0; index < 4; index += 1) {
-        await browser.webContents.executeJavaScript("window.scrollTo(0, Math.min(document.body.scrollHeight, window.scrollY + Math.max(window.innerHeight * 0.85, 700)));", true);
-        await delay(900);
+      const discovered = new Map();
+      let expectedCount = null;
+      let unchangedRounds = 0;
+      let previousHeight = -1;
+      let previousCount = -1;
+      for (let index = 0; index < 40; index += 1) {
         page = await browser.webContents.executeJavaScript(`(${readFacebookFollowingDocument.toString()})(${JSON.stringify(normalizedUrl)})`, true);
         if (page.needsLogin) { keepOpen = true; return { ...page, error: "FACEBOOK_AUTH_REQUIRED" }; }
-        if (page.items.length > 0) break;
+        for (const item of page.items) discovered.set(item.url, item);
+        if (Number.isInteger(page.expectedCount)) expectedCount = page.expectedCount;
+        const height = await browser.webContents.executeJavaScript("document.documentElement.scrollHeight", true);
+        if (expectedCount !== null && discovered.size >= expectedCount) break;
+        unchangedRounds = height === previousHeight && discovered.size === previousCount ? unchangedRounds + 1 : 0;
+        // Facebook may show a loading spinner for several seconds before the next
+        // batch appears. Do not treat three unchanged polls as the end of the list.
+        if (unchangedRounds >= (expectedCount === null ? 8 : 18)) break;
+        previousHeight = height;
+        previousCount = discovered.size;
+        await browser.webContents.executeJavaScript("window.scrollTo(0, document.documentElement.scrollHeight)", true);
+        await delay(1000);
       }
-      last = page;
-      if (page.items.length > 0) return { ...page, sourcePageUrl: normalizedUrl };
+      last = { ...page, items: [...discovered.values()], expectedCount, sourcePageUrl: normalizedUrl };
+      if (expectedCount !== null && discovered.size >= expectedCount) return last;
+      if (discovered.size > 0 && expectedCount === null) return { ...last, error: "FACEBOOK_FOLLOWING_COUNT_UNVERIFIED" };
     }
-    return { ...last, sourcePageUrl: normalizedUrl, error: "FACEBOOK_FOLLOWING_PAGES_NOT_FOUND" };
+    return { ...last, sourcePageUrl: normalizedUrl, missingCount: Math.max(0, (last.expectedCount || 0) - last.items.length), error: last.items.length ? "FACEBOOK_FOLLOWING_INCOMPLETE" : "FACEBOOK_FOLLOWING_PAGES_NOT_FOUND" };
   } finally {
     if (!keepOpen && !browser.isDestroyed()) browser.close();
   }

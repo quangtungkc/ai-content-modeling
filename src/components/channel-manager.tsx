@@ -41,7 +41,7 @@ type Competitor = {
 
 type DesktopFacebook = {
   open: (pageUrl?: string) => Promise<{ status: string }>;
-  scanFollowing: (pageUrl: string) => Promise<{ needsLogin: boolean; items: Array<{ url: string; displayName: string }>; error?: string }>;
+  scanFollowing: (pageUrl: string) => Promise<{ needsLogin: boolean; items: Array<{ url: string; displayName: string }>; expectedCount?: number | null; missingCount?: number; error?: string }>;
 };
 
 const emptyChannel: Omit<Channel, "id"> = {
@@ -654,6 +654,7 @@ function CompetitorManager({
   const [bulkMessage, setBulkMessage] = useState("");
   const [isImporting, setIsImporting] = useState(false);
   const [isScanningFollowing, setIsScanningFollowing] = useState(false);
+  const [followingFailures, setFollowingFailures] = useState<Array<{ url: string; reason: string }>>([]);
   useEffect(() => {
     fetch(`/api/v1/channels/${channel.id}/competitors`)
       .then(async (response) => {
@@ -674,8 +675,8 @@ function CompetitorManager({
     // The parent callback is intentionally not a dependency: it is an inline state adapter.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channel.id]);
-  async function createCompetitor(value: string, source: "MANUAL" | "FOLLOWING_PAGE" = "MANUAL") {
-    const response = await fetch(`/api/v1/channels/${channel.id}/competitors`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: value, source }) });
+  async function createCompetitor(value: string, source: "MANUAL" | "FOLLOWING_PAGE" = "MANUAL", displayName?: string) {
+    const response = await fetch(`/api/v1/channels/${channel.id}/competitors`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: value, source, displayName }) });
     const body = (await response.json()) as { data?: Record<string, unknown>; error?: { message?: string } };
     if (!response.ok || !body.data) throw new Error(body.error?.message ?? "Không thể thêm đối thủ.");
     return toUiCompetitor(body.data);
@@ -684,7 +685,7 @@ function CompetitorManager({
     const browser = (window as Window & { desktopFacebook?: DesktopFacebook }).desktopFacebook;
     if (!browser) { setError("Quét Page đang theo dõi chỉ chạy trong ứng dụng Desktop."); return; }
     if (!channel.facebookPageUrl) { setError("Channel chưa có Facebook Page URL. Hãy đóng cửa sổ này, bấm Sửa và nhập Page URL trước."); return; }
-    setError(""); setBulkMessage(""); setIsScanningFollowing(true);
+    setError(""); setBulkMessage(""); setFollowingFailures([]); setIsScanningFollowing(true);
     try {
       const result = await browser.scanFollowing(channel.facebookPageUrl);
       if (result.needsLogin) {
@@ -692,17 +693,20 @@ function CompetitorManager({
         return;
       }
       const nextItems = [...items];
-      const failures: string[] = [];
+      const failures: Array<{ url: string; reason: string }> = [];
       for (const item of result.items) {
         try {
-          const created = await createCompetitor(item.url, "FOLLOWING_PAGE");
-          if (!nextItems.some((current) => current.id === created.id)) nextItems.push(created);
+          const created = await createCompetitor(item.url, "FOLLOWING_PAGE", item.displayName);
+          const index = nextItems.findIndex((current) => current.id === created.id);
+          if (index < 0) nextItems.push(created);
+          else nextItems[index] = created;
         } catch (caught) {
-          failures.push(item.displayName || item.url);
+          failures.push({ url: item.url, reason: caught instanceof Error ? caught.message : "Không thể lưu đối thủ." });
         }
       }
       onChange(nextItems);
-      setBulkMessage(`Đã phát hiện ${result.items.length} Page đang theo dõi, thêm mới ${nextItems.length - items.length} đối thủ.${failures.length ? ` Bỏ qua ${failures.length} mục trùng hoặc không hợp lệ.` : ""}${result.error ? ` ${result.error}` : ""}`);
+      setFollowingFailures(failures);
+      setBulkMessage(`Facebook hiển thị ${result.expectedCount ?? "chưa rõ"} Page; quét được ${result.items.length} URL, thêm mới ${nextItems.length - items.length}, lỗi ${failures.length}.${result.error ? ` ${result.error}${result.missingCount ? ` (thiếu ${result.missingCount} URL)` : ""}.` : ""}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Không thể quét Page đang theo dõi.");
     } finally {
@@ -821,6 +825,7 @@ function CompetitorManager({
           </div>
           {!channel.facebookPageUrl && <p className="mt-2 text-xs text-amber-700">Chưa có Facebook Page liên kết. Hãy nhập URL trong Sửa kênh.</p>}
         </div>
+        {followingFailures.length > 0 && <div className="mt-3 rounded-lg border border-rose-300 bg-rose-50 p-3 text-xs text-rose-900"><strong>Page không lưu được:</strong><ul className="mt-2 space-y-1">{followingFailures.map((failure) => <li key={failure.url}><a href={failure.url} target="_blank" rel="noreferrer" className="break-all underline">{failure.url}</a> — {failure.reason}</li>)}</ul></div>}
         <div className="mt-3 rounded-lg border border-dashed border-white/15 bg-white/[.03] p-3">
           <label className="flex cursor-pointer items-center justify-between gap-3 text-sm text-slate-300"><span><strong className="text-white">Thêm hàng loạt từ file TXT</strong><span className="mt-1 block text-xs text-slate-500">Mỗi dòng một URL, tối đa 50 URL.</span></span><span className="rounded-lg border border-cyan-400/40 px-3 py-2 text-xs font-semibold text-cyan-300">{isImporting ? "Đang thêm..." : "Chọn file .txt"}</span><input type="file" accept=".txt,text/plain" className="sr-only" disabled={isImporting} onChange={(event) => void importTxt(event)} /></label>
         </div>

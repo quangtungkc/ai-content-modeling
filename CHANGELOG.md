@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.22 — 2026-09-25
+
+### Fixed
+
+- Facebook Page following scans now continue through lazy-loaded batches instead of stopping at the first visible batch.
+- Navigation routes such as `/reel` are excluded from competitor results.
+- Existing following-page competitors are updated idempotently instead of reported as duplicate failures.
+- The scan reports incomplete collection and per-URL persistence failures so no partial result is presented as complete.
+
+### Validation
+
+- Focused Facebook following regression tests: 3/3 passed, including slow-loading pagination.
+- Competitor URL/schema tests: 7/7 passed.
+- Typecheck and production Next.js build passed; existing lint warnings remain unchanged.
+- Live CDP verification matched all 35 currently displayed Facebook following URLs; app data contains 38 active competitors in total.
+
 ## 1.0.21 — 2026-09-25
 
 ### Added
